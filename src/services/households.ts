@@ -27,3 +27,24 @@ export async function inviteFamilyMember(
   if (error) throw error;
   return data;
 }
+
+export async function listHouseholdMembers(householdId: string) {
+  const { data, error } = await supabase
+    .from('household_members')
+    .select('user_id, role, joined_at, profiles(display_name, avatar_url)')
+    .eq('household_id', householdId)
+    .order('joined_at', { ascending: true });
+  if (error) throw error;
+  return data;
+}
+
+export async function listInvitations(householdId: string) {
+  const { data, error } = await supabase
+    .from('invitations')
+    .select('id, email, role, status, expires_at')
+    .eq('household_id', householdId)
+    .eq('status', 'pending')
+    .order('created_at', { ascending: false });
+  if (error) throw error;
+  return data;
+}

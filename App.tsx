@@ -1,4 +1,5 @@
 import AuthGate from './src/components/AuthGate';
+import FamilyHub from './src/components/FamilyHub';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -23,7 +24,7 @@ import {
 
 type Theme = ReturnType<typeof createTheme>;
 type Tab = 'Today' | 'Calendar' | 'Chores' | 'Chat' | 'More';
-type MoreView = 'Menu' | 'Notes' | 'Recaps' | 'Integrations' | 'Settings';
+type MoreView = 'Menu' | 'Family' | 'Notes' | 'Recaps' | 'Integrations' | 'Settings';
 
 const family = [
   { initials: 'CC', name: 'Chad', status: 'At work', color: '#DCE7FF', ink: '#2257F4' },
@@ -140,6 +141,7 @@ function HomeThreadApp() {
           {tab === 'Chores' && <ChoresScreen styles={styles} chores={chores} onToggle={(id: string) => setChores((items) => items.map((item) => item.id === id ? { ...item, done: !item.done } : item))} />}
           {tab === 'Chat' && <ChatScreen styles={styles} messages={messages} draft={messageDraft} setDraft={setMessageDraft} onSend={sendMessage} />}
           {tab === 'More' && moreView === 'Menu' && <MoreMenu styles={styles} setView={setMoreView} />}
+          {tab === 'More' && moreView === 'Family' && <FamilyHub />}
           {tab === 'More' && moreView === 'Notes' && <NotesScreen styles={styles} />}
           {tab === 'More' && moreView === 'Recaps' && <RecapsScreen styles={styles} />}
           {tab === 'More' && moreView === 'Integrations' && <IntegrationsScreen styles={styles} connected={connected} onConnect={(name: string) => name === 'iOS Notifications' ? enableNotifications() : (setConnected((current) => ({ ...current, [name]: !current[name] })), showNotice(`${name} connection updated`))} />}
@@ -219,6 +221,7 @@ function ChatScreen({ styles, messages, draft, setDraft, onSend }: any) {
 
 function MoreMenu({ styles, setView }: any) {
   const items = [
+    ['Family', 'people-outline', '#2257F4', 'Members, roles, and family invitations'],
     ['Notes', 'document-text-outline', '#7C4DFF', 'Lists, instructions, and family details'],
     ['Recaps', 'sparkles-outline', '#2257F4', 'Daily summaries by push and email'],
     ['Integrations', 'extension-puzzle-outline', '#19A47B', 'Skylight, calendars, email, and more'],
