@@ -5,6 +5,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as Notifications from 'expo-notifications';
 import { StatusBar } from 'expo-status-bar';
+import { ShareIntentProvider, useShareIntentContext } from 'expo-share-intent';
 import { useEffect, useMemo, useState } from 'react';
 import {
   FlatList,
@@ -59,6 +60,7 @@ Notifications.setNotificationHandler({
 });
 
 function HomeThreadApp() {
+  const { hasShareIntent, shareIntent, resetShareIntent, error: shareError } = useShareIntentContext();
   const systemScheme = useColorScheme();
   const [dark, setDark] = useState(systemScheme === 'dark');
   const [tab, setTab] = useState<Tab>('Today');
@@ -76,12 +78,21 @@ function HomeThreadApp() {
   const [botDraft, setBotDraft] = useState<BotDraft | null>(null);
   const [botEvents, setBotEvents] = useState<BotEvent[]>([]);
   const [connected, setConnected] = useState<Record<string, boolean>>({ 'Apple Calendar': true, 'iOS Notifications': true });
+  const [sharePreviewOpen, setSharePreviewOpen] = useState(false);
+  const [sharedDraft, setSharedDraft] = useState('');
 
   useEffect(() => {
     AsyncStorage.getItem('homethread-theme').then((saved) => {
       if (saved) setDark(saved === 'dark');
     });
   }, []);
+
+  useEffect(() => {
+    if (!hasShareIntent) return;
+    const incoming = shareIntent as any;
+    setSharedDraft((incoming?.text || incoming?.webUrl || '').trim());
+    setSharePreviewOpen(true);
+  }, [hasShareIntent, shareIntent]);
 
   const theme = useMemo(() => createTheme(dark), [dark]);
   const styles = useMemo(() => createStyles(theme), [theme]);
@@ -114,6 +125,31 @@ function HomeThreadApp() {
     setMessages((current) => [...current, { id: String(Date.now()), mine: true, author: 'You', text }]);
     setMessageDraft('');
     handleBotMessage(text);
+  }
+
+  function cancelSharedItem() {
+    setSharePreviewOpen(false);
+    setSharedDraft('');
+    resetShareIntent();
+  }
+
+  function sendSharedItemToCue() {
+    const incoming = shareIntent as any;
+    const hasImage = Boolean(incoming?.files?.length);
+    const text = sharedDraft.trim();
+    setSharePreviewOpen(false);
+    resetShareIntent();
+    setTab('Chat');
+    if (!text) {
+      addBotMessage(hasImage
+        ? 'I received the screenshot, but image reading is not connected yet. Type the event details here and I’ll help add them.'
+        : 'I did not receive any readable text. Nothing was saved.');
+      return;
+    }
+    const prompt = text.match(/^\s*(@bot|hey bot)/i) ? text : `@bot ${text}`;
+    setMessages((current) => [...current, { id: `shared-${Date.now()}`, mine: true, author: 'You', text: prompt }]);
+    setTimeout(() => handleBotMessage(prompt), 50);
+    setSharedDraft('');
   }
 
   function handleBotMessage(text: string) {
@@ -226,6 +262,17 @@ function HomeThreadApp() {
         onSave={saveQuickAdd}
         dark={dark}
       />
+      <ShareToCueModal
+        visible={sharePreviewOpen}
+        styles={styles}
+        dark={dark}
+        value={sharedDraft}
+        onChange={setSharedDraft}
+        hasImage={Boolean((shareIntent as any)?.files?.length)}
+        error={shareError}
+        onCancel={cancelSharedItem}
+        onApprove={sendSharedItemToCue}
+      />
     </SafeAreaView>
   );
 }
@@ -335,6 +382,28 @@ function QuickAddModal({ visible, onClose, styles, type, setType, title, setTitl
   return <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}><KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.modalBackdrop}><Pressable style={styles.modalDismiss} onPress={onClose} /><View style={styles.modalSheet}><View style={styles.modalHandle} /><View style={styles.modalHead}><View><Text style={styles.eyebrow}>QUICK ADD</Text><Text style={styles.modalTitle}>Share with the family</Text></View><Pressable onPress={onClose} style={styles.iconButton}><Ionicons name="close" size={21} color={styles.iconColor.color} /></Pressable></View><View style={styles.typeTabs}>{['Event', 'Chore', 'Note', 'Message'].map((item) => <Pressable key={item} onPress={() => setType(item)} style={[styles.typeTab, type === item && styles.typeTabActive]}><Text style={[styles.typeTabText, type === item && styles.typeTabTextActive]}>{item}</Text></Pressable>)}</View><Text style={styles.fieldLabel}>{type} title</Text><TextInput value={title} onChangeText={setTitle} autoFocus placeholder={`Add a ${type.toLowerCase()}…`} placeholderTextColor="#8B93A5" style={styles.modalInput} /><Text style={styles.fieldLabel}>Details</Text><TextInput multiline placeholder="Location, instructions, links, or anything the family should know" placeholderTextColor="#8B93A5" style={[styles.modalInput, styles.modalTextArea]} /><Pressable onPress={onSave} style={styles.saveButton}><Text style={styles.saveButtonText}>Add {type.toLowerCase()}</Text></Pressable></View><StatusBar style={dark ? 'light' : 'dark'} /></KeyboardAvoidingView></Modal>;
 }
 
+function ShareToCueModal({ visible, styles, dark, value, onChange, hasImage, error, onCancel, onApprove }: any) {
+  return <Modal visible={visible} transparent animationType="slide" onRequestClose={onCancel}>
+    <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.modalBackdrop}>
+      <Pressable style={styles.modalDismiss} onPress={onCancel} />
+      <View style={styles.modalSheet}>
+        <View style={styles.modalHandle} />
+        <View style={styles.modalHead}>
+          <View style={styles.flex}><Text style={styles.eyebrow}>ONLY THIS ITEM</Text><Text style={styles.modalTitle}>Share to Cue</Text></View>
+          <Pressable accessibilityLabel="Cancel sharing" onPress={onCancel} style={styles.iconButton}><Ionicons name="close" size={21} color={styles.iconColor.color} /></Pressable>
+        </View>
+        <View style={styles.privacyCard}><Ionicons name="shield-checkmark" size={20} color="#19A47B" /><Text style={styles.privacyText}>KinCue receives only what you selected—not the conversation. The shared content is discarded if you cancel.</Text></View>
+        {hasImage && <View style={styles.sharedAttachment}><Ionicons name="image-outline" size={20} color="#7047EE" /><View style={styles.flex}><Text style={styles.settingTitle}>Screenshot attached</Text><Text style={styles.muted}>Image reading is not connected yet. Add the event details below.</Text></View></View>}
+        <Text style={styles.fieldLabel}>REVIEW OR EDIT BEFORE SENDING</Text>
+        <TextInput value={value} onChangeText={onChange} multiline placeholder={hasImage ? 'Example: Haircut for Chad Wednesday at 9:30 AM' : 'Selected text or link'} placeholderTextColor="#8B93A5" style={[styles.modalInput, styles.sharePreviewInput]} />
+        {error && <Text style={styles.shareError}>The shared item could not be read. Nothing has been saved.</Text>}
+        <View style={styles.shareActions}><Pressable onPress={onCancel} style={styles.cancelButton}><Text style={styles.cancelButtonText}>Cancel</Text></Pressable><Pressable onPress={onApprove} style={styles.approveButton}><Ionicons name="sparkles" size={16} color="#fff" /><Text style={styles.saveButtonText}>Ask Cue</Text></Pressable></View>
+      </View>
+      <StatusBar style={dark ? 'light' : 'dark'} />
+    </KeyboardAvoidingView>
+  </Modal>;
+}
+
 function createTheme(dark: boolean) {
   return dark ? { dark: true, canvas: '#101624', surface: '#171F30', surfaceStrong: '#1D273A', text: '#F7F8FC', muted: '#AEB8CB', line: '#2B3850', primary: '#6687FF' } : { dark: false, canvas: '#FFF8E9', surface: '#FFFDF8', surfaceStrong: '#FFFFFF', text: '#14213D', muted: '#6D7486', line: '#EADFC9', primary: '#2257F4' };
 }
@@ -363,10 +432,11 @@ function createStyles(t: Theme) {
     automationCard: { minHeight: 90, borderRadius: 20, padding: 16, flexDirection: 'row', gap: 12, alignItems: 'center' }, automationLabel: { color: '#FFFFFFA8', fontSize: 7, fontWeight: '800', letterSpacing: 1 }, automationTitle: { color: '#fff', fontSize: 12, fontWeight: '800', lineHeight: 17, marginTop: 3 }, integrationRow: { minHeight: 78, borderRadius: 18, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, padding: 12, flexDirection: 'row', alignItems: 'center', gap: 10 }, integrationIcon: { width: 43, height: 43, borderRadius: 14, alignItems: 'center', justifyContent: 'center' }, integrationTitle: { color: t.text, fontSize: 12, fontWeight: '800' }, connectButton: { minHeight: 31, borderRadius: 10, borderWidth: 1, borderColor: t.primary, paddingHorizontal: 9, alignItems: 'center', justifyContent: 'center' }, connectedButton: { borderColor: '#19A47B', backgroundColor: '#19A47B12' }, connectText: { color: t.primary, fontSize: 8, fontWeight: '800' }, connectedText: { color: '#19A47B' },
     personSetting: { minHeight: 65, borderRadius: 17, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, padding: 11, flexDirection: 'row', alignItems: 'center', gap: 10 }, settingRow: { minHeight: 70, borderRadius: 17, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, padding: 13, flexDirection: 'row', alignItems: 'center', gap: 11 }, settingTitle: { color: t.text, fontSize: 12, fontWeight: '800' },
     modalBackdrop: { flex: 1, backgroundColor: '#0C111D88', justifyContent: 'flex-end' }, modalDismiss: { flex: 1 }, modalSheet: { backgroundColor: t.surfaceStrong, borderTopLeftRadius: 28, borderTopRightRadius: 28, paddingHorizontal: 19, paddingTop: 9, paddingBottom: Platform.OS === 'ios' ? 28 : 18 }, modalHandle: { width: 39, height: 4, borderRadius: 2, backgroundColor: t.line, alignSelf: 'center', marginBottom: 15 }, modalHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' }, modalTitle: { color: t.text, fontSize: 23, fontWeight: '800', letterSpacing: -.7 }, typeTabs: { flexDirection: 'row', borderRadius: 14, padding: 4, backgroundColor: t.canvas, marginTop: 19 }, typeTab: { flex: 1, minHeight: 38, borderRadius: 10, alignItems: 'center', justifyContent: 'center' }, typeTabActive: { backgroundColor: t.surfaceStrong }, typeTabText: { color: t.muted, fontSize: 10, fontWeight: '700' }, typeTabTextActive: { color: t.primary }, fieldLabel: { color: t.muted, fontSize: 9, fontWeight: '800', marginTop: 15, marginBottom: 6 }, modalInput: { minHeight: 46, borderRadius: 13, borderWidth: 1, borderColor: t.line, backgroundColor: t.surface, color: t.text, paddingHorizontal: 12 }, modalTextArea: { minHeight: 83, paddingTop: 12, textAlignVertical: 'top' }, saveButton: { minHeight: 48, borderRadius: 15, backgroundColor: t.primary, alignItems: 'center', justifyContent: 'center', marginTop: 18 }, saveButtonText: { color: '#fff', fontSize: 12, fontWeight: '800' },
+    privacyCard: { minHeight: 66, borderRadius: 16, padding: 12, marginTop: 16, flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: '#19A47B12', borderWidth: 1, borderColor: '#19A47B35' }, privacyText: { color: t.text, fontSize: 10, lineHeight: 15, flex: 1, fontWeight: '600' }, sharedAttachment: { minHeight: 62, borderRadius: 15, padding: 12, marginTop: 10, flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line }, sharePreviewInput: { minHeight: 110, paddingTop: 12, textAlignVertical: 'top' }, shareError: { color: '#D64545', fontSize: 10, marginTop: 8 }, shareActions: { flexDirection: 'row', gap: 10, marginTop: 16 }, cancelButton: { flex: 1, minHeight: 48, borderRadius: 15, borderWidth: 1, borderColor: t.line, alignItems: 'center', justifyContent: 'center' }, cancelButtonText: { color: t.text, fontSize: 12, fontWeight: '800' }, approveButton: { flex: 1.4, minHeight: 48, borderRadius: 15, backgroundColor: t.primary, flexDirection: 'row', gap: 7, alignItems: 'center', justifyContent: 'center' },
   });
 }
 
 
 export default function App() {
-  return <AuthGate><HomeThreadApp /></AuthGate>;
+  return <ShareIntentProvider><AuthGate><HomeThreadApp /></AuthGate></ShareIntentProvider>;
 }
