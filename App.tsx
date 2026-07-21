@@ -63,7 +63,7 @@ Notifications.setNotificationHandler({
   }),
 });
 
-function HomeThreadApp() {
+function CohoApp() {
   const { hasShareIntent, shareIntent, resetShareIntent, error: shareError } = useShareIntentContext();
   const systemScheme = useColorScheme();
   const [dark, setDark] = useState(systemScheme === 'dark');
@@ -124,7 +124,7 @@ function HomeThreadApp() {
   }
 
   function addBotMessage(text: string) {
-    setTimeout(() => setMessages((current) => [...current, { id: `bot-${Date.now()}`, mine: false, author: 'HomeBot', text, bot: true }]), 250);
+    setTimeout(() => setMessages((current) => [...current, { id: `bot-${Date.now()}`, mine: false, author: 'Coh', text, bot: true }]), 250);
   }
 
   function sendMessage() {
@@ -154,7 +154,7 @@ function HomeThreadApp() {
         : 'I did not receive any readable text. Nothing was saved.');
       return;
     }
-    const prompt = text.match(/^\s*(@bot|hey bot)/i) ? text : `@bot ${text}`;
+    const prompt = text.match(/^\s*(@coh|hey coh|@bot|hey bot)/i) ? text : `@coh ${text}`;
     setMessages((current) => [...current, { id: `shared-${Date.now()}`, mine: true, author: 'You', text: prompt }]);
     setTimeout(() => handleBotMessage(prompt), 50);
     setSharedDraft('');
@@ -162,12 +162,12 @@ function HomeThreadApp() {
 
   function handleBotMessage(text: string) {
     const normalized = text.trim().toLowerCase();
-    if (!botDraft && !normalized.startsWith('@bot') && !normalized.startsWith('hey bot')) return;
+    if (!botDraft && !normalized.startsWith('@coh') && !normalized.startsWith('hey coh') && !normalized.startsWith('@bot') && !normalized.startsWith('hey bot')) return;
 
     if (!botDraft) {
       const request = parseBotEvent(text);
       if (!request) {
-        addBotMessage('I can add events, reminders, chores, and notes. Try “@bot haircut for Chad on Wednesday at 9:30 AM.”');
+        addBotMessage('I can add events, reminders, chores, and notes. Try “Hey Coh, haircut for Chad on Wednesday at 9:30 AM.”');
         return;
       }
       setBotDraft({ ...request, step: 'place' });
@@ -207,7 +207,7 @@ function HomeThreadApp() {
       setBotEvents((current) => [...current, event]);
       setBotDraft(null);
       addBotMessage(`Done — I created the event and added it to the family calendar.${event.directions && event.place ? ` Directions to ${event.place} are included.` : ''}`);
-      showNotice('HomeBot added an event to the family calendar');
+      showNotice('Coh added an event to the family calendar');
     }
   }
 
@@ -215,7 +215,7 @@ function HomeThreadApp() {
     const permission = await Notifications.requestPermissionsAsync();
     if (permission.granted) {
       await Notifications.scheduleNotificationAsync({
-        content: { title: 'HomeThread is ready', body: 'Family reminders and daily recaps are now enabled.' },
+        content: { title: 'Coho is ready', body: 'Family reminders and daily recaps are now enabled.' },
         trigger: null,
       });
       setConnected((current) => ({ ...current, 'iOS Notifications': true }));
@@ -246,7 +246,7 @@ function HomeThreadApp() {
     }
     if (chiefPrefs.weekAhead && chiefPrefs.push) {
       const { hour, minute } = parseClock(chiefPrefs.weekAheadTime);
-      ids.push(await Notifications.scheduleNotificationAsync({ content: { title: 'Your full week ahead', body: 'Open KinCue for the family schedule, preparation list, and conflicts.' }, trigger: { type: Notifications.SchedulableTriggerInputTypes.WEEKLY, weekday: weekdayNumber(chiefPrefs.weekAheadDay), hour, minute } }));
+      ids.push(await Notifications.scheduleNotificationAsync({ content: { title: 'Your full week ahead', body: 'Open Coho for the family schedule, preparation list, and conflicts.' }, trigger: { type: Notifications.SchedulableTriggerInputTypes.WEEKLY, weekday: weekdayNumber(chiefPrefs.weekAheadDay), hour, minute } }));
     }
     if (chiefPrefs.followUp && chiefPrefs.push) {
       const { hour, minute } = parseClock(chiefPrefs.followUpTime);
@@ -365,11 +365,11 @@ function ChoresScreen({ styles, chores, onToggle }: any) {
 }
 
 function ChatScreen({ styles, messages, draft, setDraft, onSend }: any) {
-  return <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'height' : undefined} keyboardVerticalOffset={0} style={styles.flex}><FlatList data={messages} keyExtractor={(item) => item.id} contentContainerStyle={styles.messageList} keyboardDismissMode="interactive" keyboardShouldPersistTaps="handled" renderItem={({ item }) => <View style={[styles.messageWrap, item.mine && styles.messageMine]}>{!item.mine && <View style={[styles.avatar, item.bot ? styles.botAvatar : styles.chatAvatar]}>{item.bot ? <Ionicons name="sparkles" size={17} color="#fff" /> : <Text style={styles.avatarText}>LC</Text>}</View>}<View style={styles.messageBody}><Text style={[styles.messageAuthor, item.mine && styles.messageAuthorMine, item.bot && styles.botAuthor]}>{item.author}</Text><View style={[styles.messageBubble, item.mine && styles.messageBubbleMine, item.bot && styles.botBubble]}><Text style={[styles.messageText, item.mine && styles.messageTextMine]}>{item.text}</Text></View></View></View>} ListHeaderComponent={<View><View style={styles.chatHeader}><View style={styles.homeThreadIcon}><Text>🏠</Text></View><View><Text style={styles.chatTitle}>Everyone</Text><Text style={styles.muted}>4 family members + HomeBot</Text></View></View><View style={styles.botHint}><Ionicons name="sparkles" size={15} color="#7047EE" /><Text style={styles.botHintText}>Try “@bot haircut for Chad on Wednesday at 9:30 AM”</Text></View></View>} /><View style={styles.composeRow}><Pressable style={styles.composePlus}><Ionicons name="add" size={22} color="#2257F4" /></Pressable><TextInput value={draft} onChangeText={setDraft} placeholder="Message everyone or @bot…" placeholderTextColor="#8B93A5" style={styles.composeInput} returnKeyType="send" onSubmitEditing={onSend} /><Pressable onPress={onSend} style={styles.sendButton}><Ionicons name="send" size={17} color="#fff" /></Pressable></View></KeyboardAvoidingView>;
+  return <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'height' : undefined} keyboardVerticalOffset={0} style={styles.flex}><FlatList data={messages} keyExtractor={(item) => item.id} contentContainerStyle={styles.messageList} keyboardDismissMode="interactive" keyboardShouldPersistTaps="handled" renderItem={({ item }) => <View style={[styles.messageWrap, item.mine && styles.messageMine]}>{!item.mine && <View style={[styles.avatar, item.bot ? styles.botAvatar : styles.chatAvatar]}>{item.bot ? <Ionicons name="sparkles" size={17} color="#fff" /> : <Text style={styles.avatarText}>LC</Text>}</View>}<View style={styles.messageBody}><Text style={[styles.messageAuthor, item.mine && styles.messageAuthorMine, item.bot && styles.botAuthor]}>{item.author}</Text><View style={[styles.messageBubble, item.mine && styles.messageBubbleMine, item.bot && styles.botBubble]}><Text style={[styles.messageText, item.mine && styles.messageTextMine]}>{item.text}</Text></View></View></View>} ListHeaderComponent={<View><View style={styles.chatHeader}><View style={styles.homeThreadIcon}><Ionicons name="home" size={20} color="#F5A623" /></View><View><Text style={styles.chatTitle}>Everyone</Text><Text style={styles.muted}>4 family members + Coh</Text></View></View><View style={styles.botHint}><Ionicons name="sparkles" size={15} color="#7047EE" /><Text style={styles.botHintText}>Try “Hey Coh, haircut for Chad on Wednesday at 9:30 AM”</Text></View></View>} /><View style={styles.composeRow}><Pressable style={styles.composePlus}><Ionicons name="add" size={22} color="#2257F4" /></Pressable><TextInput value={draft} onChangeText={setDraft} placeholder="Message everyone or @Coh…" placeholderTextColor="#8B93A5" style={styles.composeInput} returnKeyType="send" onSubmitEditing={onSend} /><Pressable onPress={onSend} style={styles.sendButton}><Ionicons name="send" size={17} color="#fff" /></Pressable></View></KeyboardAvoidingView>;
 }
 
 function parseBotEvent(text: string): Omit<BotEvent, 'id'> | null {
-  const cleaned = text.replace(/^\s*(@bot|hey bot)[,:]?\s*/i, '').trim();
+  const cleaned = text.replace(/^\s*(@coh|hey coh|@bot|hey bot)[,:]?\s*/i, '').trim();
   const timeMatch = cleaned.match(/\b(?:at\s+)?(\d{1,2}(?::\d{2})?\s*(?:am|pm))\b/i);
   const dayMatch = cleaned.match(/\b(today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i);
   const personMatch = cleaned.match(/\bfor\s+([a-z][a-z'-]*)\b/i);
@@ -433,7 +433,7 @@ function IntegrationsScreen({ styles, connected, onConnect }: any) {
 }
 
 function SettingsScreen({ styles, dark, onTheme, onNotifications }: any) {
-  return <ScrollView contentContainerStyle={styles.scrollContent}><Text style={styles.sectionTitle}>Household</Text>{family.map((person, index) => <View key={person.name} style={styles.personSetting}><View style={[styles.avatar, { backgroundColor: person.color }]}><Text style={[styles.avatarText, { color: person.ink }]}>{person.initials}</Text></View><View style={styles.flex}><Text style={styles.settingTitle}>{person.name}</Text><Text style={styles.muted}>{index < 2 ? 'Family admin' : 'Family member'}</Text></View><Ionicons name="ellipsis-horizontal" size={19} color={styles.iconColor.color} /></View>)}<Text style={styles.sectionTitle}>Preferences</Text><View style={styles.settingRow}><Ionicons name="moon-outline" size={21} color="#7C4DFF" /><View style={styles.flex}><Text style={styles.settingTitle}>Dark mode</Text><Text style={styles.muted}>Use the darker HomeThread theme</Text></View><Switch value={dark} onValueChange={onTheme} trackColor={{ true: '#6687FF' }} /></View><Pressable onPress={onNotifications} style={styles.settingRow}><Ionicons name="notifications-outline" size={21} color="#FF7A2E" /><View style={styles.flex}><Text style={styles.settingTitle}>Smart notifications</Text><Text style={styles.muted}>Enable reminders and daily recaps</Text></View><Ionicons name="chevron-forward" size={18} color={styles.iconColor.color} /></Pressable><View style={styles.settingRow}><Ionicons name="shield-checkmark-outline" size={21} color="#19A47B" /><View style={styles.flex}><Text style={styles.settingTitle}>Privacy and family data</Text><Text style={styles.muted}>Permissions, exports, and deletion</Text></View><Ionicons name="chevron-forward" size={18} color={styles.iconColor.color} /></View></ScrollView>;
+  return <ScrollView contentContainerStyle={styles.scrollContent}><Text style={styles.sectionTitle}>Household</Text>{family.map((person, index) => <View key={person.name} style={styles.personSetting}><View style={[styles.avatar, { backgroundColor: person.color }]}><Text style={[styles.avatarText, { color: person.ink }]}>{person.initials}</Text></View><View style={styles.flex}><Text style={styles.settingTitle}>{person.name}</Text><Text style={styles.muted}>{index < 2 ? 'Family admin' : 'Family member'}</Text></View><Ionicons name="ellipsis-horizontal" size={19} color={styles.iconColor.color} /></View>)}<Text style={styles.sectionTitle}>Preferences</Text><View style={styles.settingRow}><Ionicons name="moon-outline" size={21} color="#7C4DFF" /><View style={styles.flex}><Text style={styles.settingTitle}>Dark mode</Text><Text style={styles.muted}>Use the darker Coho theme</Text></View><Switch value={dark} onValueChange={onTheme} trackColor={{ true: '#6687FF' }} /></View><Pressable onPress={onNotifications} style={styles.settingRow}><Ionicons name="notifications-outline" size={21} color="#FF7A2E" /><View style={styles.flex}><Text style={styles.settingTitle}>Smart notifications</Text><Text style={styles.muted}>Enable reminders and daily recaps</Text></View><Ionicons name="chevron-forward" size={18} color={styles.iconColor.color} /></Pressable><View style={styles.settingRow}><Ionicons name="shield-checkmark-outline" size={21} color="#19A47B" /><View style={styles.flex}><Text style={styles.settingTitle}>Privacy and family data</Text><Text style={styles.muted}>Permissions, exports, and deletion</Text></View><Ionicons name="chevron-forward" size={18} color={styles.iconColor.color} /></View></ScrollView>;
 }
 
 function BottomTabs({ tab, setTab, styles }: any) {
@@ -452,10 +452,10 @@ function ShareToCueModal({ visible, styles, dark, value, onChange, hasImage, err
       <View style={styles.modalSheet}>
         <View style={styles.modalHandle} />
         <View style={styles.modalHead}>
-          <View style={styles.flex}><Text style={styles.eyebrow}>ONLY THIS ITEM</Text><Text style={styles.modalTitle}>Share to Cue</Text></View>
+          <View style={styles.flex}><Text style={styles.eyebrow}>ONLY THIS ITEM</Text><Text style={styles.modalTitle}>Share to Coh</Text></View>
           <Pressable accessibilityLabel="Cancel sharing" onPress={onCancel} style={styles.iconButton}><Ionicons name="close" size={21} color={styles.iconColor.color} /></Pressable>
         </View>
-        <View style={styles.privacyCard}><Ionicons name="shield-checkmark" size={20} color="#19A47B" /><Text style={styles.privacyText}>KinCue receives only what you selected—not the conversation. The shared content is discarded if you cancel.</Text></View>
+        <View style={styles.privacyCard}><Ionicons name="shield-checkmark" size={20} color="#19A47B" /><Text style={styles.privacyText}>Coh receives only what you selected—not the conversation. The shared content is discarded if you cancel.</Text></View>
         {hasImage && <View style={styles.sharedAttachment}><Ionicons name="image-outline" size={20} color="#7047EE" /><View style={styles.flex}><Text style={styles.settingTitle}>Screenshot attached</Text><Text style={styles.muted}>Image reading is not connected yet. Add the event details below.</Text></View></View>}
         <Text style={styles.fieldLabel}>REVIEW OR EDIT BEFORE SENDING</Text>
         <TextInput value={value} onChangeText={onChange} multiline placeholder={hasImage ? 'Example: Haircut for Chad Wednesday at 9:30 AM' : 'Selected text or link'} placeholderTextColor="#8B93A5" style={[styles.modalInput, styles.sharePreviewInput]} />
@@ -502,5 +502,5 @@ function createStyles(t: Theme) {
 
 
 export default function App() {
-  return <ShareIntentProvider><AuthGate><HomeThreadApp /></AuthGate></ShareIntentProvider>;
+  return <ShareIntentProvider><AuthGate><CohoApp /></AuthGate></ShareIntentProvider>;
 }
