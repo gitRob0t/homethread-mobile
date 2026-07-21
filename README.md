@@ -1,6 +1,6 @@
-# HomeThread Mobile
+# Coho Mobile
 
-HomeThread is a shared family command center for calendars, chores, messages, notes, daily recaps, and household integrations.
+Coho is your Chief of Home: a shared family command center for calendars, chores, messages, notes, daily recaps, and household integrations. Coho stands for Chief of Household Operations, and Coh is the in-app AI agent.
 
 ## Current native MVP
 
@@ -28,8 +28,8 @@ Scan the Expo QR code with a compatible development client, or run `npm run ios`
 
 ## App Store path
 
-1. Replace the placeholder EAS project ID in `app.json` by running `eas init`.
-2. Confirm ownership of the `com.homethread.family` bundle identifier or change it.
+1. Confirm access to the linked Coho EAS project (the existing project slug remains `homethread` for build continuity).
+2. Confirm ownership of the `com.homethread.family` bundle identifier.
 3. Add production backend and OAuth environment values through EAS secrets.
 4. Create an Apple Developer app record and App Store Connect listing.
 5. Run `eas build --platform ios --profile production`.
