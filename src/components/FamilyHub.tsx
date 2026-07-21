@@ -81,7 +81,7 @@ export default function FamilyHub() {
       <View style={styles.hero}>
         <Text style={styles.eyebrow}>HOUSEHOLD</Text>
         <Text style={styles.heroTitle}>{householdName}</Text>
-        <Text style={styles.heroText}>{members.length} member{members.length === 1 ? '' : 's'} sharing one HomeThread.</Text>
+        <Text style={styles.heroText}>{members.length} member{members.length === 1 ? '' : 's'} sharing one Coho household.</Text>
       </View>
 
       <Text style={styles.sectionTitle}>Family members</Text>
