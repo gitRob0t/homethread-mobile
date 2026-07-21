@@ -3,6 +3,7 @@ import { ReactNode, useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
+  Linking,
   Platform,
   Pressable,
   SafeAreaView,
@@ -13,7 +14,7 @@ import {
 } from 'react-native';
 
 import { supabase } from '../lib/supabase';
-import { resetPassword, signIn, signOut, signUp } from '../services/auth';
+import { completeAuthRedirect, resetPassword, signIn, signOut, signUp } from '../services/auth';
 import { createHousehold, listHouseholds } from '../services/households';
 
 type Props = { children: ReactNode };
@@ -30,6 +31,16 @@ export default function AuthGate({ children }: Props) {
       if (!nextSession) setHasHousehold(false);
     });
     return () => data.subscription.unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    Linking.getInitialURL().then((url) => {
+      if (url) completeAuthRedirect(url).catch(() => undefined);
+    });
+    const subscription = Linking.addEventListener('url', ({ url }) => {
+      completeAuthRedirect(url).catch(() => undefined);
+    });
+    return () => subscription.remove();
   }, []);
 
   useEffect(() => {
