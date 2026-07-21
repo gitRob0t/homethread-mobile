@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "HomeThread",
+    "name": "Coho",
     "slug": "homethread",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -13,7 +13,7 @@
       "buildNumber": "1",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false,
-        "NSUserNotificationsUsageDescription": "HomeThread uses notifications for family reminders, upcoming events, and daily recaps."
+        "NSUserNotificationsUsageDescription": "Coho uses notifications for family reminders, upcoming events, and daily recaps."
       }
     },
     "android": {
@@ -38,7 +38,7 @@
       [
         "expo-share-intent",
         {
-          "iosShareExtensionName": "Share to Cue",
+          "iosShareExtensionName": "Share to Coh",
           "iosActivationRules": {
             "NSExtensionActivationSupportsText": true,
             "NSExtensionActivationSupportsWebURLWithMaxCount": 1,
