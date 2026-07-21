@@ -25,10 +25,14 @@ import {
 
 type Theme = ReturnType<typeof createTheme>;
 type Tab = 'Today' | 'Calendar' | 'Chores' | 'Chat' | 'More';
-type MoreView = 'Menu' | 'Family' | 'Notes' | 'Recaps' | 'Integrations' | 'Settings';
+type MoreView = 'Menu' | 'Chief of Home' | 'Family' | 'Notes' | 'Recaps' | 'Integrations' | 'Settings';
 type ChatMessage = { id: string; mine: boolean; author: string; text: string; bot?: boolean };
 type BotEvent = { id: string; title: string; person: string; day: string; time: string; place?: string; reminder?: number; directions?: boolean };
 type BotDraft = Omit<BotEvent, 'id'> & { step: 'place' | 'directions' | 'reminder' | 'confirm' };
+type ChiefPrefs = { daily: boolean; dailyTime: string; weekAhead: boolean; weekAheadDay: string; weekAheadTime: string; followUp: boolean; followUpDay: string; followUpTime: string; push: boolean; email: boolean; quietHours: boolean; events: boolean; chores: boolean; messages: boolean; followUps: boolean; members: string[] };
+
+const defaultChiefPrefs: ChiefPrefs = { daily: true, dailyTime: '7:00 AM', weekAhead: true, weekAheadDay: 'Sunday', weekAheadTime: '6:00 PM', followUp: true, followUpDay: 'Friday', followUpTime: '5:00 PM', push: true, email: false, quietHours: true, events: true, chores: true, messages: false, followUps: true, members: familyNames() };
+function familyNames() { return ['Chad', 'Loren', 'Asher', 'Oliver']; }
 
 const family = [
   { initials: 'CC', name: 'Chad', status: 'At work', color: '#DCE7FF', ink: '#2257F4' },
@@ -80,11 +84,15 @@ function HomeThreadApp() {
   const [connected, setConnected] = useState<Record<string, boolean>>({ 'Apple Calendar': true, 'iOS Notifications': true });
   const [sharePreviewOpen, setSharePreviewOpen] = useState(false);
   const [sharedDraft, setSharedDraft] = useState('');
+  const [chiefPrefs, setChiefPrefs] = useState<ChiefPrefs>(defaultChiefPrefs);
 
   useEffect(() => {
     AsyncStorage.getItem('homethread-theme').then((saved) => {
       if (saved) setDark(saved === 'dark');
     });
+    AsyncStorage.getItem('kincue-chief-prefs').then((saved) => {
+      if (saved) setChiefPrefs({ ...defaultChiefPrefs, ...JSON.parse(saved) });
+    }).catch(() => undefined);
   }, []);
 
   useEffect(() => {
@@ -217,6 +225,37 @@ function HomeThreadApp() {
     }
   }
 
+  async function saveChiefPreferences(next: ChiefPrefs) {
+    setChiefPrefs(next);
+    await AsyncStorage.setItem('kincue-chief-prefs', JSON.stringify(next));
+  }
+
+  async function activateChiefOfHome() {
+    await saveChiefPreferences(chiefPrefs);
+    const permission = await Notifications.requestPermissionsAsync();
+    if (!permission.granted) {
+      showNotice('Enable notifications in iOS Settings to receive briefings');
+      return;
+    }
+    const oldIds = JSON.parse(await AsyncStorage.getItem('kincue-chief-notification-ids') || '[]');
+    await Promise.all(oldIds.map((id: string) => Notifications.cancelScheduledNotificationAsync(id).catch(() => undefined)));
+    const ids: string[] = [];
+    if (chiefPrefs.daily && chiefPrefs.push) {
+      const { hour, minute } = parseClock(chiefPrefs.dailyTime);
+      ids.push(await Notifications.scheduleNotificationAsync({ content: { title: 'Your Chief of Home briefing', body: 'Appointments, chores, follow-ups, and what your family needs today.' }, trigger: { type: Notifications.SchedulableTriggerInputTypes.DAILY, hour, minute } }));
+    }
+    if (chiefPrefs.weekAhead && chiefPrefs.push) {
+      const { hour, minute } = parseClock(chiefPrefs.weekAheadTime);
+      ids.push(await Notifications.scheduleNotificationAsync({ content: { title: 'Your full week ahead', body: 'Open KinCue for the family schedule, preparation list, and conflicts.' }, trigger: { type: Notifications.SchedulableTriggerInputTypes.WEEKLY, weekday: weekdayNumber(chiefPrefs.weekAheadDay), hour, minute } }));
+    }
+    if (chiefPrefs.followUp && chiefPrefs.push) {
+      const { hour, minute } = parseClock(chiefPrefs.followUpTime);
+      ids.push(await Notifications.scheduleNotificationAsync({ content: { title: 'Weekly follow-up', body: 'A few appointments and conversations may still need action.' }, trigger: { type: Notifications.SchedulableTriggerInputTypes.WEEKLY, weekday: weekdayNumber(chiefPrefs.followUpDay), hour, minute } }));
+    }
+    await AsyncStorage.setItem('kincue-chief-notification-ids', JSON.stringify(ids));
+    showNotice('Chief of Home briefings are scheduled');
+  }
+
   const title = tab === 'More' && moreView !== 'Menu' ? moreView : tab;
 
   return (
@@ -239,6 +278,7 @@ function HomeThreadApp() {
           {tab === 'Chores' && <ChoresScreen styles={styles} chores={chores} onToggle={(id: string) => setChores((items) => items.map((item) => item.id === id ? { ...item, done: !item.done } : item))} />}
           {tab === 'Chat' && <ChatScreen styles={styles} messages={messages} draft={messageDraft} setDraft={setMessageDraft} onSend={sendMessage} />}
           {tab === 'More' && moreView === 'Menu' && <MoreMenu styles={styles} setView={setMoreView} />}
+          {tab === 'More' && moreView === 'Chief of Home' && <ChiefOfHomeScreen styles={styles} prefs={chiefPrefs} setPrefs={saveChiefPreferences} onActivate={activateChiefOfHome} />}
           {tab === 'More' && moreView === 'Family' && <FamilyHub />}
           {tab === 'More' && moreView === 'Notes' && <NotesScreen styles={styles} />}
           {tab === 'More' && moreView === 'Recaps' && <RecapsScreen styles={styles} />}
@@ -343,9 +383,12 @@ function titleCase(value: string) { return value.charAt(0).toUpperCase() + value
 function isYes(value: string) { return /^(yes|y|yeah|yep|sure|please|ok|okay)\b/.test(value); }
 function parseReminder(value: string) { const match = value.match(/(\d+)\s*(?:minute|min)/); return match ? Number(match[1]) : undefined; }
 function cleanAnswer(value: string) { return value.replace(/^(it is|it's|the place is|at)\s+/i, '').trim(); }
+function parseClock(value: string) { const match = value.match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i); let hour = Number(match?.[1] ?? 7); const minute = Number(match?.[2] ?? 0); const pm = match?.[3]?.toUpperCase() === 'PM'; if (pm && hour < 12) hour += 12; if (!pm && hour === 12) hour = 0; return { hour, minute }; }
+function weekdayNumber(day: string) { return ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'].indexOf(day) + 1; }
 
 function MoreMenu({ styles, setView }: any) {
   const items = [
+    ['Chief of Home', 'home-outline', '#7047EE', 'Personal briefings, week ahead, and follow-ups'],
     ['Family', 'people-outline', '#2257F4', 'Members, roles, and family invitations'],
     ['Notes', 'document-text-outline', '#7C4DFF', 'Lists, instructions, and family details'],
     ['Recaps', 'sparkles-outline', '#2257F4', 'Daily summaries by push and email'],
@@ -355,13 +398,33 @@ function MoreMenu({ styles, setView }: any) {
   return <ScrollView contentContainerStyle={styles.scrollContent}><Text style={styles.moreIntro}>Everything else your household needs, without cluttering the everyday view.</Text><View style={styles.moreGrid}>{items.map(([title, icon, color, detail]) => <Pressable key={title} onPress={() => setView(title)} style={styles.moreCard}><View style={[styles.moreIcon, { backgroundColor: `${color}18` }]}><Ionicons name={icon as any} size={25} color={color} /></View><Text style={styles.moreTitle}>{title}</Text><Text style={styles.moreDetail}>{detail}</Text><Ionicons name="chevron-forward" size={18} color={styles.iconColor.color} style={styles.moreChevron} /></Pressable>)}</View></ScrollView>;
 }
 
+function ChiefOfHomeScreen({ styles, prefs, setPrefs, onActivate }: { styles: any; prefs: ChiefPrefs; setPrefs: (value: ChiefPrefs) => void; onActivate: () => void }) {
+  const update = (patch: Partial<ChiefPrefs>) => setPrefs({ ...prefs, ...patch });
+  const toggleMember = (name: string) => update({ members: prefs.members.includes(name) ? prefs.members.filter((item) => item !== name) : [...prefs.members, name] });
+  const briefingRows = [
+    { key: 'daily', icon: 'sunny-outline', color: '#FF7A2E', title: 'Daily briefing', detail: `Every day at ${prefs.dailyTime}`, times: ['6:30 AM', '7:00 AM', '8:00 AM'] },
+    { key: 'weekAhead', icon: 'calendar-outline', color: '#2257F4', title: 'Full week ahead', detail: `${prefs.weekAheadDay} at ${prefs.weekAheadTime}`, times: ['5:00 PM', '6:00 PM', '7:00 PM'] },
+    { key: 'followUp', icon: 'refresh-outline', color: '#19A47B', title: 'Weekly follow-up', detail: `${prefs.followUpDay} at ${prefs.followUpTime}`, times: ['4:00 PM', '5:00 PM', '6:00 PM'] },
+  ];
+  return <ScrollView contentContainerStyle={styles.scrollContent}>
+    <LinearGradient colors={['#24116D', '#7047EE']} style={styles.chiefHero}><View style={styles.chiefBadge}><Ionicons name="home" size={22} color="#7047EE" /></View><Text style={styles.recapHeroLabel}>KINCUE</Text><Text style={styles.chiefHeroTitle}>Your Chief of Home</Text><Text style={styles.recapHeroText}>The right family information, resurfaced before anyone has to remember it.</Text></LinearGradient>
+    <Text style={styles.sectionTitle}>Your briefings</Text>
+    {briefingRows.map((row) => <View key={row.key} style={styles.chiefSettingCard}><View style={styles.settingRowTop}><View style={[styles.integrationIcon, { backgroundColor: `${row.color}18` }]}><Ionicons name={row.icon as any} size={22} color={row.color} /></View><View style={styles.flex}><Text style={styles.settingTitle}>{row.title}</Text><Text style={styles.muted}>{row.detail}</Text></View><Switch value={(prefs as any)[row.key]} onValueChange={(value) => update({ [row.key]: value })} trackColor={{ true: '#6687FF' }} /></View><View style={styles.chipRow}>{row.times.map((time) => { const field = row.key === 'daily' ? 'dailyTime' : row.key === 'weekAhead' ? 'weekAheadTime' : 'followUpTime'; return <Pressable key={time} onPress={() => update({ [field]: time })} style={[styles.choiceChip, (prefs as any)[field] === time && styles.choiceChipActive]}><Text style={[styles.choiceChipText, (prefs as any)[field] === time && styles.choiceChipTextActive]}>{time}</Text></Pressable>; })}</View></View>)}
+    <Text style={styles.sectionTitle}>Include</Text><View style={styles.preferenceGrid}>{([['events', 'Appointments & events'], ['chores', 'Chores'], ['followUps', 'Follow-ups'], ['messages', 'Important messages']] as const).map(([key, label]) => <Pressable key={key} onPress={() => update({ [key]: !prefs[key] })} style={[styles.preferenceTile, prefs[key] && styles.preferenceTileActive]}><Ionicons name={prefs[key] ? 'checkmark-circle' : 'ellipse-outline'} size={19} color={prefs[key] ? '#19A47B' : styles.iconColor.color} /><Text style={styles.preferenceText}>{label}</Text></Pressable>)}</View>
+    <Text style={styles.sectionTitle}>Family members</Text><View style={styles.chipRow}>{familyNames().map((name) => <Pressable key={name} onPress={() => toggleMember(name)} style={[styles.memberChip, prefs.members.includes(name) && styles.memberChipActive]}><Text style={[styles.choiceChipText, prefs.members.includes(name) && styles.choiceChipTextActive]}>{name}</Text></Pressable>)}</View>
+    <Text style={styles.sectionTitle}>Delivery</Text><View style={styles.settingRow}><Ionicons name="notifications-outline" size={21} color="#7047EE" /><View style={styles.flex}><Text style={styles.settingTitle}>Push notifications</Text><Text style={styles.muted}>Delivered to this iPhone</Text></View><Switch value={prefs.push} onValueChange={(push) => update({ push })} trackColor={{ true: '#6687FF' }} /></View><View style={styles.settingRow}><Ionicons name="mail-outline" size={21} color="#2257F4" /><View style={styles.flex}><Text style={styles.settingTitle}>Email copy</Text><Text style={styles.muted}>Available when family email delivery is connected</Text></View><Switch value={prefs.email} onValueChange={(email) => update({ email })} trackColor={{ true: '#6687FF' }} /></View><View style={styles.settingRow}><Ionicons name="moon-outline" size={21} color="#7C4DFF" /><View style={styles.flex}><Text style={styles.settingTitle}>Quiet hours</Text><Text style={styles.muted}>9:00 PM–7:00 AM · urgent alerts only</Text></View><Switch value={prefs.quietHours} onValueChange={(quietHours) => update({ quietHours })} trackColor={{ true: '#6687FF' }} /></View>
+    <Pressable onPress={onActivate} style={styles.saveButton}><Text style={styles.saveButtonText}>Save and schedule my briefings</Text></Pressable>
+  </ScrollView>;
+}
+
 function NotesScreen({ styles }: any) {
   const notes = [['🛒', 'Weekly groceries', '8 items · Updated 12 min ago'], ['🏡', 'Lake house details', 'Shared with everyone'], ['🍝', 'Dinner ideas', '12 recipes'], ['☎️', 'Emergency contacts', 'Pinned · Family admins'], ['🎁', 'Gift ideas', 'Private to adults'], ['🧳', 'PA packing list', '23 of 31 packed']];
   return <ScrollView contentContainerStyle={styles.scrollContent}><TextInput placeholder="Search family notes" placeholderTextColor="#8B93A5" style={styles.searchInput} /><View style={styles.notesGrid}>{notes.map(([icon, title, meta]) => <Pressable key={title} style={styles.noteCard}><Text style={styles.noteEmoji}>{icon}</Text><Text style={styles.noteTitle}>{title}</Text><Text style={styles.muted}>{meta}</Text></Pressable>)}</View></ScrollView>;
 }
 
 function RecapsScreen({ styles }: any) {
-  return <ScrollView contentContainerStyle={styles.scrollContent}><LinearGradient colors={['#2257F4', '#7047EE']} style={styles.recapHero}><Ionicons name="sparkles" size={24} color="#fff" /><Text style={styles.recapHeroLabel}>WEDNESDAY RECAP</Text><Text style={styles.recapHeroTitle}>Here’s what the family needs to know.</Text><Text style={styles.recapHeroText}>Generated from your shared calendar, chores, messages, and notes. Private to your household.</Text><Pressable style={styles.recapHeroButton}><Ionicons name="play" size={15} color="#2257F4" /><Text>Listen to recap</Text></Pressable></LinearGradient><Text style={styles.sectionTitle}>Today’s highlights</Text>{[['3:15', 'Chad is handling school pickup'], ['6:00', 'Asher has soccer on Field 4'], ['8:00', 'Trash needs to be at the curb']].map(([time, text]) => <View key={time} style={styles.highlightRow}><Text style={styles.highlightTime}>{time}</Text><Text style={styles.highlightText}>{text}</Text><Ionicons name="checkmark-circle" size={18} color="#19A47B" /></View>)}</ScrollView>;
+  const week = [['MON', 'Dentist follow-up · Chad', '9:30 AM'], ['TUE', 'Asher soccer practice', '6:00 PM'], ['WED', 'School pickup · Oliver', '3:15 PM'], ['THU', 'Lake trip packing deadline', '7:00 PM'], ['FRI', 'Family dinner reservation', '6:30 PM'], ['SAT', 'Knoebels family day', '10:00 AM'], ['SUN', 'Plan the coming week', '6:00 PM']];
+  return <ScrollView contentContainerStyle={styles.scrollContent}><LinearGradient colors={['#2257F4', '#7047EE']} style={styles.recapHero}><Ionicons name="sparkles" size={24} color="#fff" /><Text style={styles.recapHeroLabel}>CHIEF OF HOME</Text><Text style={styles.recapHeroTitle}>The full week ahead.</Text><Text style={styles.recapHeroText}>Appointments, chores, preparation, and family commitments in one private briefing.</Text><Pressable style={styles.recapHeroButton}><Ionicons name="play" size={15} color="#2257F4" /><Text>Listen to briefing</Text></Pressable></LinearGradient><Text style={styles.sectionTitle}>Week ahead</Text>{week.map(([day, text, time]) => <View key={day} style={styles.highlightRow}><Text style={styles.highlightTime}>{day}</Text><View style={styles.flex}><Text style={styles.highlightText}>{text}</Text><Text style={styles.muted}>{time}</Text></View><Ionicons name="chevron-forward" size={17} color={styles.iconColor.color} /></View>)}<Text style={styles.sectionTitle}>Needs follow-up</Text>{[['Dentist visit', 'Schedule the six-month follow-up'], ['School meeting', 'Return the signed permission form']].map(([title, detail]) => <View key={title} style={styles.followUpCard}><Ionicons name="refresh-circle" size={23} color="#19A47B" /><View style={styles.flex}><Text style={styles.settingTitle}>{title}</Text><Text style={styles.muted}>{detail}</Text></View><Pressable style={styles.connectButton}><Text style={styles.connectText}>Resolve</Text></Pressable></View>)}</ScrollView>;
 }
 
 function IntegrationsScreen({ styles, connected, onConnect }: any) {
@@ -430,6 +493,7 @@ function createStyles(t: Theme) {
     searchInput: { height: 45, borderRadius: 15, borderWidth: 1, borderColor: t.line, backgroundColor: t.surface, color: t.text, paddingHorizontal: 14 }, notesGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 }, noteCard: { width: '48.5%', minHeight: 140, borderRadius: 19, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, padding: 15 }, noteEmoji: { fontSize: 24 }, noteTitle: { color: t.text, fontSize: 12, fontWeight: '800', marginTop: 18, marginBottom: 4 },
     recapHero: { minHeight: 260, borderRadius: 24, padding: 23, justifyContent: 'center' }, recapHeroLabel: { color: '#FFFFFFB5', fontSize: 8, fontWeight: '800', letterSpacing: 1, marginTop: 13 }, recapHeroTitle: { color: '#fff', fontSize: 28, lineHeight: 31, fontWeight: '800', letterSpacing: -1, marginTop: 8 }, recapHeroText: { color: '#FFFFFFC0', fontSize: 11, lineHeight: 16, marginTop: 8 }, recapHeroButton: { alignSelf: 'flex-start', minHeight: 38, borderRadius: 12, backgroundColor: '#fff', flexDirection: 'row', gap: 7, alignItems: 'center', paddingHorizontal: 13, marginTop: 18 }, highlightRow: { minHeight: 61, flexDirection: 'row', gap: 11, alignItems: 'center', borderRadius: 16, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, padding: 12 }, highlightTime: { color: t.primary, fontSize: 11, fontWeight: '800', width: 38 }, highlightText: { color: t.text, fontSize: 11, fontWeight: '700', flex: 1 },
     automationCard: { minHeight: 90, borderRadius: 20, padding: 16, flexDirection: 'row', gap: 12, alignItems: 'center' }, automationLabel: { color: '#FFFFFFA8', fontSize: 7, fontWeight: '800', letterSpacing: 1 }, automationTitle: { color: '#fff', fontSize: 12, fontWeight: '800', lineHeight: 17, marginTop: 3 }, integrationRow: { minHeight: 78, borderRadius: 18, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, padding: 12, flexDirection: 'row', alignItems: 'center', gap: 10 }, integrationIcon: { width: 43, height: 43, borderRadius: 14, alignItems: 'center', justifyContent: 'center' }, integrationTitle: { color: t.text, fontSize: 12, fontWeight: '800' }, connectButton: { minHeight: 31, borderRadius: 10, borderWidth: 1, borderColor: t.primary, paddingHorizontal: 9, alignItems: 'center', justifyContent: 'center' }, connectedButton: { borderColor: '#19A47B', backgroundColor: '#19A47B12' }, connectText: { color: t.primary, fontSize: 8, fontWeight: '800' }, connectedText: { color: '#19A47B' },
+    chiefHero: { minHeight: 210, borderRadius: 24, padding: 22, justifyContent: 'center' }, chiefBadge: { width: 48, height: 48, borderRadius: 16, backgroundColor: '#fff', alignItems: 'center', justifyContent: 'center', marginBottom: 14 }, chiefHeroTitle: { color: '#fff', fontSize: 28, lineHeight: 32, fontWeight: '800', letterSpacing: -1, marginTop: 5 }, chiefSettingCard: { borderRadius: 19, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, padding: 13, gap: 12 }, settingRowTop: { flexDirection: 'row', alignItems: 'center', gap: 10 }, chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 }, choiceChip: { minHeight: 34, borderRadius: 11, borderWidth: 1, borderColor: t.line, paddingHorizontal: 11, alignItems: 'center', justifyContent: 'center', backgroundColor: t.surfaceStrong }, choiceChipActive: { backgroundColor: t.primary, borderColor: t.primary }, choiceChipText: { color: t.text, fontSize: 9, fontWeight: '800' }, choiceChipTextActive: { color: '#fff' }, preferenceGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 9 }, preferenceTile: { width: '48.5%', minHeight: 58, borderRadius: 15, padding: 11, flexDirection: 'row', gap: 8, alignItems: 'center', backgroundColor: t.surface, borderWidth: 1, borderColor: t.line }, preferenceTileActive: { borderColor: '#19A47B55', backgroundColor: '#19A47B0D' }, preferenceText: { color: t.text, fontSize: 10, fontWeight: '700', flex: 1 }, memberChip: { minHeight: 36, borderRadius: 18, borderWidth: 1, borderColor: t.line, paddingHorizontal: 14, alignItems: 'center', justifyContent: 'center', backgroundColor: t.surface }, memberChipActive: { backgroundColor: t.primary, borderColor: t.primary }, followUpCard: { minHeight: 72, borderRadius: 18, padding: 12, flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line },
     personSetting: { minHeight: 65, borderRadius: 17, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, padding: 11, flexDirection: 'row', alignItems: 'center', gap: 10 }, settingRow: { minHeight: 70, borderRadius: 17, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, padding: 13, flexDirection: 'row', alignItems: 'center', gap: 11 }, settingTitle: { color: t.text, fontSize: 12, fontWeight: '800' },
     modalBackdrop: { flex: 1, backgroundColor: '#0C111D88', justifyContent: 'flex-end' }, modalDismiss: { flex: 1 }, modalSheet: { backgroundColor: t.surfaceStrong, borderTopLeftRadius: 28, borderTopRightRadius: 28, paddingHorizontal: 19, paddingTop: 9, paddingBottom: Platform.OS === 'ios' ? 28 : 18 }, modalHandle: { width: 39, height: 4, borderRadius: 2, backgroundColor: t.line, alignSelf: 'center', marginBottom: 15 }, modalHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' }, modalTitle: { color: t.text, fontSize: 23, fontWeight: '800', letterSpacing: -.7 }, typeTabs: { flexDirection: 'row', borderRadius: 14, padding: 4, backgroundColor: t.canvas, marginTop: 19 }, typeTab: { flex: 1, minHeight: 38, borderRadius: 10, alignItems: 'center', justifyContent: 'center' }, typeTabActive: { backgroundColor: t.surfaceStrong }, typeTabText: { color: t.muted, fontSize: 10, fontWeight: '700' }, typeTabTextActive: { color: t.primary }, fieldLabel: { color: t.muted, fontSize: 9, fontWeight: '800', marginTop: 15, marginBottom: 6 }, modalInput: { minHeight: 46, borderRadius: 13, borderWidth: 1, borderColor: t.line, backgroundColor: t.surface, color: t.text, paddingHorizontal: 12 }, modalTextArea: { minHeight: 83, paddingTop: 12, textAlignVertical: 'top' }, saveButton: { minHeight: 48, borderRadius: 15, backgroundColor: t.primary, alignItems: 'center', justifyContent: 'center', marginTop: 18 }, saveButtonText: { color: '#fff', fontSize: 12, fontWeight: '800' },
     privacyCard: { minHeight: 66, borderRadius: 16, padding: 12, marginTop: 16, flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: '#19A47B12', borderWidth: 1, borderColor: '#19A47B35' }, privacyText: { color: t.text, fontSize: 10, lineHeight: 15, flex: 1, fontWeight: '600' }, sharedAttachment: { minHeight: 62, borderRadius: 15, padding: 12, marginTop: 10, flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line }, sharePreviewInput: { minHeight: 110, paddingTop: 12, textAlignVertical: 'top' }, shareError: { color: '#D64545', fontSize: 10, marginTop: 8 }, shareActions: { flexDirection: 'row', gap: 10, marginTop: 16 }, cancelButton: { flex: 1, minHeight: 48, borderRadius: 15, borderWidth: 1, borderColor: t.line, alignItems: 'center', justifyContent: 'center' }, cancelButtonText: { color: t.text, fontSize: 12, fontWeight: '800' }, approveButton: { flex: 1.4, minHeight: 48, borderRadius: 15, backgroundColor: t.primary, flexDirection: 'row', gap: 7, alignItems: 'center', justifyContent: 'center' },
