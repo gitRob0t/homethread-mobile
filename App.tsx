@@ -25,6 +25,9 @@ import {
 type Theme = ReturnType<typeof createTheme>;
 type Tab = 'Today' | 'Calendar' | 'Chores' | 'Chat' | 'More';
 type MoreView = 'Menu' | 'Family' | 'Notes' | 'Recaps' | 'Integrations' | 'Settings';
+type ChatMessage = { id: string; mine: boolean; author: string; text: string; bot?: boolean };
+type BotEvent = { id: string; title: string; person: string; day: string; time: string; place?: string; reminder?: number; directions?: boolean };
+type BotDraft = Omit<BotEvent, 'id'> & { step: 'place' | 'directions' | 'reminder' | 'confirm' };
 
 const family = [
   { initials: 'CC', name: 'Chad', status: 'At work', color: '#DCE7FF', ink: '#2257F4' },
@@ -65,11 +68,13 @@ function HomeThreadApp() {
   const [quickAddTitle, setQuickAddTitle] = useState('');
   const [notice, setNotice] = useState<string | null>(null);
   const [chores, setChores] = useState(initialChores);
-  const [messages, setMessages] = useState([
+  const [messages, setMessages] = useState<ChatMessage[]>([
     { id: '1', mine: false, author: 'Loren', text: 'Can someone grab Oliver at 3:15? My last appointment may run over.' },
     { id: '2', mine: true, author: 'You', text: 'I’ve got it. I added the drive time to the calendar too.' },
   ]);
   const [messageDraft, setMessageDraft] = useState('');
+  const [botDraft, setBotDraft] = useState<BotDraft | null>(null);
+  const [botEvents, setBotEvents] = useState<BotEvent[]>([]);
   const [connected, setConnected] = useState<Record<string, boolean>>({ 'Apple Calendar': true, 'iOS Notifications': true });
 
   useEffect(() => {
@@ -99,10 +104,67 @@ function HomeThreadApp() {
     setQuickAddTitle('');
   }
 
+  function addBotMessage(text: string) {
+    setTimeout(() => setMessages((current) => [...current, { id: `bot-${Date.now()}`, mine: false, author: 'HomeBot', text, bot: true }]), 250);
+  }
+
   function sendMessage() {
-    if (!messageDraft.trim()) return;
-    setMessages((current) => [...current, { id: String(Date.now()), mine: true, author: 'You', text: messageDraft.trim() }]);
+    const text = messageDraft.trim();
+    if (!text) return;
+    setMessages((current) => [...current, { id: String(Date.now()), mine: true, author: 'You', text }]);
     setMessageDraft('');
+    handleBotMessage(text);
+  }
+
+  function handleBotMessage(text: string) {
+    const normalized = text.trim().toLowerCase();
+    if (!botDraft && !normalized.startsWith('@bot') && !normalized.startsWith('hey bot')) return;
+
+    if (!botDraft) {
+      const request = parseBotEvent(text);
+      if (!request) {
+        addBotMessage('I can add events, reminders, chores, and notes. Try “@bot haircut for Chad on Wednesday at 9:30 AM.”');
+        return;
+      }
+      setBotDraft({ ...request, step: 'place' });
+      addBotMessage(`I have “${request.title}” for ${request.person} on ${request.day} at ${request.time}. What’s the name of the place? You can also say “skip.”`);
+      return;
+    }
+
+    if (botDraft.step === 'place') {
+      const place = normalized === 'skip' || normalized === 'none' ? undefined : cleanAnswer(text);
+      setBotDraft({ ...botDraft, place, step: place ? 'directions' : 'reminder' });
+      addBotMessage(place ? `Got it — ${place}. Would you like me to add directions?` : 'Would you like a 15-minute reminder?');
+      return;
+    }
+
+    if (botDraft.step === 'directions') {
+      const directions = isYes(normalized);
+      setBotDraft({ ...botDraft, directions, step: 'reminder' });
+      addBotMessage('Would you like a 15-minute reminder?');
+      return;
+    }
+
+    if (botDraft.step === 'reminder') {
+      const reminder = isYes(normalized) ? 15 : parseReminder(normalized);
+      const next = { ...botDraft, reminder, step: 'confirm' as const };
+      setBotDraft(next);
+      addBotMessage(`Ready to create “${next.title}” for ${next.person}, ${next.day} at ${next.time}${next.place ? ` at ${next.place}` : ''}${reminder ? ` with a ${reminder}-minute reminder` : ''}. Add it to the family calendar?`);
+      return;
+    }
+
+    if (botDraft.step === 'confirm') {
+      if (!isYes(normalized)) {
+        addBotMessage('No problem — I didn’t create anything. Start over whenever you’re ready.');
+        setBotDraft(null);
+        return;
+      }
+      const event: BotEvent = { id: `event-${Date.now()}`, title: botDraft.title, person: botDraft.person, day: botDraft.day, time: botDraft.time, place: botDraft.place, reminder: botDraft.reminder, directions: botDraft.directions };
+      setBotEvents((current) => [...current, event]);
+      setBotDraft(null);
+      addBotMessage(`Done — I created the event and added it to the family calendar.${event.directions && event.place ? ` Directions to ${event.place} are included.` : ''}`);
+      showNotice('HomeBot added an event to the family calendar');
+    }
   }
 
   async function enableNotifications() {
@@ -137,7 +199,7 @@ function HomeThreadApp() {
 
         <View style={styles.screen}>
           {tab === 'Today' && <TodayScreen theme={theme} styles={styles} quickItems={notice ? [notice] : []} />}
-          {tab === 'Calendar' && <CalendarScreen theme={theme} styles={styles} />}
+          {tab === 'Calendar' && <CalendarScreen theme={theme} styles={styles} botEvents={botEvents} />}
           {tab === 'Chores' && <ChoresScreen styles={styles} chores={chores} onToggle={(id: string) => setChores((items) => items.map((item) => item.id === id ? { ...item, done: !item.done } : item))} />}
           {tab === 'Chat' && <ChatScreen styles={styles} messages={messages} draft={messageDraft} setDraft={setMessageDraft} onSend={sendMessage} />}
           {tab === 'More' && moreView === 'Menu' && <MoreMenu styles={styles} setView={setMoreView} />}
@@ -203,11 +265,11 @@ function TodayScreen({ theme, styles }: any) {
   </ScrollView>;
 }
 
-function CalendarScreen({ styles }: any) {
+function CalendarScreen({ styles, botEvents }: any) {
   const days = [{ d: 'MON', n: '13' }, { d: 'TUE', n: '14' }, { d: 'WED', n: '15' }, { d: 'THU', n: '16' }, { d: 'FRI', n: '17' }];
   return <ScrollView contentContainerStyle={styles.scrollContent}><View style={styles.calendarTop}><Pressable style={styles.smallButton}><Ionicons name="chevron-back" size={18} color={styles.iconColor.color} /></Pressable><Text style={styles.calendarPeriod}>July 13–19</Text><Pressable style={styles.smallButton}><Ionicons name="chevron-forward" size={18} color={styles.iconColor.color} /></Pressable></View><View style={styles.weekRow}>{days.map((day) => <Pressable key={day.d} style={[styles.dayBubble, day.n === '15' && styles.dayBubbleActive]}><Text style={[styles.dayLabel, day.n === '15' && styles.dayTextActive]}>{day.d}</Text><Text style={[styles.dayNumber, day.n === '15' && styles.dayTextActive]}>{day.n}</Text></Pressable>)}</View><Text style={styles.sectionTitle}>Wednesday’s schedule</Text>{[
     ['3:15 PM', 'School pickup', 'Oliver · Oakview Elementary', '#2257F4'], ['6:00 PM', 'Asher soccer', 'Field 4 · Bring blue jersey', '#19A47B'], ['8:00 PM', 'Trash to curb', 'Assigned to Chad', '#FF7A2E']
-  ].map(([time, title, detail, color]) => <Pressable key={title} style={styles.timelineRow}><View style={[styles.timelineLine, { backgroundColor: color }]} /><Text style={styles.timelineTime}>{time}</Text><View style={styles.flex}><Text style={styles.timelineTitle}>{title}</Text><Text style={styles.muted}>{detail}</Text></View><Ionicons name="chevron-forward" size={18} color={styles.iconColor.color} /></Pressable>)}<View style={styles.syncCard}><Ionicons name="sync" size={18} color="#2257F4" /><View style={styles.flex}><Text style={styles.syncTitle}>Calendars synced</Text><Text style={styles.muted}>Apple Calendar · Google · Skylight</Text></View><Text style={styles.link}>Manage</Text></View></ScrollView>;
+  ].map(([time, title, detail, color]) => <Pressable key={title} style={styles.timelineRow}><View style={[styles.timelineLine, { backgroundColor: color }]} /><Text style={styles.timelineTime}>{time}</Text><View style={styles.flex}><Text style={styles.timelineTitle}>{title}</Text><Text style={styles.muted}>{detail}</Text></View><Ionicons name="chevron-forward" size={18} color={styles.iconColor.color} /></Pressable>)}{botEvents.map((event: BotEvent) => <Pressable key={event.id} style={styles.timelineRow}><View style={[styles.timelineLine, { backgroundColor: '#7047EE' }]} /><Text style={styles.timelineTime}>{event.time}</Text><View style={styles.flex}><Text style={styles.timelineTitle}>{event.title}</Text><Text style={styles.muted}>{event.person} · {event.place ?? event.day}{event.reminder ? ` · ${event.reminder} min reminder` : ''}</Text></View><Ionicons name="sparkles" size={18} color="#7047EE" /></Pressable>)}<View style={styles.syncCard}><Ionicons name="sync" size={18} color="#2257F4" /><View style={styles.flex}><Text style={styles.syncTitle}>Calendars synced</Text><Text style={styles.muted}>Apple Calendar · Google · Skylight</Text></View><Text style={styles.link}>Manage</Text></View></ScrollView>;
 }
 
 function ChoresScreen({ styles, chores, onToggle }: any) {
@@ -216,8 +278,24 @@ function ChoresScreen({ styles, chores, onToggle }: any) {
 }
 
 function ChatScreen({ styles, messages, draft, setDraft, onSend }: any) {
-  return <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.flex}><FlatList data={messages} keyExtractor={(item) => item.id} contentContainerStyle={styles.messageList} renderItem={({ item }) => <View style={[styles.messageWrap, item.mine && styles.messageMine]}>{!item.mine && <View style={[styles.avatar, styles.chatAvatar]}><Text style={styles.avatarText}>LC</Text></View>}<View><Text style={[styles.messageAuthor, item.mine && styles.messageAuthorMine]}>{item.author}</Text><View style={[styles.messageBubble, item.mine && styles.messageBubbleMine]}><Text style={[styles.messageText, item.mine && styles.messageTextMine]}>{item.text}</Text></View></View></View>} ListHeaderComponent={<View style={styles.chatHeader}><View style={styles.homeThreadIcon}><Text>🏠</Text></View><View><Text style={styles.chatTitle}>Everyone</Text><Text style={styles.muted}>4 family members</Text></View></View>} /><View style={styles.composeRow}><Pressable style={styles.composePlus}><Ionicons name="add" size={22} color="#2257F4" /></Pressable><TextInput value={draft} onChangeText={setDraft} placeholder="Message everyone…" placeholderTextColor="#8B93A5" style={styles.composeInput} returnKeyType="send" onSubmitEditing={onSend} /><Pressable onPress={onSend} style={styles.sendButton}><Ionicons name="send" size={17} color="#fff" /></Pressable></View></KeyboardAvoidingView>;
+  return <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'height' : undefined} keyboardVerticalOffset={0} style={styles.flex}><FlatList data={messages} keyExtractor={(item) => item.id} contentContainerStyle={styles.messageList} keyboardDismissMode="interactive" keyboardShouldPersistTaps="handled" renderItem={({ item }) => <View style={[styles.messageWrap, item.mine && styles.messageMine]}>{!item.mine && <View style={[styles.avatar, item.bot ? styles.botAvatar : styles.chatAvatar]}>{item.bot ? <Ionicons name="sparkles" size={17} color="#fff" /> : <Text style={styles.avatarText}>LC</Text>}</View>}<View style={styles.messageBody}><Text style={[styles.messageAuthor, item.mine && styles.messageAuthorMine, item.bot && styles.botAuthor]}>{item.author}</Text><View style={[styles.messageBubble, item.mine && styles.messageBubbleMine, item.bot && styles.botBubble]}><Text style={[styles.messageText, item.mine && styles.messageTextMine]}>{item.text}</Text></View></View></View>} ListHeaderComponent={<View><View style={styles.chatHeader}><View style={styles.homeThreadIcon}><Text>🏠</Text></View><View><Text style={styles.chatTitle}>Everyone</Text><Text style={styles.muted}>4 family members + HomeBot</Text></View></View><View style={styles.botHint}><Ionicons name="sparkles" size={15} color="#7047EE" /><Text style={styles.botHintText}>Try “@bot haircut for Chad on Wednesday at 9:30 AM”</Text></View></View>} /><View style={styles.composeRow}><Pressable style={styles.composePlus}><Ionicons name="add" size={22} color="#2257F4" /></Pressable><TextInput value={draft} onChangeText={setDraft} placeholder="Message everyone or @bot…" placeholderTextColor="#8B93A5" style={styles.composeInput} returnKeyType="send" onSubmitEditing={onSend} /><Pressable onPress={onSend} style={styles.sendButton}><Ionicons name="send" size={17} color="#fff" /></Pressable></View></KeyboardAvoidingView>;
 }
+
+function parseBotEvent(text: string): Omit<BotEvent, 'id'> | null {
+  const cleaned = text.replace(/^\s*(@bot|hey bot)[,:]?\s*/i, '').trim();
+  const timeMatch = cleaned.match(/\b(?:at\s+)?(\d{1,2}(?::\d{2})?\s*(?:am|pm))\b/i);
+  const dayMatch = cleaned.match(/\b(today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i);
+  const personMatch = cleaned.match(/\bfor\s+([a-z][a-z'-]*)\b/i);
+  if (!timeMatch || !dayMatch) return null;
+  const titleEnd = personMatch?.index ?? dayMatch.index ?? cleaned.length;
+  const title = cleaned.slice(0, titleEnd).replace(/\bon\s*$/i, '').trim();
+  return { title: title || 'Family event', person: titleCase(personMatch?.[1] ?? 'Family'), day: titleCase(dayMatch[1]), time: timeMatch[1].replace(/\s+/g, ' ').toUpperCase() };
+}
+
+function titleCase(value: string) { return value.charAt(0).toUpperCase() + value.slice(1).toLowerCase(); }
+function isYes(value: string) { return /^(yes|y|yeah|yep|sure|please|ok|okay)\b/.test(value); }
+function parseReminder(value: string) { const match = value.match(/(\d+)\s*(?:minute|min)/); return match ? Number(match[1]) : undefined; }
+function cleanAnswer(value: string) { return value.replace(/^(it is|it's|the place is|at)\s+/i, '').trim(); }
 
 function MoreMenu({ styles, setView }: any) {
   const items = [
@@ -278,7 +356,7 @@ function createStyles(t: Theme) {
     toast: { position: 'absolute', left: 18, right: 18, bottom: 78, minHeight: 50, borderRadius: 16, paddingHorizontal: 14, backgroundColor: t.surfaceStrong, borderWidth: 1, borderColor: t.line, flexDirection: 'row', alignItems: 'center', gap: 8, shadowColor: '#000', shadowOpacity: .16, shadowRadius: 16, shadowOffset: { width: 0, height: 7 } }, toastText: { color: t.text, fontSize: 11, fontWeight: '700', flex: 1 },
     calendarTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 14 }, smallButton: { width: 38, height: 38, borderRadius: 12, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, alignItems: 'center', justifyContent: 'center' }, calendarPeriod: { color: t.text, fontWeight: '800', fontSize: 15 }, weekRow: { flexDirection: 'row', justifyContent: 'space-between', backgroundColor: t.surface, borderRadius: 18, borderWidth: 1, borderColor: t.line, padding: 8 }, dayBubble: { width: 52, height: 63, borderRadius: 15, alignItems: 'center', justifyContent: 'center' }, dayBubbleActive: { backgroundColor: t.primary }, dayLabel: { color: t.muted, fontSize: 8, fontWeight: '800' }, dayNumber: { color: t.text, fontSize: 19, fontWeight: '800', marginTop: 3 }, dayTextActive: { color: '#fff' }, timelineRow: { minHeight: 76, borderRadius: 18, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, flexDirection: 'row', alignItems: 'center', padding: 12, gap: 10 }, timelineLine: { width: 4, height: 42, borderRadius: 3 }, timelineTime: { color: t.muted, fontSize: 10, width: 50, fontWeight: '700' }, timelineTitle: { color: t.text, fontSize: 13, fontWeight: '800' }, syncCard: { minHeight: 67, borderRadius: 18, padding: 13, flexDirection: 'row', gap: 10, alignItems: 'center', backgroundColor: `${t.primary}0C`, borderWidth: 1, borderColor: `${t.primary}24` }, syncTitle: { color: t.text, fontSize: 11, fontWeight: '800' },
     progressCard: { minHeight: 130, borderRadius: 23, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, padding: 20, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }, progressLabel: { color: t.primary, fontSize: 8, fontWeight: '800', letterSpacing: 1 }, progressValue: { color: t.text, fontSize: 28, fontWeight: '800', letterSpacing: -1, marginTop: 5 }, progressRing: { width: 74, height: 74, borderRadius: 37, borderWidth: 8, borderColor: '#19A47B', alignItems: 'center', justifyContent: 'center' }, progressPercent: { color: t.text, fontSize: 16, fontWeight: '800' }, choreRow: { minHeight: 70, borderRadius: 17, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, padding: 12, flexDirection: 'row', alignItems: 'center', gap: 10 }, checkCircle: { width: 27, height: 27, borderRadius: 14, borderWidth: 2, borderColor: t.line, alignItems: 'center', justifyContent: 'center' }, choreTitle: { color: t.text, fontSize: 13, fontWeight: '800' }, struck: { textDecorationLine: 'line-through', color: t.muted }, ownerDot: { width: 9, height: 9, borderRadius: 5 }, outlineAction: { minHeight: 48, borderRadius: 15, borderWidth: 1, borderStyle: 'dashed', borderColor: t.primary, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7 }, outlineActionText: { color: t.primary, fontSize: 11, fontWeight: '800' },
-    messageList: { padding: 18, gap: 16 }, chatHeader: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 16, paddingBottom: 14, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: t.line }, homeThreadIcon: { width: 42, height: 42, borderRadius: 14, backgroundColor: `${t.primary}14`, alignItems: 'center', justifyContent: 'center' }, chatTitle: { color: t.text, fontSize: 14, fontWeight: '800' }, messageWrap: { maxWidth: '84%', flexDirection: 'row', gap: 8, alignSelf: 'flex-start' }, messageMine: { alignSelf: 'flex-end' }, chatAvatar: { width: 32, height: 32, backgroundColor: '#FFE1CF' }, messageAuthor: { color: t.muted, fontSize: 8, marginBottom: 4 }, messageAuthorMine: { textAlign: 'right' }, messageBubble: { backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, borderRadius: 5, borderTopRightRadius: 16, borderBottomLeftRadius: 16, borderBottomRightRadius: 16, padding: 12 }, messageBubbleMine: { backgroundColor: t.primary, borderColor: t.primary, borderTopLeftRadius: 16, borderTopRightRadius: 5 }, messageText: { color: t.text, fontSize: 12, lineHeight: 17 }, messageTextMine: { color: '#fff' }, composeRow: { minHeight: 61, paddingHorizontal: 12, gap: 8, flexDirection: 'row', alignItems: 'center', borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: t.line, backgroundColor: t.surfaceStrong }, composePlus: { width: 36, height: 36, borderRadius: 12, backgroundColor: `${t.primary}13`, alignItems: 'center', justifyContent: 'center' }, composeInput: { flex: 1, height: 40, borderRadius: 13, borderWidth: 1, borderColor: t.line, backgroundColor: t.surface, color: t.text, paddingHorizontal: 12, fontSize: 12 }, sendButton: { width: 37, height: 37, borderRadius: 12, backgroundColor: t.primary, alignItems: 'center', justifyContent: 'center' },
+    messageList: { padding: 18, paddingBottom: 24, gap: 16 }, chatHeader: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 12, paddingBottom: 14, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: t.line }, homeThreadIcon: { width: 42, height: 42, borderRadius: 14, backgroundColor: `${t.primary}14`, alignItems: 'center', justifyContent: 'center' }, chatTitle: { color: t.text, fontSize: 14, fontWeight: '800' }, botHint: { minHeight: 48, borderRadius: 15, paddingHorizontal: 12, marginBottom: 5, flexDirection: 'row', gap: 8, alignItems: 'center', backgroundColor: '#7047EE12', borderWidth: 1, borderColor: '#7047EE30' }, botHintText: { color: t.text, fontSize: 10, lineHeight: 14, flex: 1, fontWeight: '700' }, messageWrap: { maxWidth: '88%', flexDirection: 'row', gap: 8, alignSelf: 'flex-start' }, messageBody: { flexShrink: 1 }, messageMine: { alignSelf: 'flex-end' }, chatAvatar: { width: 32, height: 32, backgroundColor: '#FFE1CF' }, botAvatar: { width: 32, height: 32, backgroundColor: '#7047EE' }, messageAuthor: { color: t.muted, fontSize: 8, marginBottom: 4 }, botAuthor: { color: '#7047EE', fontWeight: '800' }, messageAuthorMine: { textAlign: 'right' }, messageBubble: { backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, borderRadius: 5, borderTopRightRadius: 16, borderBottomLeftRadius: 16, borderBottomRightRadius: 16, padding: 12 }, botBubble: { borderColor: '#7047EE55', backgroundColor: t.dark ? '#251F46' : '#F5F0FF' }, messageBubbleMine: { backgroundColor: t.primary, borderColor: t.primary, borderTopLeftRadius: 16, borderTopRightRadius: 5 }, messageText: { color: t.text, fontSize: 12, lineHeight: 17 }, messageTextMine: { color: '#fff' }, composeRow: { minHeight: 61, paddingHorizontal: 12, paddingVertical: 8, gap: 8, flexDirection: 'row', alignItems: 'center', borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: t.line, backgroundColor: t.surfaceStrong }, composePlus: { width: 36, height: 36, borderRadius: 12, backgroundColor: `${t.primary}13`, alignItems: 'center', justifyContent: 'center' }, composeInput: { flex: 1, minHeight: 40, maxHeight: 90, borderRadius: 13, borderWidth: 1, borderColor: t.line, backgroundColor: t.surface, color: t.text, paddingHorizontal: 12, fontSize: 12 }, sendButton: { width: 37, height: 37, borderRadius: 12, backgroundColor: t.primary, alignItems: 'center', justifyContent: 'center' },
     moreIntro: { color: t.muted, fontSize: 12, lineHeight: 18, marginBottom: 4 }, moreGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 11 }, moreCard: { width: '48.5%', minHeight: 180, borderRadius: 22, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, padding: 16 }, moreIcon: { width: 45, height: 45, borderRadius: 15, alignItems: 'center', justifyContent: 'center' }, moreTitle: { color: t.text, fontSize: 15, fontWeight: '800', marginTop: 17 }, moreDetail: { color: t.muted, fontSize: 9, lineHeight: 14, marginTop: 5, paddingRight: 10 }, moreChevron: { position: 'absolute', right: 14, bottom: 14 },
     searchInput: { height: 45, borderRadius: 15, borderWidth: 1, borderColor: t.line, backgroundColor: t.surface, color: t.text, paddingHorizontal: 14 }, notesGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 }, noteCard: { width: '48.5%', minHeight: 140, borderRadius: 19, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, padding: 15 }, noteEmoji: { fontSize: 24 }, noteTitle: { color: t.text, fontSize: 12, fontWeight: '800', marginTop: 18, marginBottom: 4 },
     recapHero: { minHeight: 260, borderRadius: 24, padding: 23, justifyContent: 'center' }, recapHeroLabel: { color: '#FFFFFFB5', fontSize: 8, fontWeight: '800', letterSpacing: 1, marginTop: 13 }, recapHeroTitle: { color: '#fff', fontSize: 28, lineHeight: 31, fontWeight: '800', letterSpacing: -1, marginTop: 8 }, recapHeroText: { color: '#FFFFFFC0', fontSize: 11, lineHeight: 16, marginTop: 8 }, recapHeroButton: { alignSelf: 'flex-start', minHeight: 38, borderRadius: 12, backgroundColor: '#fff', flexDirection: 'row', gap: 7, alignItems: 'center', paddingHorizontal: 13, marginTop: 18 }, highlightRow: { minHeight: 61, flexDirection: 'row', gap: 11, alignItems: 'center', borderRadius: 16, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, padding: 12 }, highlightTime: { color: t.primary, fontSize: 11, fontWeight: '800', width: 38 }, highlightText: { color: t.text, fontSize: 11, fontWeight: '700', flex: 1 },
