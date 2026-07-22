@@ -100,6 +100,7 @@ function CohoApp() {
   const [botDraft, setBotDraft] = useState<BotDraft | null>(null);
   const [botEvents, setBotEvents] = useState<BotEvent[]>([]);
   const [cohConversationId, setCohConversationId] = useState<string | null>(null);
+  const [cohHistory, setCohHistory] = useState<CohHistoryItem[]>([]);
   const [cohRemoteAvailable, setCohRemoteAvailable] = useState<boolean | null>(null);
   const [cohThinking, setCohThinking] = useState(false);
   const [connected, setConnected] = useState<Record<string, boolean>>({ 'Apple Calendar': true, 'iOS Notifications': true });
@@ -214,24 +215,16 @@ function CohoApp() {
     if (cohRemoteAvailable !== false) {
       setCohThinking(true);
       try {
-        const history: CohHistoryItem[] = messages.slice(-14).map((item) => ({
-          role: item.bot ? 'assistant' : 'user',
-          content: item.text,
-        }));
         const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
         const response = await askCoh({
           message: text,
           conversationId: cohConversationId,
           timezone,
-          history,
-          localContext: {
-            family: profiles.map(({ name, role }) => ({ name, role })),
-            upcomingEvents: botEvents.slice(-20),
-            openChores: chores.filter((chore) => !chore.done).map(({ title, owner, due }) => ({ title, owner, due })),
-          },
+          history: cohHistory,
         });
         setCohRemoteAvailable(true);
         setCohConversationId(response.conversationId);
+        setCohHistory((current) => [...current, { role: 'user' as const, content: text }, { role: 'assistant' as const, content: response.reply }].slice(-16));
         addBotMessage(response.reply);
 
         if (response.status === 'confirmed' && response.proposed_action.type === 'create_event') {
@@ -241,8 +234,10 @@ function CohoApp() {
             showNotice('Coh added an approved event to the family calendar');
           }
           setCohConversationId(null);
+          setCohHistory([]);
         } else if (response.status === 'canceled') {
           setCohConversationId(null);
+          setCohHistory([]);
         }
         return;
       } catch {
