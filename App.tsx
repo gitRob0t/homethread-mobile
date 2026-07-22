@@ -261,7 +261,11 @@ function CohoApp() {
   return (
     <SafeAreaView style={styles.safeArea}>
       <StatusBar style={dark ? 'light' : 'dark'} />
-      <View style={styles.app}>
+      <KeyboardAvoidingView
+        style={styles.app}
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        keyboardVerticalOffset={0}
+      >
         <Header
           title={title}
           theme={theme}
@@ -289,7 +293,7 @@ function CohoApp() {
         <BottomTabs tab={tab} setTab={(next: Tab) => { setTab(next); if (next !== 'More') setMoreView('Menu'); }} theme={theme} styles={styles} />
 
         {notice && <View style={styles.toast}><Ionicons name="checkmark-circle" size={18} color="#19A47B" /><Text style={styles.toastText}>{notice}</Text></View>}
-      </View>
+      </KeyboardAvoidingView>
 
       <QuickAddModal
         visible={quickAddOpen}
@@ -345,7 +349,7 @@ function TodayScreen({ theme, styles }: any) {
       <View style={[styles.cardPill, { backgroundColor: `${card.color}12` }]}><Ionicons name="time-outline" size={13} color={card.color} /><Text style={[styles.cardPillText, { color: card.color }]}>Tap for details</Text></View>
     </Pressable>)}</View>
     <LinearGradient colors={['#2257F4', '#7047EE']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={styles.recapCard}>
-      <View style={styles.recapIcon}><Ionicons name="sparkles" size={21} color="#fff" /></View><View style={styles.recapCopy}><Text style={styles.recapLabel}>HOMETHREAD DAILY</Text><Text style={styles.recapTitle}>Your morning recap is ready</Text><Text style={styles.recapText}>Three events, two open chores, and one new family note.</Text></View><Ionicons name="chevron-forward" size={20} color="#fff" />
+      <View style={styles.recapIcon}><Ionicons name="sparkles" size={21} color="#fff" /></View><View style={styles.recapCopy}><Text style={styles.recapLabel}>COHO DAILY</Text><Text style={styles.recapTitle}>Your morning recap is ready</Text><Text style={styles.recapText}>Three events, two open chores, and one new family note.</Text></View><Ionicons name="chevron-forward" size={20} color="#fff" />
     </LinearGradient>
     <Text style={styles.sectionTitle}>Family status</Text><View style={styles.familyRow}>{family.map((person) => <View key={person.name} style={styles.familyPerson}><View style={[styles.avatar, { backgroundColor: person.color }]}><Text style={[styles.avatarText, { color: person.ink }]}>{person.initials}</Text></View><Text style={styles.familyName}>{person.name}</Text><Text style={styles.familyStatus}>{person.status}</Text></View>)}</View>
     <Text style={styles.sectionTitle}>Coming up</Text>{upcoming.map((event) => <Pressable key={event.title} style={styles.upcomingRow}><View style={[styles.dateTile, { borderColor: event.color }]}><Text style={[styles.dateMonth, { color: event.color }]}>{event.month}</Text><Text style={[styles.dateNumber, { color: event.color }]}>{event.date}</Text></View><View style={styles.flex}><Text style={styles.upcomingTime}>{event.time}</Text><Text style={styles.upcomingTitle}>{event.title}</Text></View><Ionicons name="chevron-forward" size={18} color={theme.muted} /></Pressable>)}
@@ -365,7 +369,7 @@ function ChoresScreen({ styles, chores, onToggle }: any) {
 }
 
 function ChatScreen({ styles, messages, draft, setDraft, onSend }: any) {
-  return <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'height' : undefined} keyboardVerticalOffset={0} style={styles.flex}><FlatList data={messages} keyExtractor={(item) => item.id} contentContainerStyle={styles.messageList} keyboardDismissMode="interactive" keyboardShouldPersistTaps="handled" renderItem={({ item }) => <View style={[styles.messageWrap, item.mine && styles.messageMine]}>{!item.mine && <View style={[styles.avatar, item.bot ? styles.botAvatar : styles.chatAvatar]}>{item.bot ? <Ionicons name="sparkles" size={17} color="#fff" /> : <Text style={styles.avatarText}>LC</Text>}</View>}<View style={styles.messageBody}><Text style={[styles.messageAuthor, item.mine && styles.messageAuthorMine, item.bot && styles.botAuthor]}>{item.author}</Text><View style={[styles.messageBubble, item.mine && styles.messageBubbleMine, item.bot && styles.botBubble]}><Text style={[styles.messageText, item.mine && styles.messageTextMine]}>{item.text}</Text></View></View></View>} ListHeaderComponent={<View><View style={styles.chatHeader}><View style={styles.homeThreadIcon}><Ionicons name="home" size={20} color="#F5A623" /></View><View><Text style={styles.chatTitle}>Everyone</Text><Text style={styles.muted}>4 family members + Coh</Text></View></View><View style={styles.botHint}><Ionicons name="sparkles" size={15} color="#7047EE" /><Text style={styles.botHintText}>Try “Hey Coh, haircut for Chad on Wednesday at 9:30 AM”</Text></View></View>} /><View style={styles.composeRow}><Pressable style={styles.composePlus}><Ionicons name="add" size={22} color="#2257F4" /></Pressable><TextInput value={draft} onChangeText={setDraft} placeholder="Message everyone or @Coh…" placeholderTextColor="#8B93A5" style={styles.composeInput} returnKeyType="send" onSubmitEditing={onSend} /><Pressable onPress={onSend} style={styles.sendButton}><Ionicons name="send" size={17} color="#fff" /></Pressable></View></KeyboardAvoidingView>;
+  return <View style={styles.flex}><FlatList data={messages} keyExtractor={(item) => item.id} contentContainerStyle={styles.messageList} automaticallyAdjustKeyboardInsets keyboardDismissMode="interactive" keyboardShouldPersistTaps="handled" renderItem={({ item }) => <View style={[styles.messageWrap, item.mine && styles.messageMine]}>{!item.mine && <View style={[styles.avatar, item.bot ? styles.botAvatar : styles.chatAvatar]}>{item.bot ? <Ionicons name="sparkles" size={17} color="#fff" /> : <Text style={styles.avatarText}>LC</Text>}</View>}<View style={styles.messageBody}><Text style={[styles.messageAuthor, item.mine && styles.messageAuthorMine, item.bot && styles.botAuthor]}>{item.author}</Text><View style={[styles.messageBubble, item.mine && styles.messageBubbleMine, item.bot && styles.botBubble]}><Text style={[styles.messageText, item.mine && styles.messageTextMine]}>{item.text}</Text></View></View></View>} ListHeaderComponent={<View><View style={styles.chatHeader}><View style={styles.homeThreadIcon}><Ionicons name="home" size={20} color="#F5A623" /></View><View><Text style={styles.chatTitle}>Everyone</Text><Text style={styles.muted}>4 family members + Coh</Text></View></View><View style={styles.botHint}><Ionicons name="sparkles" size={15} color="#7047EE" /><Text style={styles.botHintText}>Try “Hey Coh, haircut for Chad on Wednesday at 9:30 AM”</Text></View></View>} /><View style={styles.composeRow}><Pressable style={styles.composePlus}><Ionicons name="add" size={22} color="#2257F4" /></Pressable><TextInput value={draft} onChangeText={setDraft} placeholder="Message everyone or @Coh…" placeholderTextColor="#8B93A5" style={styles.composeInput} returnKeyType="send" onSubmitEditing={onSend} /><Pressable onPress={onSend} style={styles.sendButton}><Ionicons name="send" size={17} color="#fff" /></Pressable></View></View>;
 }
 
 function parseBotEvent(text: string): Omit<BotEvent, 'id'> | null {
