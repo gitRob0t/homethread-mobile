@@ -32,7 +32,6 @@ export async function askCoh(input: {
   householdId?: string | null;
   timezone: string;
   history: CohHistoryItem[];
-  localContext: Record<string, unknown>;
 }): Promise<CohResponse> {
   const { data, error } = await supabase.functions.invoke<CohResponse>('coh-assistant', {
     body: input,
