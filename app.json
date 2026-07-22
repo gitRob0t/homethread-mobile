@@ -36,6 +36,12 @@
     "owner": "gitrob0ts-team",
     "plugins": [
       [
+        "expo-image-picker",
+        {
+          "photosPermission": "Coho uses your selected photo as a family member's profile picture."
+        }
+      ],
+      [
         "expo-share-intent",
         {
           "iosShareExtensionName": "Share to Coh",
