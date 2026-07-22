@@ -39,6 +39,7 @@ Coh should ask for missing details one at a time, summarize the complete event, 
 ## Safety contract
 
 - Every request requires a valid Supabase user session.
+- Only messages deliberately addressed to Coh are sent to the model. Unrelated family chat, profiles, calendars, and chores are excluded.
 - Household access is verified with row-level security and membership checks.
 - Coh returns structured data, not free-form commands.
 - Writes require explicit confirmation and are recorded in `assistant_actions`.
