@@ -7,6 +7,7 @@ import * as Notifications from 'expo-notifications';
 import { StatusBar } from 'expo-status-bar';
 import { ShareIntentProvider, useShareIntentContext } from 'expo-share-intent';
 import { useEffect, useMemo, useState } from 'react';
+import { askCoh, type CohDraft, type CohHistoryItem } from './src/services/cohAssistant';
 import {
   FlatList,
   Image,
@@ -98,6 +99,9 @@ function CohoApp() {
   const [messageDraft, setMessageDraft] = useState('');
   const [botDraft, setBotDraft] = useState<BotDraft | null>(null);
   const [botEvents, setBotEvents] = useState<BotEvent[]>([]);
+  const [cohConversationId, setCohConversationId] = useState<string | null>(null);
+  const [cohRemoteAvailable, setCohRemoteAvailable] = useState<boolean | null>(null);
+  const [cohThinking, setCohThinking] = useState(false);
   const [connected, setConnected] = useState<Record<string, boolean>>({ 'Apple Calendar': true, 'iOS Notifications': true });
   const [sharePreviewOpen, setSharePreviewOpen] = useState(false);
   const [sharedDraft, setSharedDraft] = useState('');
@@ -174,7 +178,7 @@ function CohoApp() {
     if (!text) return;
     setMessages((current) => [...current, { id: String(Date.now()), mine: true, author: 'You', text }]);
     setMessageDraft('');
-    handleBotMessage(text);
+    void handleBotMessage(text);
   }
 
   function cancelSharedItem() {
@@ -198,11 +202,60 @@ function CohoApp() {
     }
     const prompt = text.match(/^\s*(@coh|hey coh|@bot|hey bot)/i) ? text : `@coh ${text}`;
     setMessages((current) => [...current, { id: `shared-${Date.now()}`, mine: true, author: 'You', text: prompt }]);
-    setTimeout(() => handleBotMessage(prompt), 50);
+    setTimeout(() => void handleBotMessage(prompt), 50);
     setSharedDraft('');
   }
 
-  function handleBotMessage(text: string) {
+  async function handleBotMessage(text: string) {
+    const normalized = text.trim().toLowerCase();
+    const directlyInvoked = normalized.startsWith('@coh') || normalized.startsWith('hey coh') || normalized.startsWith('@bot') || normalized.startsWith('hey bot');
+    if (!directlyInvoked && !botDraft && !cohConversationId) return;
+
+    if (cohRemoteAvailable !== false) {
+      setCohThinking(true);
+      try {
+        const history: CohHistoryItem[] = messages.slice(-14).map((item) => ({
+          role: item.bot ? 'assistant' : 'user',
+          content: item.text,
+        }));
+        const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+        const response = await askCoh({
+          message: text,
+          conversationId: cohConversationId,
+          timezone,
+          history,
+          localContext: {
+            family: profiles.map(({ name, role }) => ({ name, role })),
+            upcomingEvents: botEvents.slice(-20),
+            openChores: chores.filter((chore) => !chore.done).map(({ title, owner, due }) => ({ title, owner, due })),
+          },
+        });
+        setCohRemoteAvailable(true);
+        setCohConversationId(response.conversationId);
+        addBotMessage(response.reply);
+
+        if (response.status === 'confirmed' && response.proposed_action.type === 'create_event') {
+          const event = eventFromCohDraft(response.draft);
+          if (event) {
+            setBotEvents((current) => current.some((item) => item.id === event.id) ? current : [...current, event]);
+            showNotice('Coh added an approved event to the family calendar');
+          }
+          setCohConversationId(null);
+        } else if (response.status === 'canceled') {
+          setCohConversationId(null);
+        }
+        return;
+      } catch {
+        setCohRemoteAvailable(false);
+      } finally {
+        setCohThinking(false);
+      }
+    }
+
+    handleLocalBotMessage(text);
+  }
+
+  function handleLocalBotMessage(text: string) {
     const normalized = text.trim().toLowerCase();
     if (!botDraft && !normalized.startsWith('@coh') && !normalized.startsWith('hey coh') && !normalized.startsWith('@bot') && !normalized.startsWith('hey bot')) return;
 
@@ -369,7 +422,7 @@ function CohoApp() {
           {tab === 'Today' && <TodayScreen theme={theme} styles={styles} quickItems={notice ? [notice] : []} onCalendar={() => setTab('Calendar')} onRecap={openRecaps} onAction={showNotice} />}
           {tab === 'Calendar' && <CalendarScreen theme={theme} styles={styles} botEvents={botEvents} onAction={showNotice} onManage={() => { setMoreView('Integrations'); setTab('More'); }} />}
           {tab === 'Chores' && <ChoresScreen styles={styles} chores={chores} rewardMember={rewardMember} setRewardMember={setRewardMember} selectedRewards={selectedRewards} onAdd={() => { setQuickAddType('Chore'); setQuickAddOpen(true); }} onSelectReward={(member: string, reward: string) => { const next = { ...selectedRewards, [member]: reward }; setSelectedRewards(next); AsyncStorage.setItem('coho-reward-goals', JSON.stringify(next)); showNotice(`${member} picked a new reward goal`); }} onToggle={(id: string) => setChores((items) => items.map((item) => item.id === id ? { ...item, done: !item.done } : item))} />}
-          {tab === 'Chat' && <ChatScreen styles={styles} messages={messages} draft={messageDraft} setDraft={setMessageDraft} onSend={sendMessage} onAdd={() => setQuickAddOpen(true)} />}
+          {tab === 'Chat' && <ChatScreen styles={styles} messages={messages} draft={messageDraft} setDraft={setMessageDraft} onSend={sendMessage} onAdd={() => setQuickAddOpen(true)} cohThinking={cohThinking} />}
           {tab === 'More' && moreView === 'Menu' && <MoreMenu styles={styles} setView={setMoreView} />}
           {tab === 'More' && moreView === 'Chief of Home' && <ChiefOfHomeScreen styles={styles} prefs={chiefPrefs} setPrefs={saveChiefPreferences} onActivate={activateChiefOfHome} />}
           {tab === 'More' && moreView === 'Family' && <FamilyProfilesScreen styles={styles} profiles={profiles} onEdit={setEditingProfile} onAdd={() => setEditingProfile({ id: `profile-${Date.now()}`, name: '', dob: '', bio: '', role: 'Family member', color: '#DCE7FF', ink: '#2257F4' })} />}
@@ -477,9 +530,9 @@ function ChoresScreen({ styles, chores, onToggle, rewardMember, setRewardMember,
   </ScrollView>;
 }
 
-function ChatScreen({ styles, messages, draft, setDraft, onSend, onAdd }: any) {
+function ChatScreen({ styles, messages, draft, setDraft, onSend, onAdd, cohThinking }: any) {
   const cohActive = /^\s*(@coh|hey coh)\b/i.test(draft);
-  return <View style={styles.flex}><FlatList data={messages} keyExtractor={(item) => item.id} contentContainerStyle={styles.messageList} automaticallyAdjustKeyboardInsets keyboardDismissMode="interactive" keyboardShouldPersistTaps="handled" renderItem={({ item }) => <View style={[styles.messageWrap, item.mine && styles.messageMine]}>{!item.mine && <View style={[styles.avatar, item.bot ? styles.botAvatar : styles.chatAvatar]}>{item.bot ? <Ionicons name="sparkles" size={17} color="#fff" /> : <Text style={styles.avatarText}>LC</Text>}</View>}<View style={styles.messageBody}><Text style={[styles.messageAuthor, item.mine && styles.messageAuthorMine, item.bot && styles.botAuthor]}>{item.author}</Text><View style={[styles.messageBubble, item.mine && styles.messageBubbleMine, item.bot && styles.botBubble]}><MentionText text={item.text} mine={item.mine} styles={styles} /></View></View></View>} ListHeaderComponent={<View><View style={styles.chatHeader}><View style={styles.homeThreadIcon}><Ionicons name="home" size={20} color="#F5A623" /></View><View><Text style={styles.chatTitle}>Everyone</Text><Text style={styles.muted}>4 family members + Coh</Text></View></View><View style={styles.botHint}><Ionicons name="sparkles" size={15} color="#7047EE" /><Text style={styles.botHintText}>Try “Hey Coh, haircut for Chad on Wednesday at 9:30 AM”</Text></View></View>} /><View style={[styles.composeRow, cohActive && styles.composeRowCoh]}><Pressable onPress={onAdd} style={[styles.composePlus, cohActive && styles.composeCohBadge]}>{cohActive ? <Ionicons name="sparkles" size={18} color="#fff" /> : <Ionicons name="add" size={22} color="#2257F4" />}</Pressable><TextInput value={draft} onChangeText={setDraft} placeholder="Message everyone or @Coh…" placeholderTextColor="#8B93A5" style={[styles.composeInput, cohActive && styles.composeInputCoh]} returnKeyType="send" onSubmitEditing={onSend} /><Pressable onPress={onSend} style={[styles.sendButton, cohActive && styles.sendButtonCoh]}><Ionicons name={cohActive ? 'sparkles' : 'send'} size={17} color="#fff" /></Pressable></View></View>;
+  return <View style={styles.flex}><FlatList data={messages} keyExtractor={(item) => item.id} contentContainerStyle={styles.messageList} automaticallyAdjustKeyboardInsets keyboardDismissMode="interactive" keyboardShouldPersistTaps="handled" renderItem={({ item }) => <View style={[styles.messageWrap, item.mine && styles.messageMine]}>{!item.mine && <View style={[styles.avatar, item.bot ? styles.botAvatar : styles.chatAvatar]}>{item.bot ? <Ionicons name="sparkles" size={17} color="#fff" /> : <Text style={styles.avatarText}>LC</Text>}</View>}<View style={styles.messageBody}><Text style={[styles.messageAuthor, item.mine && styles.messageAuthorMine, item.bot && styles.botAuthor]}>{item.author}</Text><View style={[styles.messageBubble, item.mine && styles.messageBubbleMine, item.bot && styles.botBubble]}><MentionText text={item.text} mine={item.mine} styles={styles} /></View></View></View>} ListHeaderComponent={<View><View style={styles.chatHeader}><View style={styles.homeThreadIcon}><Ionicons name="home" size={20} color="#F5A623" /></View><View><Text style={styles.chatTitle}>Everyone</Text><Text style={styles.muted}>4 family members + Coh</Text></View></View><View style={styles.botHint}><Ionicons name="sparkles" size={15} color="#7047EE" /><Text style={styles.botHintText}>Try “Hey Coh, haircut for Chad on Wednesday at 9:30 AM”</Text></View></View>} ListFooterComponent={cohThinking ? <View style={styles.cohThinking}><Ionicons name="sparkles" size={15} color="#7047EE" /><Text style={styles.botAuthor}>Coh is thinking…</Text></View> : null} /><View style={[styles.composeRow, cohActive && styles.composeRowCoh]}><Pressable onPress={onAdd} style={[styles.composePlus, cohActive && styles.composeCohBadge]}>{cohActive ? <Ionicons name="sparkles" size={18} color="#fff" /> : <Ionicons name="add" size={22} color="#2257F4" />}</Pressable><TextInput value={draft} onChangeText={setDraft} placeholder={cohThinking ? 'Coh is thinking…' : 'Message everyone or @Coh…'} placeholderTextColor="#8B93A5" editable={!cohThinking} style={[styles.composeInput, cohActive && styles.composeInputCoh]} returnKeyType="send" onSubmitEditing={onSend} /><Pressable disabled={cohThinking} onPress={onSend} style={[styles.sendButton, cohActive && styles.sendButtonCoh, cohThinking && { opacity: .55 }]}><Ionicons name={cohActive ? 'sparkles' : 'send'} size={17} color="#fff" /></Pressable></View></View>;
 }
 
 function MentionText({ text, mine, styles }: { text: string; mine: boolean; styles: any }) {
@@ -488,6 +541,23 @@ function MentionText({ text, mine, styles }: { text: string; mine: boolean; styl
   const start = match.index;
   const end = start + match[0].length;
   return <Text style={[styles.messageText, mine && styles.messageTextMine]}>{text.slice(0, start)}<Text style={styles.cohMention}>✦ {match[0]}</Text>{text.slice(end)}</Text>;
+}
+
+function eventFromCohDraft(draft: CohDraft): BotEvent | null {
+  if (!draft.title || !draft.date || !draft.time) return null;
+  const date = new Date(`${draft.date}T${draft.time}:00`);
+  if (Number.isNaN(date.getTime())) return null;
+  return {
+    id: `coh-${draft.date}-${draft.time}-${draft.title.toLowerCase().replace(/\W+/g, '-')}`,
+    title: draft.title,
+    person: draft.person ?? 'You',
+    day: date.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' }),
+    dateISO: draft.date,
+    time: date.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }),
+    place: draft.location ?? undefined,
+    reminder: draft.reminder_minutes ?? undefined,
+    directions: draft.directions ?? undefined,
+  };
 }
 
 function extractEventIntent(text: string): Partial<BotDraft> {
@@ -730,6 +800,7 @@ function createStyles(t: Theme) {
     personSetting: { minHeight: 65, borderRadius: 17, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, padding: 11, flexDirection: 'row', alignItems: 'center', gap: 10 }, settingRow: { minHeight: 70, borderRadius: 17, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, padding: 13, flexDirection: 'row', alignItems: 'center', gap: 11 }, settingTitle: { color: t.text, fontSize: 12, fontWeight: '800' },
     modalBackdrop: { flex: 1, backgroundColor: '#0C111D88', justifyContent: 'flex-end' }, modalDismiss: { flex: 1 }, modalSheet: { backgroundColor: t.surfaceStrong, borderTopLeftRadius: 28, borderTopRightRadius: 28, paddingHorizontal: 19, paddingTop: 9, paddingBottom: Platform.OS === 'ios' ? 28 : 18 }, modalHandle: { width: 39, height: 4, borderRadius: 2, backgroundColor: t.line, alignSelf: 'center', marginBottom: 15 }, modalHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' }, modalTitle: { color: t.text, fontSize: 23, fontWeight: '800', letterSpacing: -.7 }, typeTabs: { flexDirection: 'row', borderRadius: 14, padding: 4, backgroundColor: t.canvas, marginTop: 19 }, typeTab: { flex: 1, minHeight: 38, borderRadius: 10, alignItems: 'center', justifyContent: 'center' }, typeTabActive: { backgroundColor: t.surfaceStrong }, typeTabText: { color: t.muted, fontSize: 10, fontWeight: '700' }, typeTabTextActive: { color: t.primary }, fieldLabel: { color: t.muted, fontSize: 9, fontWeight: '800', marginTop: 15, marginBottom: 6 }, modalInput: { minHeight: 46, borderRadius: 13, borderWidth: 1, borderColor: t.line, backgroundColor: t.surface, color: t.text, paddingHorizontal: 12 }, modalTextArea: { minHeight: 83, paddingTop: 12, textAlignVertical: 'top' }, saveButton: { minHeight: 48, borderRadius: 15, backgroundColor: t.primary, alignItems: 'center', justifyContent: 'center', marginTop: 18 }, saveButtonText: { color: '#fff', fontSize: 12, fontWeight: '800' },
     privacyCard: { minHeight: 66, borderRadius: 16, padding: 12, marginTop: 16, flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: '#19A47B12', borderWidth: 1, borderColor: '#19A47B35' }, privacyText: { color: t.text, fontSize: 10, lineHeight: 15, flex: 1, fontWeight: '600' }, sharedAttachment: { minHeight: 62, borderRadius: 15, padding: 12, marginTop: 10, flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line }, sharePreviewInput: { minHeight: 110, paddingTop: 12, textAlignVertical: 'top' }, shareError: { color: '#D64545', fontSize: 10, marginTop: 8 }, shareActions: { flexDirection: 'row', gap: 10, marginTop: 16 }, cancelButton: { flex: 1, minHeight: 48, borderRadius: 15, borderWidth: 1, borderColor: t.line, alignItems: 'center', justifyContent: 'center' }, cancelButtonText: { color: t.text, fontSize: 12, fontWeight: '800' }, approveButton: { flex: 1.4, minHeight: 48, borderRadius: 15, backgroundColor: t.primary, flexDirection: 'row', gap: 7, alignItems: 'center', justifyContent: 'center' },
+    cohThinking: { alignSelf: 'flex-start', flexDirection: 'row', alignItems: 'center', gap: 8, marginLeft: 40, minHeight: 38, paddingHorizontal: 13, borderRadius: 16, backgroundColor: '#7047EE14', borderWidth: 1, borderColor: '#7047EE35' },
   });
 }
 
