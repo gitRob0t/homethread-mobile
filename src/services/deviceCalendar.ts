@@ -20,6 +20,11 @@ export type DeviceCalendarSettings = {
   lastSyncedAt: string | null;
 };
 
+export type DeviceCalendarSyncResult = {
+  synced: number;
+  removed: number;
+};
+
 const emptySettings: DeviceCalendarSettings = {
   selectedCalendarIds: [],
   writeBackCalendarId: null,
@@ -73,12 +78,13 @@ export async function importSelectedDeviceCalendars(input: {
   userId: string;
   calendarIds: string[];
   daysAhead?: number;
-}) {
-  if (!input.calendarIds.length) return 0;
+}): Promise<DeviceCalendarSyncResult> {
+  if (!input.calendarIds.length) return { synced: 0, removed: 0 };
   const start = new Date();
   start.setDate(start.getDate() - 14);
   const end = new Date();
   end.setDate(end.getDate() + (input.daysAhead ?? 90));
+  const syncedAt = new Date().toISOString();
 
   const [events, calendars] = await Promise.all([
     Calendar.getEventsAsync(input.calendarIds, start, end),
@@ -86,13 +92,17 @@ export async function importSelectedDeviceCalendars(input: {
   ]);
   const calendarNames = new Map(calendars.map((calendar) => [calendar.id, calendar.title]));
   const rows = events
-    .filter((event) => Boolean(event.title && event.startDate))
+    .filter((event) => (
+      event.status !== Calendar.EventStatus.CANCELED
+      && Boolean(event.title && event.startDate)
+    ))
     .map((event) => ({
       household_id: input.householdId,
       title: event.title.trim().slice(0, 200),
       details: JSON.stringify({
         source: 'device_calendar',
         sourceCalendar: calendarNames.get(event.calendarId) ?? 'iPhone Calendar',
+        sourceCalendarId: event.calendarId,
         importedBy: input.userId,
       }),
       starts_at: new Date(event.startDate).toISOString(),
@@ -101,12 +111,17 @@ export async function importSelectedDeviceCalendars(input: {
       location: event.location?.trim() || null,
       created_by: input.userId,
       provider: 'device-calendar',
-      provider_event_id: [
+      provider_event_id: deviceCalendarEventKey(
         event.calendarId,
         event.id,
         new Date(event.startDate).toISOString(),
-      ].join(':'),
-      updated_at: new Date().toISOString(),
+      ),
+      source_calendar_id: event.calendarId,
+      status: 'confirmed',
+      provider_updated_at: event.lastModifiedDate
+        ? new Date(event.lastModifiedDate).toISOString()
+        : syncedAt,
+      updated_at: syncedAt,
     }));
 
   if (rows.length) {
@@ -116,13 +131,62 @@ export async function importSelectedDeviceCalendars(input: {
     if (error) throw error;
   }
 
+  const currentProviderIds = new Set(rows.map((row) => row.provider_event_id));
+  const { data: existing, error: existingError } = await supabase
+    .from('events')
+    .select('id, provider_event_id, source_calendar_id, status')
+    .eq('household_id', input.householdId)
+    .eq('provider', 'device-calendar')
+    .gte('starts_at', start.toISOString())
+    .lte('starts_at', end.toISOString());
+  if (existingError) throw existingError;
+
+  const removedIds = (existing ?? [])
+    .filter((event) => (
+      event.status !== 'canceled'
+      && isSelectedDeviceCalendarEvent(
+        event.source_calendar_id,
+        event.provider_event_id,
+        input.calendarIds,
+      )
+      && !currentProviderIds.has(event.provider_event_id)
+    ))
+    .map((event) => event.id);
+
+  for (let offset = 0; offset < removedIds.length; offset += 100) {
+    const { error } = await supabase
+      .from('events')
+      .update({
+        status: 'canceled',
+        created_by: input.userId,
+        provider_updated_at: syncedAt,
+        updated_at: syncedAt,
+      })
+      .in('id', removedIds.slice(offset, offset + 100));
+    if (error) throw error;
+  }
+
   const current = await getDeviceCalendarSettings();
   await saveDeviceCalendarSettings({
     ...current,
     selectedCalendarIds: input.calendarIds,
-    lastSyncedAt: new Date().toISOString(),
+    lastSyncedAt: syncedAt,
   });
-  return rows.length;
+  return { synced: rows.length, removed: removedIds.length };
+}
+
+function deviceCalendarEventKey(calendarId: string, eventId: string, startsAt: string) {
+  return [calendarId, eventId, startsAt].join(':');
+}
+
+function isSelectedDeviceCalendarEvent(
+  sourceCalendarId: string | null,
+  providerEventId: string | null,
+  selectedCalendarIds: string[],
+) {
+  if (sourceCalendarId) return selectedCalendarIds.includes(sourceCalendarId);
+  return selectedCalendarIds.some((calendarId) =>
+    providerEventId?.startsWith(`${calendarId}:`));
 }
 
 export async function writeApprovedEventToDevice(input: {

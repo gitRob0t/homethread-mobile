@@ -79,6 +79,7 @@ export async function listSharedEvents(householdId: string) {
     .from('events')
     .select('id, title, details, starts_at, ends_at, location, created_by, provider, source_calendar_id, recurrence_rule, status, creator:profiles!events_created_by_fkey(display_name)')
     .eq('household_id', householdId)
+    .neq('status', 'canceled')
     .order('starts_at', { ascending: true });
   if (error) throw error;
   return data ?? [];

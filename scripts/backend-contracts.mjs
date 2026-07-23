@@ -5,11 +5,13 @@ import path from 'node:path';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const read = (relativePath) => readFile(path.join(root, relativePath), 'utf8');
-const [repair, choreScheduling, edgeClient, familyData, deploy, assistant, extractor] = await Promise.all([
+const [repair, choreScheduling, edgeClient, familyData, deviceCalendar, householdOS, deploy, assistant, extractor] = await Promise.all([
   read('supabase/migrations/202607230008_edge_function_repairs.sql'),
   read('supabase/migrations/202607230009_chore_scheduling.sql'),
   read('src/services/edgeFunctions.ts'),
   read('src/services/familyData.ts'),
+  read('src/services/deviceCalendar.ts'),
+  read('src/components/HouseholdOS.tsx'),
   read('scripts/deploy-supabase.sh'),
   read('supabase/functions/coh-assistant/index.ts'),
   read('supabase/functions/coh-extract/index.ts'),
@@ -30,6 +32,10 @@ const contracts = [
   ['reopened chores cannot spawn duplicate occurrences', choreScheduling, /new\.next_occurrence_id is not null/],
   ['direct chore reminders use the notification outbox', choreScheduling, /insert into public\.notification_outbox/],
   ['chore creation persists schedule and owner details', familyData, /assigned_person_id: input\.assignedPersonId/],
+  ['canceled calendar events stay out of the family calendar', familyData, /\.neq\('status', 'canceled'\)/],
+  ['device calendar imports preserve their source calendar', deviceCalendar, /source_calendar_id: event\.calendarId/],
+  ['missing iPhone events are canceled during reconciliation', deviceCalendar, /status: 'canceled'/],
+  ['calendar sync reports removed iPhone events', householdOS, /deleted event.*removed from Coho/],
 ];
 
 for (const [name, source, pattern] of contracts) {

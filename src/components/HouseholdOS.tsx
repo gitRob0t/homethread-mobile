@@ -81,7 +81,11 @@ export function CalendarConnectionScreen({
   userId,
   onNotice,
   onConnected,
-}: CommonProps & { onConnected: (source: CalendarProvider | 'device') => void }) {
+  onSynced,
+}: CommonProps & {
+  onConnected: (source: CalendarProvider | 'device') => void;
+  onSynced?: () => void | Promise<void>;
+}) {
   const styles = useMemo(() => makeStyles(dark), [dark]);
   const [calendars, setCalendars] = useState<DeviceCalendarSummary[]>([]);
   const [settings, setSettings] = useState<DeviceCalendarSettings>({
@@ -182,6 +186,7 @@ export function CalendarConnectionScreen({
       if (summary && !summary.ok) throw new Error(summary.error || 'Calendar sync failed.');
       onNotice(`Calendar synced · ${summary?.imported ?? 0} in · ${summary?.exported ?? 0} out`);
       await loadCloudConnections();
+      await Promise.resolve(onSynced?.()).catch(() => undefined);
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : 'Calendar sync failed.');
     } finally {
@@ -263,7 +268,7 @@ export function CalendarConnectionScreen({
     setBusy(true);
     setError('');
     try {
-      const imported = await importSelectedDeviceCalendars({
+      const result = await importSelectedDeviceCalendars({
         householdId,
         userId,
         calendarIds: settings.selectedCalendarIds,
@@ -275,7 +280,13 @@ export function CalendarConnectionScreen({
       await saveDeviceCalendarSettings(next);
       setSettings(next);
       onConnected('device');
-      onNotice(`${imported} event${imported === 1 ? '' : 's'} synced from this iPhone`);
+      await Promise.resolve(onSynced?.()).catch(() => undefined);
+      onNotice(
+        `${result.synced} event${result.synced === 1 ? '' : 's'} synced`
+        + (result.removed
+          ? ` · ${result.removed} deleted event${result.removed === 1 ? '' : 's'} removed from Coho`
+          : ''),
+      );
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : 'Calendar sync failed.');
     } finally {
