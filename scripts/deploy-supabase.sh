@@ -20,7 +20,6 @@ protected_functions=(
   coh-extract
   instacart-shopping-list
   privacy-data
-  send-household-invite
 )
 
 public_entry_functions=(
@@ -29,6 +28,7 @@ public_entry_functions=(
   dispatch-notifications
   resend-inbound
   run-automations
+  send-household-invite
   send-household-briefings
 )
 

@@ -5,7 +5,7 @@ import path from 'node:path';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const read = (relativePath) => readFile(path.join(root, relativePath), 'utf8');
-const [repair, choreScheduling, edgeClient, familyData, deviceCalendar, householdOS, deploy, assistant, extractor] = await Promise.all([
+const [repair, choreScheduling, edgeClient, familyData, deviceCalendar, householdOS, deploy, supabaseConfig, invitationFunction, assistant, extractor] = await Promise.all([
   read('supabase/migrations/202607230008_edge_function_repairs.sql'),
   read('supabase/migrations/202607230009_chore_scheduling.sql'),
   read('src/services/edgeFunctions.ts'),
@@ -13,6 +13,8 @@ const [repair, choreScheduling, edgeClient, familyData, deviceCalendar, househol
   read('src/services/deviceCalendar.ts'),
   read('src/components/HouseholdOS.tsx'),
   read('scripts/deploy-supabase.sh'),
+  read('supabase/config.toml'),
+  read('supabase/functions/send-household-invite/index.ts'),
   read('supabase/functions/coh-assistant/index.ts'),
   read('supabase/functions/coh-extract/index.ts'),
 ]);
@@ -36,6 +38,10 @@ const contracts = [
   ['device calendar imports preserve their source calendar', deviceCalendar, /source_calendar_id: event\.calendarId/],
   ['missing iPhone events are canceled during reconciliation', deviceCalendar, /status: 'canceled'/],
   ['calendar sync reports removed iPhone events', householdOS, /deleted event.*removed from Coho/],
+  ['invite landing pages bypass gateway JWT verification', supabaseConfig, /\[functions\.send-household-invite\][\s\S]*verify_jwt = false/],
+  ['invite deployment preserves its public landing page', deploy, /public_entry_functions=\([\s\S]*send-household-invite[\s\S]*\)/],
+  ['invite creation still requires a user session', invitationFunction, /if \(!authorization\) return json\(\{ error: 'Authentication required\.' \}, 401\)/],
+  ['invite POST validates the bearer token', invitationFunction, /client\.auth\.getUser\(\)/],
 ];
 
 for (const [name, source, pattern] of contracts) {
