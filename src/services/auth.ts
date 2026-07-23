@@ -1,4 +1,5 @@
 import { supabase } from '../lib/supabase';
+import { clearLocationTrackingForSignOut } from './familyLocation';
 
 export const authCallbackUrl = 'homethread://auth/callback';
 
@@ -25,6 +26,7 @@ export async function signIn(email: string, password: string) {
 }
 
 export async function signOut() {
+  await clearLocationTrackingForSignOut().catch(() => undefined);
   const { error } = await supabase.auth.signOut();
   if (error) throw error;
 }

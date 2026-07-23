@@ -1,17 +1,56 @@
 import AuthGate from './src/components/AuthGate';
+import FamilyInboxScreen from './src/components/FamilyInbox';
+import FamilyHub from './src/components/FamilyHub';
+import {
+  CalendarConnectionScreen,
+  FamilyPlacesScreen,
+  FoodHubScreen,
+  TravelHubScreen,
+} from './src/components/HouseholdOS';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import { LinearGradient } from 'expo-linear-gradient';
+import { setAudioModeAsync } from 'expo-audio';
 import * as Notifications from 'expo-notifications';
+import * as Speech from 'expo-speech';
 import { StatusBar } from 'expo-status-bar';
 import { ShareIntentProvider, useShareIntentContext } from 'expo-share-intent';
 import { useEffect, useMemo, useState } from 'react';
 import { askCoh, type CohDraft, type CohHistoryItem } from './src/services/cohAssistant';
+import { writeApprovedEventToDevice } from './src/services/deviceCalendar';
+import { supabase } from './src/lib/supabase';
+import {
+  listHouseholdPeople,
+  listHouseholds,
+  saveHouseholdPerson,
+  type HouseholdPerson,
+  uploadHouseholdPersonAvatar,
+} from './src/services/households';
+import { addGroceryItems, upsertMealPlans } from './src/services/householdOperations';
+import { registerPushDevice, syncBriefingPreferences } from './src/services/pushNotifications';
+import {
+  completeEventFollowUp,
+  createEventFollowUp,
+  createFamilyChore,
+  createFamilyEvent,
+  listEventFollowUps,
+  listSharedChores,
+  listSharedEvents,
+  listSharedMessages,
+  listSharedNotes,
+  saveFamilyNote,
+  sendFamilyMessage,
+  type SharedFollowUp,
+  type SharedNote,
+  subscribeToHousehold,
+  updateFamilyChore,
+} from './src/services/familyData';
 import {
   FlatList,
   Image,
   KeyboardAvoidingView,
+  Linking,
   Modal,
   Platform,
   Pressable,
@@ -27,45 +66,48 @@ import {
 
 type Theme = ReturnType<typeof createTheme>;
 type Tab = 'Today' | 'Calendar' | 'Chores' | 'Chat' | 'More';
-type MoreView = 'Menu' | 'Chief of Home' | 'Family' | 'Notes' | 'Recaps' | 'Integrations' | 'Settings';
-type ChatMessage = { id: string; mine: boolean; author: string; text: string; bot?: boolean };
-type BotEvent = { id: string; title: string; person: string; day: string; dateISO?: string; time: string; place?: string; reminder?: number; directions?: boolean };
+type MoreView =
+  | 'Menu'
+  | 'Chief of Home'
+  | 'Family'
+  | 'Notes'
+  | 'Recaps'
+  | 'Integrations'
+  | 'Calendar Sync'
+  | 'Family Places'
+  | 'Meals & Groceries'
+  | 'Family Inbox'
+  | 'Trips'
+  | 'Settings';
+type ChatChannel = 'family' | 'coh';
+type ChatMessage = { id: string; mine: boolean; author: string; text: string; bot?: boolean; channel?: ChatChannel };
+type BotEvent = { id: string; sourceId?: string; title: string; person: string; day: string; dateISO?: string; time: string; place?: string; reminder?: number; directions?: boolean };
+type Chore = { id: string; title: string; owner: string; due: string; done: boolean; points: number; rewardId: string; rewardValue: number; color: string };
 type BotField = 'title' | 'day' | 'time' | 'meridiem' | 'place' | 'directions' | 'reminder' | 'confirm';
 type BotDraft = { title?: string; person?: string; day?: string; dateISO?: string; time?: string; meridiem?: 'AM' | 'PM'; place?: string; reminder?: number; directions?: boolean; awaiting: BotField };
 type ChiefPrefs = { daily: boolean; dailyTime: string; weekAhead: boolean; weekAheadDay: string; weekAheadTime: string; followUp: boolean; followUpDay: string; followUpTime: string; push: boolean; email: boolean; quietHours: boolean; events: boolean; chores: boolean; messages: boolean; followUps: boolean; members: string[] };
 type RewardGoal = { id: string; title: string; detail: string; cost: number; icon: string; color: string };
-type FamilyProfile = { id: string; name: string; dob: string; bio: string; role: string; avatarUri?: string; color: string; ink: string };
+type FamilyProfile = {
+  id: string;
+  linkedUserId?: string | null;
+  name: string;
+  dob: string;
+  bio: string;
+  role: 'Adult admin' | 'Family member' | 'Child';
+  avatarUri?: string;
+  avatarBase64?: string;
+  avatarMime?: string | null;
+  color: string;
+  ink: string;
+};
 
-const defaultChiefPrefs: ChiefPrefs = { daily: true, dailyTime: '7:00 AM', weekAhead: true, weekAheadDay: 'Sunday', weekAheadTime: '6:00 PM', followUp: true, followUpDay: 'Friday', followUpTime: '5:00 PM', push: true, email: false, quietHours: true, events: true, chores: true, messages: false, followUps: true, members: familyNames() };
-function familyNames() { return ['Chad', 'Loren', 'Asher', 'Oliver']; }
-
-const family = [
-  { initials: 'CC', name: 'Chad', status: 'At work', color: '#DCE7FF', ink: '#2257F4' },
-  { initials: 'LC', name: 'Loren', status: 'Working', color: '#FFE1CF', ink: '#D7550D' },
-  { initials: 'AC', name: 'Asher', status: 'At school', color: '#D9F7ED', ink: '#168866' },
-  { initials: 'OC', name: 'Oliver', status: 'At school', color: '#EADFFF', ink: '#6E3AE2' },
-];
-
-const initialProfiles: FamilyProfile[] = family.map((person, index) => ({ id: String(index + 1), name: person.name, dob: '', bio: index < 2 ? 'Family admin' : 'Family member', role: index < 2 ? 'Adult admin' : 'Child', color: person.color, ink: person.ink }));
-
-const initialChores = [
-  { id: '1', title: 'Trash to curb', owner: 'Chad', due: 'Before 8 PM', done: false, points: 20, color: '#2257F4' },
-  { id: '2', title: 'Unload dishwasher', owner: 'Asher', due: 'After school', done: false, points: 15, color: '#19A47B' },
-  { id: '3', title: 'Feed the dog', owner: 'Oliver', due: '5:00 PM', done: true, points: 10, color: '#7C4DFF' },
-  { id: '4', title: 'Water front beds', owner: 'Loren', due: 'Thursday', done: false, points: 15, color: '#FF7A2E' },
-];
+const defaultChiefPrefs: ChiefPrefs = { daily: true, dailyTime: '7:00 AM', weekAhead: true, weekAheadDay: 'Sunday', weekAheadTime: '6:00 PM', followUp: true, followUpDay: 'Friday', followUpTime: '5:00 PM', push: true, email: false, quietHours: true, events: true, chores: true, messages: false, followUps: true, members: [] };
 
 const rewardGoals: RewardGoal[] = [
   { id: 'game', title: 'Game time', detail: '30 minutes', cost: 30, icon: 'game-controller', color: '#7047EE' },
   { id: 'vbucks', title: 'V-Bucks', detail: '1,000 V-Bucks', cost: 100, icon: 'diamond', color: '#2257F4' },
   { id: 'allowance', title: 'Allowance', detail: '$5 reward', cost: 75, icon: 'cash', color: '#19A47B' },
   { id: 'choice', title: 'My choice', detail: 'Pick a family privilege', cost: 50, icon: 'star', color: '#FF9F1C' },
-];
-
-const upcoming = [
-  { date: '17', month: 'JUL', time: '3:00 PM', title: 'Leave for Pennsylvania', color: '#2257F4' },
-  { date: '18', month: 'JUL', time: '11:00 AM', title: "Arrive at Harvey's Lake", color: '#19A47B' },
-  { date: '21', month: 'JUL', time: '10:00 AM', title: 'Knoebels family day', color: '#FF7A2E' },
 ];
 
 Notifications.setNotificationHandler({
@@ -86,28 +128,34 @@ function CohoApp() {
   const [quickAddOpen, setQuickAddOpen] = useState(false);
   const [quickAddType, setQuickAddType] = useState('Event');
   const [quickAddTitle, setQuickAddTitle] = useState('');
+  const [quickAddDetails, setQuickAddDetails] = useState('');
   const [notice, setNotice] = useState<string | null>(null);
-  const [chores, setChores] = useState(initialChores);
-  const [rewardMember, setRewardMember] = useState('Asher');
-  const [selectedRewards, setSelectedRewards] = useState<Record<string, string>>({ Chad: 'choice', Loren: 'choice', Asher: 'game', Oliver: 'vbucks' });
-  const [profiles, setProfiles] = useState<FamilyProfile[]>(initialProfiles);
+  const [chores, setChores] = useState<Chore[]>([]);
+  const [rewardMember, setRewardMember] = useState('');
+  const [selectedRewards, setSelectedRewards] = useState<Record<string, string>>({});
+  const [profiles, setProfiles] = useState<FamilyProfile[]>([]);
   const [editingProfile, setEditingProfile] = useState<FamilyProfile | null>(null);
-  const [messages, setMessages] = useState<ChatMessage[]>([
-    { id: '1', mine: false, author: 'Loren', text: 'Can someone grab Oliver at 3:15? My last appointment may run over.' },
-    { id: '2', mine: true, author: 'You', text: 'I’ve got it. I added the drive time to the calendar too.' },
-  ]);
+  const [familyHubOpen, setFamilyHubOpen] = useState(false);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [chatMode, setChatMode] = useState<ChatChannel>('family');
   const [messageDraft, setMessageDraft] = useState('');
   const [botDraft, setBotDraft] = useState<BotDraft | null>(null);
   const [botEvents, setBotEvents] = useState<BotEvent[]>([]);
+  const [followUps, setFollowUps] = useState<SharedFollowUp[]>([]);
+  const [calendarFocusDate, setCalendarFocusDate] = useState<string | null>(null);
+  const [selectedEvent, setSelectedEvent] = useState<BotEvent | null>(null);
+  const [editingChore, setEditingChore] = useState<Chore | null>(null);
   const [cohConversationId, setCohConversationId] = useState<string | null>(null);
   const [cohHistory, setCohHistory] = useState<CohHistoryItem[]>([]);
-  const [cohRemoteAvailable, setCohRemoteAvailable] = useState<boolean | null>(null);
   const [cohThinking, setCohThinking] = useState(false);
-  const [connected, setConnected] = useState<Record<string, boolean>>({ 'Apple Calendar': true, 'iOS Notifications': true });
+  const [connected, setConnected] = useState<Record<string, boolean>>({});
   const [sharePreviewOpen, setSharePreviewOpen] = useState(false);
   const [sharedDraft, setSharedDraft] = useState('');
   const [chiefPrefs, setChiefPrefs] = useState<ChiefPrefs>(defaultChiefPrefs);
   const [localDataReady, setLocalDataReady] = useState(false);
+  const [householdId, setHouseholdId] = useState<string | null>(null);
+  const [householdName, setHouseholdName] = useState('Your family');
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
 
   useEffect(() => {
     AsyncStorage.getItem('homethread-theme').then((saved) => {
@@ -119,28 +167,109 @@ function CohoApp() {
     AsyncStorage.getItem('coho-reward-goals').then((saved) => {
       if (saved) setSelectedRewards(JSON.parse(saved));
     }).catch(() => undefined);
-    AsyncStorage.getItem('coho-family-profiles').then((saved) => {
-      if (saved) setProfiles(JSON.parse(saved));
-    }).catch(() => undefined);
     Promise.all([
-      AsyncStorage.getItem('coho-chat-messages'),
-      AsyncStorage.getItem('coho-calendar-events'),
-      AsyncStorage.getItem('coho-chores'),
+      AsyncStorage.getItem('coho-chat-messages-v2'),
+      AsyncStorage.getItem('coho-calendar-events-v2'),
+      AsyncStorage.getItem('coho-chores-v2'),
     ]).then(([savedMessages, savedEvents, savedChores]) => {
       if (savedMessages) setMessages(JSON.parse(savedMessages));
       if (savedEvents) setBotEvents(JSON.parse(savedEvents));
-      if (savedChores) setChores(JSON.parse(savedChores));
+      if (savedChores) setChores(JSON.parse(savedChores).map((chore: Chore) => ({
+        ...chore,
+        rewardId: chore.rewardId ?? 'choice',
+        rewardValue: chore.rewardValue ?? chore.points ?? 10,
+      })));
     }).catch(() => undefined).finally(() => setLocalDataReady(true));
+    Notifications.getPermissionsAsync().then((permission) => {
+      if (permission.granted) setConnected((current) => ({ ...current, 'iOS Notifications': true }));
+    }).catch(() => undefined);
   }, []);
 
   useEffect(() => {
     if (!localDataReady) return;
     AsyncStorage.multiSet([
-      ['coho-chat-messages', JSON.stringify(messages.slice(-150))],
-      ['coho-calendar-events', JSON.stringify(botEvents)],
-      ['coho-chores', JSON.stringify(chores)],
+      ['coho-chat-messages-v2', JSON.stringify(messages.slice(-150))],
+      ['coho-calendar-events-v2', JSON.stringify(botEvents)],
+      ['coho-chores-v2', JSON.stringify(chores)],
     ]).catch(() => undefined);
   }, [localDataReady, messages, botEvents, chores]);
+
+  useEffect(() => {
+    const openNotification = (response: Notifications.NotificationResponse | null) => {
+      const screen = response?.notification.request.content.data?.screen;
+      if (screen === 'Recaps') {
+        setMoreView('Recaps');
+        setTab('More');
+      }
+      if (screen === 'Family Inbox') {
+        setMoreView('Family Inbox');
+        setTab('More');
+      }
+    };
+    Notifications.getLastNotificationResponseAsync().then(openNotification).catch(() => undefined);
+    const subscription = Notifications.addNotificationResponseReceivedListener(openNotification);
+    return () => subscription.remove();
+  }, []);
+
+  useEffect(() => {
+    if (!localDataReady) return;
+    let active = true;
+    let removeSubscriptions: Array<() => void> = [];
+
+    async function connectHousehold() {
+      try {
+        const [{ data: authData }, memberships] = await Promise.all([
+          supabase.auth.getUser(),
+          listHouseholds(),
+        ]);
+        const first = memberships[0]?.households;
+        const household = Array.isArray(first) ? first[0] : first;
+        if (!active || !authData.user || !household?.id) return;
+        setHouseholdId(household.id);
+        setHouseholdName(household.name || 'Your family');
+        setCurrentUserId(authData.user.id);
+        await reloadSharedData(household.id, authData.user.id);
+        const notificationPermission = await Notifications.getPermissionsAsync();
+        if (notificationPermission.granted) {
+          await registerPushDevice(authData.user.id, household.id).catch(() => undefined);
+        }
+        if (!active) return;
+        removeSubscriptions = (['messages', 'events', 'chores', 'event_follow_ups'] as const).map((table) =>
+          subscribeToHousehold(table, household.id, () => void reloadSharedData(household.id, authData.user!.id)),
+        );
+      } catch {
+        showNotice('Coho is offline. Changes will stay on this iPhone until the household reconnects.');
+      }
+    }
+
+    void connectHousehold();
+    return () => {
+      active = false;
+      removeSubscriptions.forEach((remove) => remove());
+    };
+  }, [localDataReady]);
+
+  async function reloadSharedData(targetHousehold = householdId, targetUser = currentUserId) {
+    if (!targetHousehold || !targetUser) return;
+    const [sharedMessages, sharedEvents, sharedChores, sharedFollowUps, householdPeople] = await Promise.all([
+      listSharedMessages(targetHousehold),
+      listSharedEvents(targetHousehold),
+      listSharedChores(targetHousehold),
+      listEventFollowUps(targetHousehold),
+      listHouseholdPeople(targetHousehold),
+    ]);
+    setMessages((current) => [
+      ...current.filter((message) => messageChannel(message) === 'coh'),
+      ...sharedMessages.map((message: any) => cloudMessage(message, targetUser)),
+    ]);
+    setBotEvents(sharedEvents.map((event: any) => cloudEvent(event)));
+    setChores(sharedChores.map((chore: any, index: number) => cloudChore(chore, index)));
+    setFollowUps(sharedFollowUps);
+    const nextProfiles = householdPeople.map((person, index) => personToProfile(person, index));
+    setProfiles(nextProfiles);
+    setRewardMember((current) => nextProfiles.some((profile) => profile.name === current) ? current : nextProfiles[0]?.name ?? '');
+    setChiefPrefs((current) => current.members.length ? current : { ...current, members: nextProfiles.map((profile) => profile.name) });
+  }
 
   useEffect(() => {
     if (!hasShareIntent) return;
@@ -163,23 +292,84 @@ function CohoApp() {
     setTimeout(() => setNotice(null), 2600);
   }
 
-  function saveQuickAdd() {
+  async function saveQuickAdd() {
     if (!quickAddTitle.trim()) return;
+    const title = quickAddTitle.trim();
+    const details = quickAddDetails.trim();
     setQuickAddOpen(false);
-    showNotice(`${quickAddType} added to the family thread`);
     setQuickAddTitle('');
+    setQuickAddDetails('');
+    if (quickAddType === 'Chore') {
+      if (!householdId || !currentUserId) {
+        showNotice('Join a household before sharing a family chore.');
+        return;
+      }
+      try {
+        await createFamilyChore(householdId, currentUserId, title, details);
+        showNotice('Chore added to the shared household');
+      } catch {
+        showNotice('The chore could not be shared. Try again when Coho is online.');
+      }
+      return;
+    }
+    if (quickAddType === 'Message') {
+      setChatMode('family');
+      setTab('Chat');
+      setMessageDraft([title, details].filter(Boolean).join('\n'));
+      showNotice('Review your family message, then send it');
+      return;
+    }
+    if (quickAddType === 'Note') {
+      if (!householdId || !currentUserId) {
+        showNotice('Join a household before sharing a family note.');
+        return;
+      }
+      try {
+        await saveFamilyNote({
+          householdId,
+          userId: currentUserId,
+          title,
+          body: details,
+          pinned: false,
+        });
+        showNotice('Note added to the shared household');
+      } catch {
+        showNotice('The note could not be shared. Try again when Coho is online.');
+      }
+      return;
+    }
+    const prompt = `@coh Add an event: ${title}${details ? `. Details: ${details}` : ''}`;
+    setChatMode('coh');
+    setMessageDraft(prompt);
+    setTab('Chat');
+    showNotice('Coh will confirm the missing event details before saving');
   }
 
   function addBotMessage(text: string) {
-    setTimeout(() => setMessages((current) => [...current, { id: `bot-${Date.now()}`, mine: false, author: 'Coh', text, bot: true }]), 250);
+    setTimeout(() => setMessages((current) => [...current, { id: `bot-${Date.now()}`, mine: false, author: 'Coh', text, bot: true, channel: 'coh' }]), 250);
   }
 
-  function sendMessage() {
+  async function sendMessage() {
     const text = messageDraft.trim();
     if (!text) return;
-    setMessages((current) => [...current, { id: String(Date.now()), mine: true, author: 'You', text }]);
+    const optimistic = { id: `pending-${Date.now()}`, mine: true, author: 'You', text, channel: chatMode } as ChatMessage;
+    setMessages((current) => [...current, optimistic]);
     setMessageDraft('');
-    void handleBotMessage(text);
+    if (chatMode === 'coh') {
+      void handleBotMessage(text.match(/^\s*(@coh|hey coh)/i) ? text : `@coh ${text}`);
+      return;
+    }
+    if (!householdId || !currentUserId) {
+      showNotice('Family chat is offline. Reconnect before sending this message.');
+      return;
+    }
+    try {
+      await sendFamilyMessage(householdId, currentUserId, text);
+    } catch {
+      setMessages((current) => current.filter((message) => message.id !== optimistic.id));
+      setMessageDraft(text);
+      showNotice('Message was not sent. Your text is back in the composer.');
+    }
   }
 
   function cancelSharedItem() {
@@ -188,13 +378,14 @@ function CohoApp() {
     resetShareIntent();
   }
 
-  function sendSharedItemToCue() {
+  function sendSharedItemToCoh() {
     const incoming = shareIntent as any;
     const hasImage = Boolean(incoming?.files?.length);
     const text = sharedDraft.trim();
     setSharePreviewOpen(false);
     resetShareIntent();
     setTab('Chat');
+    setChatMode('coh');
     if (!text) {
       addBotMessage(hasImage
         ? 'I received the screenshot, but image reading is not connected yet. Type the event details here and I’ll help add them.'
@@ -202,7 +393,7 @@ function CohoApp() {
       return;
     }
     const prompt = text.match(/^\s*(@coh|hey coh|@bot|hey bot)/i) ? text : `@coh ${text}`;
-    setMessages((current) => [...current, { id: `shared-${Date.now()}`, mine: true, author: 'You', text: prompt }]);
+    setMessages((current) => [...current, { id: `shared-${Date.now()}`, mine: true, author: 'You', text: prompt, channel: 'coh' }]);
     setTimeout(() => void handleBotMessage(prompt), 50);
     setSharedDraft('');
   }
@@ -212,39 +403,106 @@ function CohoApp() {
     const directlyInvoked = normalized.startsWith('@coh') || normalized.startsWith('hey coh') || normalized.startsWith('@bot') || normalized.startsWith('hey bot');
     if (!directlyInvoked && !botDraft && !cohConversationId) return;
 
-    if (cohRemoteAvailable !== false) {
-      setCohThinking(true);
-      try {
-        const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
-        const response = await askCoh({
-          message: text,
-          conversationId: cohConversationId,
-          timezone,
-          history: cohHistory,
-        });
-        setCohRemoteAvailable(true);
-        setCohConversationId(response.conversationId);
-        setCohHistory((current) => [...current, { role: 'user' as const, content: text }, { role: 'assistant' as const, content: response.reply }].slice(-16));
-        addBotMessage(response.reply);
+    setCohThinking(true);
+    try {
+      const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+      const response = await askCoh({
+        message: text,
+        conversationId: cohConversationId,
+        householdId,
+        timezone,
+        history: cohHistory,
+      });
+      setCohConversationId(response.conversationId);
+      setCohHistory((current) => [...current, { role: 'user' as const, content: text }, { role: 'assistant' as const, content: response.reply }].slice(-16));
+      addBotMessage(response.reply);
 
-        if (response.status === 'confirmed' && response.proposed_action.type === 'create_event') {
-          const event = eventFromCohDraft(response.draft);
-          if (event) {
-            setBotEvents((current) => current.some((item) => item.id === event.id) ? current : [...current, event]);
-            showNotice('Coh added an approved event to the family calendar');
-          }
-          setCohConversationId(null);
-          setCohHistory([]);
-        } else if (response.status === 'canceled') {
-          setCohConversationId(null);
-          setCohHistory([]);
+      if (response.status === 'confirmed' && response.proposed_action.type === 'create_event') {
+        const event = eventFromCohDraft(response.draft);
+        if (event) {
+          const result = await persistApprovedEvent(event);
+          addBotMessage(eventSaveReply(event, result));
         }
-        return;
-      } catch {
-        setCohRemoteAvailable(false);
-      } finally {
-        setCohThinking(false);
+        setCohConversationId(null);
+        setCohHistory([]);
+      } else if (response.status === 'confirmed' && response.proposed_action.type === 'create_chore') {
+        if (!householdId || !currentUserId || !response.draft.title) {
+          addBotMessage('I could not save that chore because the shared household or title is missing.');
+        } else {
+          const assignee = response.draft.person
+            ? profiles.find((profile) =>
+              profile.name.localeCompare(response.draft.person ?? '', undefined, { sensitivity: 'base' }) === 0,
+            )
+            : null;
+          await createFamilyChore(
+            householdId,
+            currentUserId,
+            response.draft.title,
+            response.draft.notes ?? '',
+            assignee?.linkedUserId ?? null,
+          );
+          addBotMessage(`Done — “${response.draft.title}” is now a shared chore${assignee ? ` for ${assignee.name}` : ''}. Open Chores to choose what it earns.`);
+          showNotice('Coh added the chore to the household');
+        }
+        setCohConversationId(null);
+        setCohHistory([]);
+      } else if (response.status === 'confirmed' && response.proposed_action.type === 'create_note') {
+        if (!householdId || !currentUserId || !response.draft.title) {
+          addBotMessage('I could not save that note because the shared household or title is missing.');
+        } else {
+          await saveFamilyNote({
+            householdId,
+            userId: currentUserId,
+            title: response.draft.title,
+            body: response.draft.notes ?? '',
+            pinned: false,
+          });
+          addBotMessage(`Done — “${response.draft.title}” is in the shared family notes.`);
+          showNotice('Coh added the note to the household');
+        }
+        setCohConversationId(null);
+        setCohHistory([]);
+      } else if (response.status === 'confirmed' && response.proposed_action.type === 'add_grocery_items') {
+        if (!householdId || !currentUserId) {
+          addBotMessage('Join a Coho household first so I can add those items to a shared grocery list.');
+        } else {
+          await addGroceryItems({
+            householdId,
+            userId: currentUserId,
+            items: response.draft.grocery_items,
+          });
+          showNotice(`${response.draft.grocery_items.length} grocery item${response.draft.grocery_items.length === 1 ? '' : 's'} added`);
+        }
+        setCohConversationId(null);
+        setCohHistory([]);
+      } else if (response.status === 'confirmed' && response.proposed_action.type === 'create_meal_plan') {
+        if (!householdId || !currentUserId) {
+          addBotMessage('Join a Coho household first so I can save the meal plan for everyone.');
+        } else {
+          await upsertMealPlans({
+            householdId,
+            userId: currentUserId,
+            meals: response.draft.meals.map((meal) => ({
+              date: meal.date,
+              mealType: meal.meal_type,
+              title: meal.title,
+              notes: meal.notes,
+            })),
+          });
+          showNotice(`${response.draft.meals.length} meal${response.draft.meals.length === 1 ? '' : 's'} added to the family week`);
+        }
+        setCohConversationId(null);
+        setCohHistory([]);
+      } else if (response.status === 'canceled') {
+        setCohConversationId(null);
+        setCohHistory([]);
       }
+      return;
+    } catch {
+      // The local conversation engine keeps Coh useful while the remote service
+      // is unavailable. The next message retries the remote service automatically.
+    } finally {
+      setCohThinking(false);
     }
 
     handleLocalBotMessage(text);
@@ -315,10 +573,8 @@ function CohoApp() {
     if (botDraft.awaiting === 'confirm') {
       if (isYes(normalized) || /^(add it|create it|save it|done)\b/.test(normalized)) {
         const event: BotEvent = { id: `event-${Date.now()}`, title: botDraft.title!, person: botDraft.person ?? 'You', day: botDraft.day!, dateISO: botDraft.dateISO, time: formatDraftTime(botDraft), place: botDraft.place, reminder: botDraft.reminder, directions: botDraft.directions };
-        setBotEvents((current) => [...current, event]);
         setBotDraft(null);
-        addBotMessage(`Done — “${event.title}” is on the family calendar for ${event.day} at ${event.time}.${event.reminder ? ` I’ll remind you ${event.reminder} minutes before.` : ''}${event.directions && event.place ? ` Directions to ${event.place} are included.` : ''}`);
-        showNotice('Coh added an event to the family calendar');
+        void persistApprovedEvent(event).then((result) => addBotMessage(eventSaveReply(event, result)));
         return;
       }
       if (isNo(normalized)) {
@@ -346,13 +602,184 @@ function CohoApp() {
     addBotMessage(question);
     }
 
+  function openCalendarEvent(event: BotEvent) {
+    setCalendarFocusDate(event.dateISO ?? null);
+    setSelectedEvent(event);
+    setTab('Calendar');
+    setMoreView('Menu');
+  }
+
+  async function markEventForFollowUp(event: BotEvent) {
+    if (!householdId || !currentUserId || !event.sourceId) {
+      showNotice('Share this event with the household before adding a follow-up.');
+      return;
+    }
+    try {
+      await createEventFollowUp({
+        householdId,
+        eventId: event.sourceId,
+        userId: currentUserId,
+        dueAt: nextFollowUpDate().toISOString(),
+      });
+      await reloadSharedData(householdId, currentUserId);
+      setSelectedEvent(null);
+      showNotice('This appointment will return in the weekly follow-up');
+    } catch {
+      showNotice('The follow-up could not be saved.');
+    }
+  }
+
+  async function completeFollowUpItem(followUpId: string) {
+    if (!householdId || !currentUserId) return;
+    try {
+      await completeEventFollowUp(followUpId, currentUserId);
+      await reloadSharedData(householdId, currentUserId);
+      showNotice('Follow-up completed');
+    } catch {
+      showNotice('The follow-up could not be completed.');
+    }
+  }
+
+  async function persistApprovedEvent(event: BotEvent): Promise<'shared' | 'device' | 'failed'> {
+    const startsAt = eventStartISO(event);
+    if (!startsAt) {
+      showNotice('The event time could not be saved. Open it and check the date and time.');
+      return 'failed';
+    }
+    if (!householdId || !currentUserId || !event.dateISO) {
+      try {
+        await writeApprovedEventToDevice({
+          id: event.id,
+          title: event.title,
+          startsAt,
+          location: event.place,
+          notes: `Added by Coh for ${event.person}`,
+          reminderMinutes: event.reminder,
+        });
+        setBotEvents((current) => current.some((item) => item.id === event.id) ? current : [...current, event]);
+        showNotice('Coh added the event on this iPhone. Connect the household to share it.');
+        return 'device';
+      } catch {
+        showNotice('The event could not be saved. Check calendar access and try again.');
+        return 'failed';
+      }
+    }
+    try {
+      const created = await createFamilyEvent({
+        householdId,
+        userId: currentUserId,
+        title: event.title,
+        startsAt,
+        location: event.place,
+        details: JSON.stringify({ person: event.person, reminder: event.reminder, directions: event.directions }),
+      });
+      await writeApprovedEventToDevice({
+        id: created.id ?? event.id,
+        title: event.title,
+        startsAt,
+        location: event.place,
+        notes: `Added by Coh for ${event.person}`,
+        reminderMinutes: event.reminder,
+      }).catch(() => undefined);
+      const saved = { ...event, id: created.id ?? event.id, sourceId: created.id ?? undefined };
+      setBotEvents((current) => current.some((item) => item.id === saved.id) ? current : [...current, saved]);
+      showNotice('Coh added the event to the shared family calendar');
+      return 'shared';
+    } catch {
+      try {
+        await writeApprovedEventToDevice({
+          id: event.id,
+          title: event.title,
+          startsAt,
+          location: event.place,
+          notes: `Added by Coh for ${event.person}`,
+          reminderMinutes: event.reminder,
+        });
+        setBotEvents((current) => current.some((item) => item.id === event.id) ? current : [...current, event]);
+        showNotice('The event is on this iPhone but could not be shared yet.');
+        return 'device';
+      } catch {
+        showNotice('The event could not be saved. Check calendar access and try again.');
+        return 'failed';
+      }
+    }
+  }
+
+  async function toggleChore(choreId: string) {
+    const chore = chores.find((item) => item.id === choreId);
+    if (!chore) return;
+    const done = !chore.done;
+    setChores((items) => items.map((item) => item.id === choreId ? { ...item, done } : item));
+    if (!householdId) return;
+    try {
+      await updateFamilyChore(choreId, {
+        status: done ? 'completed' : 'open',
+        completed_at: done ? new Date().toISOString() : null,
+      });
+    } catch {
+      setChores((items) => items.map((item) => item.id === choreId ? { ...item, done: !done } : item));
+      showNotice('The chore could not be updated for the family.');
+    }
+  }
+
+  async function saveChoreReward(updated: Chore) {
+    setChores((items) => items.map((item) => item.id === updated.id ? updated : item));
+    setEditingChore(null);
+    if (!householdId) {
+      showNotice(`${updated.title} reward updated on this iPhone`);
+      return;
+    }
+    try {
+      const reward = rewardGoals.find((item) => item.id === updated.rewardId) ?? rewardGoals[0];
+      await updateFamilyChore(updated.id, {
+        reward_type: databaseRewardType(updated.rewardId),
+        reward_value: updated.rewardValue,
+        reward_label: reward.title,
+      });
+      showNotice(`${updated.title} reward updated for the family`);
+    } catch {
+      showNotice('The reward is saved on this iPhone but could not be shared yet.');
+    }
+  }
+
+  async function speakDailySync() {
+    const openChores = chores.filter((item) => !item.done);
+    const nextEvents = botEvents.slice(-4);
+    const eventSummary = nextEvents.length
+      ? `You have ${nextEvents.length} upcoming family events. ${nextEvents.map((event) => `${event.title}, ${event.day} at ${event.time}`).join('. ')}.`
+      : 'There are no events added by Coh yet.';
+    const choreSummary = openChores.length
+      ? `${openChores.length} chores are still open. ${openChores.slice(0, 4).map((chore) => `${chore.title}, assigned to ${chore.owner}`).join('. ')}.`
+      : 'All current chores are complete.';
+    try {
+      await setAudioModeAsync({ playsInSilentMode: true });
+      await Speech.stop();
+      Speech.speak(`Here is your Coho daily sync. ${eventSummary} ${choreSummary}`, {
+        language: 'en-US',
+        rate: 0.92,
+        pitch: 1,
+        onStart: () => showNotice('Playing your daily sync'),
+        onError: () => showNotice('Audio could not be played. Check the iPhone media volume.'),
+      });
+    } catch {
+      showNotice('Audio could not be played. Check the iPhone media volume.');
+    }
+  }
+
   async function enableNotifications() {
     const permission = await Notifications.requestPermissionsAsync();
     if (permission.granted) {
       await Notifications.scheduleNotificationAsync({
-        content: { title: 'Coho is ready', body: 'Family reminders and daily recaps are now enabled.' },
+        content: { title: 'Coho is ready', body: 'Family reminders and daily recaps are now enabled.', sound: 'default' },
         trigger: null,
       });
+      await scheduleChiefNotifications(chiefPrefs);
+      if (currentUserId) {
+        await Promise.all([
+          syncBriefingPreferences(currentUserId, chiefPrefs),
+          registerPushDevice(currentUserId, householdId),
+        ]).catch(() => undefined);
+      }
       setConnected((current) => ({ ...current, 'iOS Notifications': true }));
       showNotice('iOS notifications enabled');
     } else {
@@ -363,36 +790,115 @@ function CohoApp() {
   async function saveChiefPreferences(next: ChiefPrefs) {
     setChiefPrefs(next);
     await AsyncStorage.setItem('kincue-chief-prefs', JSON.stringify(next));
+    if (currentUserId) {
+      await syncBriefingPreferences(currentUserId, next).catch(() => undefined);
+    }
+  }
+
+  async function saveFamilyProfile(profile: FamilyProfile) {
+    if (!householdId || !currentUserId) {
+      showNotice('Reconnect the household before saving this profile.');
+      return;
+    }
+    if (profile.dob && !/^\d{4}-\d{2}-\d{2}$/.test(profile.dob)) {
+      showNotice('Use YYYY-MM-DD for the date of birth.');
+      return;
+    }
+    try {
+      const existing = profiles.some((item) => item.id === profile.id);
+      const personId = await saveHouseholdPerson({
+        id: existing ? profile.id : undefined,
+        householdId,
+        userId: currentUserId,
+        displayName: profile.name,
+        dateOfBirth: profile.dob || null,
+        bio: profile.bio,
+        role: profile.role,
+      });
+      if (profile.avatarBase64) {
+        await uploadHouseholdPersonAvatar({
+          householdId,
+          personId,
+          base64: profile.avatarBase64,
+          mimeType: profile.avatarMime,
+        });
+      }
+      await reloadSharedData(householdId, currentUserId);
+      setEditingProfile(null);
+      showNotice(`${profile.name}’s profile was saved for the household`);
+    } catch (error) {
+      showNotice(error instanceof Error ? error.message : 'The family profile could not be saved.');
+    }
   }
 
   async function activateChiefOfHome() {
     await saveChiefPreferences(chiefPrefs);
-    const permission = await Notifications.requestPermissionsAsync();
-    if (!permission.granted) {
-      showNotice('Enable notifications in iOS Settings to receive briefings');
-      return;
+    if (chiefPrefs.push) {
+      const permission = await Notifications.requestPermissionsAsync();
+      if (!permission.granted) {
+        showNotice(chiefPrefs.email
+          ? 'Email briefings are saved. Enable notifications in iOS Settings for push too.'
+          : 'Enable notifications in iOS Settings to receive briefings');
+        return;
+      }
+      await scheduleChiefNotifications(chiefPrefs);
+      if (currentUserId) {
+        await registerPushDevice(currentUserId, householdId).catch(() => undefined);
+      }
+      setConnected((current) => ({ ...current, 'iOS Notifications': true }));
+    } else {
+      await scheduleChiefNotifications({ ...chiefPrefs, push: false });
     }
+    showNotice(chiefPrefs.email && chiefPrefs.push
+      ? 'Push and email briefings are scheduled'
+      : chiefPrefs.email
+        ? 'Email briefings are scheduled'
+        : chiefPrefs.push
+          ? 'Push briefings are scheduled'
+          : 'Briefings are off until you choose push or email');
+  }
+
+  async function scheduleChiefNotifications(prefs: ChiefPrefs) {
     const oldIds = JSON.parse(await AsyncStorage.getItem('kincue-chief-notification-ids') || '[]');
     await Promise.all(oldIds.map((id: string) => Notifications.cancelScheduledNotificationAsync(id).catch(() => undefined)));
     const ids: string[] = [];
-    if (chiefPrefs.daily && chiefPrefs.push) {
-      const { hour, minute } = parseClock(chiefPrefs.dailyTime);
-      ids.push(await Notifications.scheduleNotificationAsync({ content: { title: 'Your Chief of Home briefing', body: 'Appointments, chores, follow-ups, and what your family needs today.' }, trigger: { type: Notifications.SchedulableTriggerInputTypes.DAILY, hour, minute } }));
+    if (prefs.daily && prefs.push) {
+      const { hour, minute } = parseClock(prefs.dailyTime);
+      ids.push(await Notifications.scheduleNotificationAsync({ content: { title: 'Your Chief of Home briefing', body: 'Appointments, chores, follow-ups, and what your family needs today.', sound: 'default' }, trigger: { type: Notifications.SchedulableTriggerInputTypes.DAILY, hour, minute } }));
     }
-    if (chiefPrefs.weekAhead && chiefPrefs.push) {
-      const { hour, minute } = parseClock(chiefPrefs.weekAheadTime);
-      ids.push(await Notifications.scheduleNotificationAsync({ content: { title: 'Your full week ahead', body: 'Open Coho for the family schedule, preparation list, and conflicts.' }, trigger: { type: Notifications.SchedulableTriggerInputTypes.WEEKLY, weekday: weekdayNumber(chiefPrefs.weekAheadDay), hour, minute } }));
+    if (prefs.weekAhead && prefs.push) {
+      const { hour, minute } = parseClock(prefs.weekAheadTime);
+      ids.push(await Notifications.scheduleNotificationAsync({ content: { title: 'Your full week ahead', body: 'Open Coho for the family schedule, preparation list, and conflicts.', sound: 'default' }, trigger: { type: Notifications.SchedulableTriggerInputTypes.WEEKLY, weekday: weekdayNumber(prefs.weekAheadDay), hour, minute } }));
     }
-    if (chiefPrefs.followUp && chiefPrefs.push) {
-      const { hour, minute } = parseClock(chiefPrefs.followUpTime);
-      ids.push(await Notifications.scheduleNotificationAsync({ content: { title: 'Weekly follow-up', body: 'A few appointments and conversations may still need action.' }, trigger: { type: Notifications.SchedulableTriggerInputTypes.WEEKLY, weekday: weekdayNumber(chiefPrefs.followUpDay), hour, minute } }));
+    if (prefs.followUp && prefs.push) {
+      const { hour, minute } = parseClock(prefs.followUpTime);
+      ids.push(await Notifications.scheduleNotificationAsync({ content: { title: 'Weekly follow-up', body: 'A few appointments and conversations may still need action.', sound: 'default' }, trigger: { type: Notifications.SchedulableTriggerInputTypes.WEEKLY, weekday: weekdayNumber(prefs.followUpDay), hour, minute } }));
     }
     await AsyncStorage.setItem('kincue-chief-notification-ids', JSON.stringify(ids));
-    showNotice('Chief of Home briefings are scheduled');
   }
 
   const title = tab === 'More' && moreView !== 'Menu' ? moreView : tab;
   const openRecaps = () => { setMoreView('Recaps'); setTab('More'); };
+  const openCohPrompt = (prompt: string) => {
+    setChatMode('coh');
+    setMessageDraft(prompt);
+    setMoreView('Menu');
+    setTab('Chat');
+    showNotice('Review the request, then send it to Coh');
+  };
+  const openHouseholdOS = (view: MoreView) => {
+    setMoreView(view);
+    setTab('More');
+  };
+  const handleIntegration = (name: string) => {
+    if (name === 'iOS Notifications') return void enableNotifications();
+    if (name === 'Family Inbox') return openHouseholdOS('Family Inbox');
+    if (name === 'Family Places') return openHouseholdOS('Family Places');
+    if (['Apple Calendar', 'Google Calendar', 'Outlook'].includes(name)) return openHouseholdOS('Calendar Sync');
+    if (name === 'Instacart') return openHouseholdOS('Meals & Groceries');
+    if (name === 'OpenTable') return openHouseholdOS('Trips');
+    showNotice(`${name} setup requires provider authorization. Coho will never mark it connected before that succeeds.`);
+  };
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -407,6 +913,7 @@ function CohoApp() {
           theme={theme}
           styles={styles}
           dark={dark}
+          householdName={householdName}
           onTheme={toggleTheme}
           onRecap={openRecaps}
           onAdd={() => setQuickAddOpen(true)}
@@ -414,16 +921,21 @@ function CohoApp() {
         />
 
         <View style={styles.screen}>
-          {tab === 'Today' && <TodayScreen theme={theme} styles={styles} quickItems={notice ? [notice] : []} onCalendar={() => setTab('Calendar')} onRecap={openRecaps} onAction={showNotice} />}
-          {tab === 'Calendar' && <CalendarScreen theme={theme} styles={styles} botEvents={botEvents} onAction={showNotice} onManage={() => { setMoreView('Integrations'); setTab('More'); }} />}
-          {tab === 'Chores' && <ChoresScreen styles={styles} chores={chores} rewardMember={rewardMember} setRewardMember={setRewardMember} selectedRewards={selectedRewards} onAdd={() => { setQuickAddType('Chore'); setQuickAddOpen(true); }} onSelectReward={(member: string, reward: string) => { const next = { ...selectedRewards, [member]: reward }; setSelectedRewards(next); AsyncStorage.setItem('coho-reward-goals', JSON.stringify(next)); showNotice(`${member} picked a new reward goal`); }} onToggle={(id: string) => setChores((items) => items.map((item) => item.id === id ? { ...item, done: !item.done } : item))} />}
-          {tab === 'Chat' && <ChatScreen styles={styles} messages={messages} draft={messageDraft} setDraft={setMessageDraft} onSend={sendMessage} onAdd={() => setQuickAddOpen(true)} cohThinking={cohThinking} />}
+          {tab === 'Today' && <TodayScreen styles={styles} events={botEvents} chores={chores} onCalendar={() => setTab('Calendar')} onRecap={openRecaps} onOpenEvent={openCalendarEvent} onChores={() => setTab('Chores')} />}
+          {tab === 'Calendar' && <CalendarScreen theme={theme} styles={styles} botEvents={botEvents} focusDate={calendarFocusDate} onOpenEvent={setSelectedEvent} onAction={showNotice} onManage={() => { setMoreView('Integrations'); setTab('More'); }} />}
+          {tab === 'Chores' && <ChoresScreen styles={styles} chores={chores} memberNames={profiles.map((profile) => profile.name)} rewardMember={rewardMember} setRewardMember={setRewardMember} selectedRewards={selectedRewards} onConfigure={setEditingChore} onAdd={() => { setQuickAddType('Chore'); setQuickAddOpen(true); }} onSelectReward={(member: string, reward: string) => { const next = { ...selectedRewards, [member]: reward }; setSelectedRewards(next); AsyncStorage.setItem('coho-reward-goals', JSON.stringify(next)); showNotice(`${member} picked a new reward goal`); }} onToggle={toggleChore} />}
+          {tab === 'Chat' && <ChatScreen styles={styles} messages={messages} mode={chatMode} setMode={setChatMode} draft={messageDraft} setDraft={setMessageDraft} onSend={sendMessage} onAdd={() => setQuickAddOpen(true)} cohThinking={cohThinking} />}
           {tab === 'More' && moreView === 'Menu' && <MoreMenu styles={styles} setView={setMoreView} />}
-          {tab === 'More' && moreView === 'Chief of Home' && <ChiefOfHomeScreen styles={styles} prefs={chiefPrefs} setPrefs={saveChiefPreferences} onActivate={activateChiefOfHome} />}
-          {tab === 'More' && moreView === 'Family' && <FamilyProfilesScreen styles={styles} profiles={profiles} onEdit={setEditingProfile} onAdd={() => setEditingProfile({ id: `profile-${Date.now()}`, name: '', dob: '', bio: '', role: 'Family member', color: '#DCE7FF', ink: '#2257F4' })} />}
-          {tab === 'More' && moreView === 'Notes' && <NotesScreen styles={styles} onAction={showNotice} />}
-          {tab === 'More' && moreView === 'Recaps' && <RecapsScreen styles={styles} onAction={showNotice} events={botEvents} chores={chores} messages={messages} />}
-          {tab === 'More' && moreView === 'Integrations' && <IntegrationsScreen styles={styles} connected={connected} onConnect={(name: string) => name === 'iOS Notifications' ? enableNotifications() : (setConnected((current) => ({ ...current, [name]: !current[name] })), showNotice(`${name} connection updated`))} />}
+          {tab === 'More' && moreView === 'Chief of Home' && <ChiefOfHomeScreen styles={styles} prefs={chiefPrefs} memberNames={profiles.map((profile) => profile.name)} setPrefs={saveChiefPreferences} onActivate={activateChiefOfHome} />}
+          {tab === 'More' && moreView === 'Family' && <FamilyProfilesScreen styles={styles} profiles={profiles} onInvite={() => setFamilyHubOpen(true)} onEdit={setEditingProfile} onAdd={() => setEditingProfile({ id: `new-${Date.now()}`, name: '', dob: '', bio: '', role: 'Family member', color: '#DCE7FF', ink: '#2257F4' })} />}
+          {tab === 'More' && moreView === 'Notes' && <NotesScreen styles={styles} householdId={householdId} userId={currentUserId} onAction={showNotice} />}
+          {tab === 'More' && moreView === 'Recaps' && <RecapsScreen styles={styles} onAction={showNotice} onListen={speakDailySync} onOpenEvent={openCalendarEvent} onCompleteFollowUp={completeFollowUpItem} events={botEvents} chores={chores} messages={messages} followUps={followUps} />}
+          {tab === 'More' && moreView === 'Integrations' && <IntegrationsScreen styles={styles} connected={connected} onConnect={handleIntegration} />}
+          {tab === 'More' && moreView === 'Calendar Sync' && <CalendarConnectionScreen dark={dark} householdId={householdId} userId={currentUserId} onNotice={showNotice} onConnected={() => setConnected((current) => ({ ...current, 'Apple Calendar': true }))} />}
+          {tab === 'More' && moreView === 'Family Inbox' && <FamilyInboxScreen dark={dark} householdId={householdId} householdName={householdName} userId={currentUserId} onNotice={showNotice} onAskCoh={openCohPrompt} />}
+          {tab === 'More' && moreView === 'Family Places' && <FamilyPlacesScreen dark={dark} householdId={householdId} userId={currentUserId} onNotice={showNotice} />}
+          {tab === 'More' && moreView === 'Meals & Groceries' && <FoodHubScreen dark={dark} householdId={householdId} userId={currentUserId} onNotice={showNotice} onAskCoh={openCohPrompt} />}
+          {tab === 'More' && moreView === 'Trips' && <TravelHubScreen dark={dark} householdId={householdId} userId={currentUserId} onNotice={showNotice} onAskCoh={openCohPrompt} />}
           {tab === 'More' && moreView === 'Settings' && <SettingsScreen styles={styles} dark={dark} onTheme={toggleTheme} onNotifications={enableNotifications} onFamily={() => setMoreView('Family')} onAction={showNotice} profiles={profiles} />}
         </View>
 
@@ -434,16 +946,22 @@ function CohoApp() {
 
       <QuickAddModal
         visible={quickAddOpen}
-        onClose={() => setQuickAddOpen(false)}
+        onClose={() => {
+          setQuickAddOpen(false);
+          setQuickAddTitle('');
+          setQuickAddDetails('');
+        }}
         styles={styles}
         type={quickAddType}
         setType={setQuickAddType}
         title={quickAddTitle}
         setTitle={setQuickAddTitle}
+        details={quickAddDetails}
+        setDetails={setQuickAddDetails}
         onSave={saveQuickAdd}
         dark={dark}
       />
-      <ShareToCueModal
+      <ShareToCohModal
         visible={sharePreviewOpen}
         styles={styles}
         dark={dark}
@@ -452,21 +970,24 @@ function CohoApp() {
         hasImage={Boolean((shareIntent as any)?.files?.length)}
         error={shareError}
         onCancel={cancelSharedItem}
-        onApprove={sendSharedItemToCue}
+        onApprove={sendSharedItemToCoh}
       />
-      <ProfileEditorModal visible={Boolean(editingProfile)} profile={editingProfile} styles={styles} dark={dark} onClose={() => setEditingProfile(null)} onSave={(profile: FamilyProfile) => { const next = profiles.some((item) => item.id === profile.id) ? profiles.map((item) => item.id === profile.id ? profile : item) : [...profiles, profile]; setProfiles(next); AsyncStorage.setItem('coho-family-profiles', JSON.stringify(next)); setEditingProfile(null); showNotice(`${profile.name}’s profile was saved`); }} />
+      <ProfileEditorModal visible={Boolean(editingProfile)} profile={editingProfile} styles={styles} dark={dark} onClose={() => setEditingProfile(null)} onSave={saveFamilyProfile} />
+      <Modal visible={familyHubOpen} animationType="slide" onRequestClose={() => setFamilyHubOpen(false)}><SafeAreaView style={styles.safeArea}><View style={styles.fullModalHeader}><View><Text style={styles.eyebrow}>HOUSEHOLD ACCESS</Text><Text style={styles.modalTitle}>Invite your family</Text></View><Pressable onPress={() => setFamilyHubOpen(false)} style={styles.iconButton}><Ionicons name="close" size={21} color={styles.iconColor.color} /></Pressable></View><FamilyHub /></SafeAreaView></Modal>
+      <EventDetailModal event={selectedEvent} styles={styles} dark={dark} onClose={() => setSelectedEvent(null)} onFollowUp={markEventForFollowUp} />
+      <ChoreRewardModal chore={editingChore} styles={styles} dark={dark} onClose={() => setEditingChore(null)} onSave={saveChoreReward} />
     </SafeAreaView>
   );
 }
 
-function Header({ title, styles, dark, onTheme, onRecap, onAdd, onBack }: any) {
+function Header({ title, styles, dark, householdName, onTheme, onRecap, onAdd, onBack }: any) {
   const now = new Date();
   const dateLabel = now.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' }).toUpperCase();
   const greeting = now.getHours() < 12 ? 'Good morning,' : now.getHours() < 18 ? 'Good afternoon,' : 'Good evening,';
   return <View style={styles.header}>
     <View style={styles.headerTitleWrap}>
       {onBack && <Pressable onPress={onBack} style={styles.backButton}><Ionicons name="chevron-back" size={22} color={styles.iconColor.color} /></Pressable>}
-      <View><Text style={styles.eyebrow}>{dateLabel}</Text><Text style={styles.headerTitle}>{title === 'Today' ? greeting : title}</Text>{title === 'Today' && <Text style={styles.headerTitle}>Cragle family {now.getHours() < 18 ? '☀️' : '🌙'}</Text>}</View>
+      <View><Text style={styles.eyebrow}>{dateLabel}</Text><Text style={styles.headerTitle}>{title === 'Today' ? greeting : title}</Text>{title === 'Today' && <Text style={styles.headerTitle}>{householdName} {now.getHours() < 18 ? '☀️' : '🌙'}</Text>}</View>
     </View>
     <View style={styles.headerButtons}>
       <Pressable accessibilityLabel="Open daily recap" onPress={onRecap} style={styles.recapHeaderButton}><Ionicons name="sparkles" size={19} color="#fff" /></Pressable>
@@ -476,58 +997,85 @@ function Header({ title, styles, dark, onTheme, onRecap, onAdd, onBack }: any) {
   </View>;
 }
 
-function TodayScreen({ theme, styles, onCalendar, onRecap, onAction }: any) {
+function TodayScreen({ styles, events, chores, onCalendar, onRecap, onOpenEvent, onChores }: any) {
+  const today = localDateKey(new Date());
+  const todaysEvents = events.filter((event: BotEvent) => event.dateISO === today);
+  const openChores = chores.filter((chore: Chore) => !chore.done);
   const cards = [
-    { title: 'School pickup', value: '3:15 PM', detail: 'Oliver · Oakview Elementary', icon: 'school-outline', color: '#2257F4', tint: '#DCE7FF' },
-    { title: 'Asher soccer', value: '6:00 PM', detail: 'Field 4 · Bring blue jersey', icon: 'football-outline', color: '#168866', tint: '#D9F7ED' },
-    { title: 'Trash to curb', value: 'Before 8 PM', detail: 'Assigned to Chad', icon: 'checkmark-done-outline', color: '#E86117', tint: '#FFE1CF' },
-    { title: 'Groceries', value: '8 items left', detail: 'Milk, berries, dog food +5', icon: 'cart-outline', color: '#6E3AE2', tint: '#EADFFF' },
-  ];
+    ...todaysEvents.map((event: BotEvent) => ({ kind: 'event', item: event, title: event.title, value: event.time, detail: `${event.person}${event.place ? ` · ${event.place}` : ''}`, icon: 'calendar-outline', color: '#2257F4', tint: '#DCE7FF' })),
+    ...openChores.map((chore: Chore) => ({ kind: 'chore', item: chore, title: chore.title, value: chore.due, detail: `${chore.owner} · +${chore.rewardValue}`, icon: 'checkmark-done-outline', color: '#19A47B', tint: '#D9F7ED' })),
+  ].slice(0, 4);
+  const upcomingEvents = events.filter((event: BotEvent) => !event.dateISO || event.dateISO >= today).slice(0, 5);
   return <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
-    <View style={styles.sectionHead}><View><Text style={styles.sectionTitle}>Today</Text><Text style={styles.muted}>4 things on the family radar</Text></View><Pressable onPress={onCalendar}><Text style={styles.link}>See full day ›</Text></Pressable></View>
-    <View style={styles.bentoGrid}>{cards.map((card) => <Pressable key={card.title} onPress={() => onAction(`${card.title}: ${card.detail}`)} style={styles.bentoCard}>
+    <View style={styles.sectionHead}><View><Text style={styles.sectionTitle}>Today</Text><Text style={styles.muted}>{todaysEvents.length} event{todaysEvents.length === 1 ? '' : 's'} · {openChores.length} open chore{openChores.length === 1 ? '' : 's'}</Text></View><Pressable onPress={onCalendar}><Text style={styles.link}>See full day ›</Text></Pressable></View>
+    {cards.length === 0 ? <View style={styles.emptyChat}><Ionicons name="sparkles-outline" size={28} color="#7047EE" /><Text style={styles.settingTitle}>Your family radar is clear</Text><Text style={styles.muted}>Ask Coh to add an event or create the first shared chore.</Text></View> : <View style={styles.bentoGrid}>{cards.map((card: any) => <Pressable key={`${card.kind}-${card.item.id}`} onPress={() => card.kind === 'event' ? onOpenEvent(card.item) : onChores()} style={styles.bentoCard}>
       <View style={[styles.cardIcon, { backgroundColor: card.tint }]}><Ionicons name={card.icon as any} size={24} color={card.color} /></View>
       <Text style={styles.cardTitle}>{card.title}</Text><Text style={styles.cardValue}>{card.value}</Text><Text style={styles.cardDetail}>{card.detail}</Text>
       <View style={[styles.cardPill, { backgroundColor: `${card.color}12` }]}><Ionicons name="time-outline" size={13} color={card.color} /><Text style={[styles.cardPillText, { color: card.color }]}>Tap for details</Text></View>
-    </Pressable>)}</View>
+    </Pressable>)}</View>}
     <Pressable onPress={onRecap}><LinearGradient colors={['#2257F4', '#7047EE']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={styles.recapCard}>
-      <View style={styles.recapIcon}><Ionicons name="sparkles" size={21} color="#fff" /></View><View style={styles.recapCopy}><Text style={styles.recapLabel}>COHO DAILY</Text><Text style={styles.recapTitle}>Your morning recap is ready</Text><Text style={styles.recapText}>Three events, two open chores, and one new family note.</Text></View><Ionicons name="chevron-forward" size={20} color="#fff" />
+      <View style={styles.recapIcon}><Ionicons name="sparkles" size={21} color="#fff" /></View><View style={styles.recapCopy}><Text style={styles.recapLabel}>COHO DAILY</Text><Text style={styles.recapTitle}>Your live family sync</Text><Text style={styles.recapText}>{events.length} shared event{events.length === 1 ? '' : 's'} and {openChores.length} open chore{openChores.length === 1 ? '' : 's'}.</Text></View><Ionicons name="chevron-forward" size={20} color="#fff" />
     </LinearGradient></Pressable>
-    <Text style={styles.sectionTitle}>Family status</Text><View style={styles.familyRow}>{family.map((person) => <View key={person.name} style={styles.familyPerson}><View style={[styles.avatar, { backgroundColor: person.color }]}><Text style={[styles.avatarText, { color: person.ink }]}>{person.initials}</Text></View><Text style={styles.familyName}>{person.name}</Text><Text style={styles.familyStatus}>{person.status}</Text></View>)}</View>
-    <Text style={styles.sectionTitle}>Coming up</Text>{liveUpcoming().map((event) => <Pressable key={event.title} onPress={() => onAction(`${event.title} · ${event.time}`)} style={styles.upcomingRow}><View style={[styles.dateTile, { borderColor: event.color }]}><Text style={[styles.dateMonth, { color: event.color }]}>{event.month}</Text><Text style={[styles.dateNumber, { color: event.color }]}>{event.date}</Text></View><View style={styles.flex}><Text style={styles.upcomingTime}>{event.time}</Text><Text style={styles.upcomingTitle}>{event.title}</Text></View><Ionicons name="chevron-forward" size={18} color={theme.muted} /></Pressable>)}
+    <Text style={styles.sectionTitle}>Coming up</Text>{upcomingEvents.length === 0 ? <Text style={styles.muted}>No upcoming events yet.</Text> : upcomingEvents.map((event: BotEvent) => <Pressable key={event.id} onPress={() => onOpenEvent(event)} style={styles.upcomingRow}><View style={[styles.dateTile, { borderColor: '#2257F4' }]}><Text style={[styles.dateMonth, { color: '#2257F4' }]}>{event.dateISO ? new Date(`${event.dateISO}T12:00:00`).toLocaleDateString(undefined, { month: 'short' }).toUpperCase() : 'NEXT'}</Text><Text style={[styles.dateNumber, { color: '#2257F4' }]}>{event.dateISO ? Number(event.dateISO.slice(-2)) : '•'}</Text></View><View style={styles.flex}><Text style={styles.upcomingTime}>{event.time}</Text><Text style={styles.upcomingTitle}>{event.title}</Text></View><Ionicons name="chevron-forward" size={18} color="#2257F4" /></Pressable>)}
   </ScrollView>;
 }
 
-function CalendarScreen({ styles, botEvents, onAction, onManage }: any) {
+function CalendarScreen({ styles, botEvents, focusDate, onOpenEvent, onAction, onManage }: any) {
   const [selected, setSelected] = useState(startOfDay(new Date()));
+  useEffect(() => {
+    if (!focusDate) return;
+    const date = new Date(`${focusDate}T12:00:00`);
+    if (!Number.isNaN(date.getTime())) setSelected(startOfDay(date));
+  }, [focusDate]);
   const weekStart = startOfWeek(selected);
   const days = Array.from({ length: 7 }, (_, index) => addDays(weekStart, index));
   const visibleBotEvents = botEvents.filter((event: BotEvent) => !event.dateISO || event.dateISO === localDateKey(selected));
   const period = `${days[0].toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}–${days[6].toLocaleDateString(undefined, { month: days[0].getMonth() === days[6].getMonth() ? undefined : 'short', day: 'numeric' })}`;
-  return <ScrollView contentContainerStyle={styles.scrollContent}><View style={styles.calendarTop}><Pressable onPress={() => setSelected(addDays(selected, -7))} style={styles.smallButton}><Ionicons name="chevron-back" size={18} color={styles.iconColor.color} /></Pressable><Pressable onPress={() => setSelected(startOfDay(new Date()))}><Text style={styles.calendarPeriod}>{period}</Text><Text style={styles.calendarTodayLink}>Tap for today</Text></Pressable><Pressable onPress={() => setSelected(addDays(selected, 7))} style={styles.smallButton}><Ionicons name="chevron-forward" size={18} color={styles.iconColor.color} /></Pressable></View><View style={styles.weekRow}>{days.map((day) => { const active = sameDay(day, selected); return <Pressable key={day.toISOString()} onPress={() => setSelected(day)} style={[styles.dayBubble, active && styles.dayBubbleActive]}><Text style={[styles.dayLabel, active && styles.dayTextActive]}>{day.toLocaleDateString(undefined, { weekday: 'short' }).toUpperCase()}</Text><Text style={[styles.dayNumber, active && styles.dayTextActive]}>{day.getDate()}</Text></Pressable>; })}</View><Text style={styles.sectionTitle}>{selected.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' })}</Text>{[
-    ['3:15 PM', 'School pickup', 'Oliver · Oakview Elementary', '#2257F4'], ['6:00 PM', 'Asher soccer', 'Field 4 · Bring blue jersey', '#19A47B'], ['8:00 PM', 'Trash to curb', 'Assigned to Chad', '#FF7A2E']
-  ].map(([time, title, detail, color]) => <Pressable key={title} onPress={() => onAction(`${title} · ${time} · ${detail}`)} style={styles.timelineRow}><View style={[styles.timelineLine, { backgroundColor: color }]} /><Text style={styles.timelineTime}>{time}</Text><View style={styles.flex}><Text style={styles.timelineTitle}>{title}</Text><Text style={styles.muted}>{detail}</Text></View><Ionicons name="chevron-forward" size={18} color={styles.iconColor.color} /></Pressable>)}{visibleBotEvents.map((event: BotEvent) => <Pressable key={event.id} onPress={() => onAction(`${event.title} · ${event.time}`)} style={styles.timelineRow}><View style={[styles.timelineLine, { backgroundColor: '#7047EE' }]} /><Text style={styles.timelineTime}>{event.time}</Text><View style={styles.flex}><Text style={styles.timelineTitle}>{event.title}</Text><Text style={styles.muted}>{event.person} · {event.place ?? event.day}{event.reminder ? ` · ${event.reminder} min reminder` : ''}</Text></View><Ionicons name="sparkles" size={18} color="#7047EE" /></Pressable>)}<Pressable onPress={onManage} style={styles.syncCard}><Ionicons name="sync" size={18} color="#2257F4" /><View style={styles.flex}><Text style={styles.syncTitle}>Calendars synced</Text><Text style={styles.muted}>Apple Calendar · Google · Skylight</Text></View><Text style={styles.link}>Manage</Text></Pressable></ScrollView>;
+  return <ScrollView contentContainerStyle={styles.scrollContent}><View style={styles.calendarTop}><Pressable onPress={() => setSelected(addDays(selected, -7))} style={styles.smallButton}><Ionicons name="chevron-back" size={18} color={styles.iconColor.color} /></Pressable><Pressable onPress={() => setSelected(startOfDay(new Date()))}><Text style={styles.calendarPeriod}>{period}</Text><Text style={styles.calendarTodayLink}>Tap for today</Text></Pressable><Pressable onPress={() => setSelected(addDays(selected, 7))} style={styles.smallButton}><Ionicons name="chevron-forward" size={18} color={styles.iconColor.color} /></Pressable></View><View style={styles.weekRow}>{days.map((day) => { const active = sameDay(day, selected); return <Pressable key={day.toISOString()} onPress={() => setSelected(day)} style={[styles.dayBubble, active && styles.dayBubbleActive]}><Text style={[styles.dayLabel, active && styles.dayTextActive]}>{day.toLocaleDateString(undefined, { weekday: 'short' }).toUpperCase()}</Text><Text style={[styles.dayNumber, active && styles.dayTextActive]}>{day.getDate()}</Text></Pressable>; })}</View><Text style={styles.sectionTitle}>{selected.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' })}</Text>{visibleBotEvents.length === 0 && <View style={styles.emptyChat}><Ionicons name="calendar-clear-outline" size={28} color="#2257F4" /><Text style={styles.settingTitle}>Nothing scheduled</Text><Text style={styles.muted}>Ask Coh to add something or choose another day.</Text></View>}{visibleBotEvents.map((event: BotEvent) => <Pressable key={event.id} onPress={() => onOpenEvent(event)} style={styles.timelineRow}><View style={[styles.timelineLine, { backgroundColor: '#7047EE' }]} /><Text style={styles.timelineTime}>{event.time}</Text><View style={styles.flex}><Text style={styles.timelineTitle}>{event.title}</Text><Text style={styles.muted}>{event.person} · {event.place ?? event.day}{event.reminder ? ` · ${event.reminder} min reminder` : ''}</Text></View><Ionicons name="chevron-forward" size={18} color="#7047EE" /></Pressable>)}<Pressable onPress={onManage} style={styles.syncCard}><Ionicons name="sync" size={18} color="#2257F4" /><View style={styles.flex}><Text style={styles.syncTitle}>Calendar connections</Text><Text style={styles.muted}>Connect only the calendars your household chooses</Text></View><Text style={styles.link}>Manage</Text></Pressable></ScrollView>;
 }
 
-function ChoresScreen({ styles, chores, onToggle, rewardMember, setRewardMember, selectedRewards, onSelectReward, onAdd }: any) {
+function ChoresScreen({ styles, chores, memberNames, onToggle, onConfigure, rewardMember, setRewardMember, selectedRewards, onSelectReward, onAdd }: any) {
   const completed = chores.filter((item: any) => item.done).length;
-  const balances = familyNames().reduce((result, name) => ({ ...result, [name]: chores.filter((item: any) => item.owner === name && item.done).reduce((sum: number, item: any) => sum + item.points, 0) }), {} as Record<string, number>);
+  const balances = memberNames.reduce((result: Record<string, number>, name: string) => ({ ...result, [name]: chores.filter((item: any) => item.owner === name && item.done).reduce((sum: number, item: any) => sum + item.rewardValue, 0) }), {} as Record<string, number>);
   const selected = rewardGoals.find((reward) => reward.id === selectedRewards[rewardMember]) ?? rewardGoals[0];
   const balance = balances[rewardMember] ?? 0;
   const progress = Math.min(100, Math.round(balance / selected.cost * 100));
   return <ScrollView contentContainerStyle={styles.scrollContent}>
-    <View style={styles.progressCard}><View><Text style={styles.progressLabel}>FAMILY PROGRESS</Text><Text style={styles.progressValue}>{completed} of {chores.length}</Text><Text style={styles.muted}>chores complete today</Text></View><View style={styles.progressRing}><Text style={styles.progressPercent}>{Math.round(completed / chores.length * 100)}%</Text></View></View>
+    <View style={styles.progressCard}><View><Text style={styles.progressLabel}>FAMILY PROGRESS</Text><Text style={styles.progressValue}>{completed} of {chores.length}</Text><Text style={styles.muted}>chores complete today</Text></View><View style={styles.progressRing}><Text style={styles.progressPercent}>{chores.length ? Math.round(completed / chores.length * 100) : 0}%</Text></View></View>
     <Text style={styles.sectionTitle}>Earn rewards</Text>
-    <View style={styles.memberRewardTabs}>{familyNames().map((name) => <Pressable key={name} onPress={() => setRewardMember(name)} style={[styles.memberRewardTab, rewardMember === name && styles.memberRewardTabActive]}><Text style={[styles.memberRewardName, rewardMember === name && styles.memberRewardNameActive]}>{name}</Text><Text style={[styles.memberRewardPoints, rewardMember === name && styles.memberRewardNameActive]}>{balances[name] ?? 0} pts</Text></Pressable>)}</View>
-    <View style={styles.rewardHero}><View style={[styles.rewardIcon, { backgroundColor: `${selected.color}20` }]}><Ionicons name={selected.icon as any} size={25} color={selected.color} /></View><View style={styles.flex}><Text style={styles.progressLabel}>{rewardMember.toUpperCase()} IS EARNING TOWARD</Text><Text style={styles.rewardHeroTitle}>{selected.title} · {selected.detail}</Text><View style={styles.rewardProgressTrack}><View style={[styles.rewardProgressFill, { width: `${progress}%`, backgroundColor: selected.color }]} /></View><Text style={styles.rewardProgressText}>{balance} of {selected.cost} points · {Math.max(0, selected.cost - balance)} to go</Text></View></View>
-    <Text style={styles.rewardPrompt}>What does {rewardMember} want to earn?</Text><ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.rewardChoices}>{rewardGoals.map((reward) => { const active = selected.id === reward.id; return <Pressable key={reward.id} onPress={() => onSelectReward(rewardMember, reward.id)} style={[styles.rewardChoice, active && { borderColor: reward.color, backgroundColor: `${reward.color}12` }]}><Ionicons name={reward.icon as any} size={21} color={reward.color} /><Text style={styles.rewardChoiceTitle}>{reward.title}</Text><Text style={styles.muted}>{reward.detail}</Text><Text style={[styles.rewardCost, { color: reward.color }]}>{reward.cost} points</Text>{active && <Ionicons name="checkmark-circle" size={18} color={reward.color} style={styles.rewardSelected} />}</Pressable>; })}</ScrollView>
-    <Text style={styles.sectionTitle}>This week</Text>{chores.map((chore: any) => <Pressable key={chore.id} onPress={() => onToggle(chore.id)} style={styles.choreRow}><View style={[styles.checkCircle, chore.done && { backgroundColor: '#19A47B', borderColor: '#19A47B' }]}>{chore.done && <Ionicons name="checkmark" size={17} color="#fff" />}</View><View style={styles.flex}><Text style={[styles.choreTitle, chore.done && styles.struck]}>{chore.title}</Text><Text style={styles.muted}>{chore.owner} · {chore.due}</Text></View><View style={styles.pointPill}><Ionicons name="sparkles" size={12} color="#7047EE" /><Text style={styles.pointPillText}>+{chore.points}</Text></View><View style={[styles.ownerDot, { backgroundColor: chore.color }]} /></Pressable>)}<Pressable onPress={onAdd} style={styles.outlineAction}><Ionicons name="add" size={19} color="#2257F4" /><Text style={styles.outlineActionText}>Add a recurring chore</Text></Pressable>
+    {memberNames.length === 0 ? <View style={styles.emptyChat}><Ionicons name="people-outline" size={28} color="#7047EE" /><Text style={styles.settingTitle}>Add a family profile first</Text><Text style={styles.muted}>Rewards are personalized to real people in this household.</Text></View> : <>
+      <View style={styles.memberRewardTabs}>{memberNames.map((name: string) => <Pressable key={name} onPress={() => setRewardMember(name)} style={[styles.memberRewardTab, rewardMember === name && styles.memberRewardTabActive]}><Text style={[styles.memberRewardName, rewardMember === name && styles.memberRewardNameActive]}>{name}</Text><Text style={[styles.memberRewardPoints, rewardMember === name && styles.memberRewardNameActive]}>{balances[name] ?? 0} pts</Text></Pressable>)}</View>
+      <View style={styles.rewardHero}><View style={[styles.rewardIcon, { backgroundColor: `${selected.color}20` }]}><Ionicons name={selected.icon as any} size={25} color={selected.color} /></View><View style={styles.flex}><Text style={styles.progressLabel}>{rewardMember.toUpperCase()} IS EARNING TOWARD</Text><Text style={styles.rewardHeroTitle}>{selected.title} · {selected.detail}</Text><View style={styles.rewardProgressTrack}><View style={[styles.rewardProgressFill, { width: `${progress}%`, backgroundColor: selected.color }]} /></View><Text style={styles.rewardProgressText}>{balance} of {selected.cost} points · {Math.max(0, selected.cost - balance)} to go</Text></View></View>
+      <Text style={styles.rewardPrompt}>What does {rewardMember} want to earn?</Text><ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.rewardChoices}>{rewardGoals.map((reward) => { const active = selected.id === reward.id; return <Pressable key={reward.id} onPress={() => onSelectReward(rewardMember, reward.id)} style={[styles.rewardChoice, active && { borderColor: reward.color, backgroundColor: `${reward.color}12` }]}><Ionicons name={reward.icon as any} size={21} color={reward.color} /><Text style={styles.rewardChoiceTitle}>{reward.title}</Text><Text style={styles.muted}>{reward.detail}</Text><Text style={[styles.rewardCost, { color: reward.color }]}>{reward.cost} points</Text>{active && <Ionicons name="checkmark-circle" size={18} color={reward.color} style={styles.rewardSelected} />}</Pressable>; })}</ScrollView>
+    </>}
+    <Text style={styles.sectionTitle}>This week</Text>{chores.length === 0 && <View style={styles.emptyChat}><Ionicons name="checkbox-outline" size={28} color="#19A47B" /><Text style={styles.settingTitle}>No shared chores yet</Text><Text style={styles.muted}>Add one, then choose exactly what completing it earns.</Text></View>}{chores.map((chore: Chore) => { const reward = rewardGoals.find((item) => item.id === chore.rewardId) ?? rewardGoals[0]; return <Pressable key={chore.id} onPress={() => onConfigure(chore)} style={styles.choreRow}><Pressable accessibilityLabel={chore.done ? `Mark ${chore.title} incomplete` : `Complete ${chore.title}`} onPress={() => onToggle(chore.id)} style={[styles.checkCircle, chore.done && { backgroundColor: '#19A47B', borderColor: '#19A47B' }]}>{chore.done && <Ionicons name="checkmark" size={17} color="#fff" />}</Pressable><View style={styles.flex}><Text style={[styles.choreTitle, chore.done && styles.struck]}>{chore.title}</Text><Text style={styles.muted}>{chore.owner} · {chore.due}</Text><Text style={[styles.choreRewardText, { color: reward.color }]}>{reward.title} · +{chore.rewardValue}</Text></View><View style={[styles.pointPill, { backgroundColor: `${reward.color}14` }]}><Ionicons name={reward.icon as any} size={12} color={reward.color} /><Text style={[styles.pointPillText, { color: reward.color }]}>Edit</Text></View><View style={[styles.ownerDot, { backgroundColor: chore.color }]} /></Pressable>; })}<Pressable onPress={onAdd} style={styles.outlineAction}><Ionicons name="add" size={19} color="#2257F4" /><Text style={styles.outlineActionText}>Add a chore</Text></Pressable>
   </ScrollView>;
 }
 
-function ChatScreen({ styles, messages, draft, setDraft, onSend, onAdd, cohThinking }: any) {
-  const cohActive = /^\s*(@coh|hey coh)\b/i.test(draft);
-  return <View style={styles.flex}><FlatList data={messages} keyExtractor={(item) => item.id} contentContainerStyle={styles.messageList} automaticallyAdjustKeyboardInsets keyboardDismissMode="interactive" keyboardShouldPersistTaps="handled" renderItem={({ item }) => <View style={[styles.messageWrap, item.mine && styles.messageMine]}>{!item.mine && <View style={[styles.avatar, item.bot ? styles.botAvatar : styles.chatAvatar]}>{item.bot ? <Ionicons name="sparkles" size={17} color="#fff" /> : <Text style={styles.avatarText}>LC</Text>}</View>}<View style={styles.messageBody}><Text style={[styles.messageAuthor, item.mine && styles.messageAuthorMine, item.bot && styles.botAuthor]}>{item.author}</Text><View style={[styles.messageBubble, item.mine && styles.messageBubbleMine, item.bot && styles.botBubble]}><MentionText text={item.text} mine={item.mine} styles={styles} /></View></View></View>} ListHeaderComponent={<View><View style={styles.chatHeader}><View style={styles.homeThreadIcon}><Ionicons name="home" size={20} color="#F5A623" /></View><View><Text style={styles.chatTitle}>Everyone</Text><Text style={styles.muted}>4 family members + Coh</Text></View></View><View style={styles.botHint}><Ionicons name="sparkles" size={15} color="#7047EE" /><Text style={styles.botHintText}>Try “Hey Coh, haircut for Chad on Wednesday at 9:30 AM”</Text></View></View>} ListFooterComponent={cohThinking ? <View style={styles.cohThinking}><Ionicons name="sparkles" size={15} color="#7047EE" /><Text style={styles.botAuthor}>Coh is thinking…</Text></View> : null} /><View style={[styles.composeRow, cohActive && styles.composeRowCoh]}><Pressable onPress={onAdd} style={[styles.composePlus, cohActive && styles.composeCohBadge]}>{cohActive ? <Ionicons name="sparkles" size={18} color="#fff" /> : <Ionicons name="add" size={22} color="#2257F4" />}</Pressable><TextInput value={draft} onChangeText={setDraft} placeholder={cohThinking ? 'Coh is thinking…' : 'Message everyone or @Coh…'} placeholderTextColor="#8B93A5" editable={!cohThinking} style={[styles.composeInput, cohActive && styles.composeInputCoh]} returnKeyType="send" onSubmitEditing={onSend} /><Pressable disabled={cohThinking} onPress={onSend} style={[styles.sendButton, cohActive && styles.sendButtonCoh, cohThinking && { opacity: .55 }]}><Ionicons name={cohActive ? 'sparkles' : 'send'} size={17} color="#fff" /></Pressable></View></View>;
+function ChatScreen({ styles, messages, mode, setMode, draft, setDraft, onSend, onAdd, cohThinking }: any) {
+  const cohActive = mode === 'coh';
+  const visibleMessages = messages.filter((message: ChatMessage) => messageChannel(message) === mode);
+  return <View style={styles.flex}><View style={styles.chatModeTabs}><Pressable onPress={() => setMode('family')} style={[styles.chatModeTab, mode === 'family' && styles.chatModeTabActive]}><Ionicons name="people" size={16} color={mode === 'family' ? '#fff' : styles.iconColor.color} /><Text style={[styles.chatModeText, mode === 'family' && styles.chatModeTextActive]}>Family chat</Text></Pressable><Pressable onPress={() => setMode('coh')} style={[styles.chatModeTab, mode === 'coh' && styles.chatModeCohActive]}><Ionicons name="sparkles" size={16} color={mode === 'coh' ? '#fff' : '#7047EE'} /><Text style={[styles.chatModeText, mode === 'coh' && styles.chatModeTextActive]}>Ask Coh</Text></Pressable></View><FlatList data={visibleMessages} keyExtractor={(item) => item.id} contentContainerStyle={styles.messageList} automaticallyAdjustKeyboardInsets keyboardDismissMode="interactive" keyboardShouldPersistTaps="handled" renderItem={({ item }) => <View style={[styles.messageWrap, item.mine && styles.messageMine]}>{!item.mine && <View style={[styles.avatar, item.bot ? styles.botAvatar : styles.chatAvatar]}>{item.bot ? <Ionicons name="sparkles" size={17} color="#fff" /> : <Text style={styles.avatarText}>{initials(item.author)}</Text>}</View>}<View style={styles.messageBody}><Text style={[styles.messageAuthor, item.mine && styles.messageAuthorMine, item.bot && styles.botAuthor]}>{item.author}</Text><View style={[styles.messageBubble, item.mine && styles.messageBubbleMine, item.bot && styles.botBubble]}><MentionText text={item.text} mine={item.mine} styles={styles} /></View></View></View>} ListHeaderComponent={cohActive ? <View style={styles.botHint}><Ionicons name="sparkles" size={15} color="#7047EE" /><Text style={styles.botHintText}>This is your private Chief of Home workspace. Coh’s questions won’t crowd the family conversation.</Text></View> : <View style={styles.chatHeader}><View style={styles.homeThreadIcon}><Ionicons name="home" size={20} color="#F5A623" /></View><View><Text style={styles.chatTitle}>Everyone</Text><Text style={styles.muted}>Family messages only</Text></View></View>} ListEmptyComponent={<View style={styles.emptyChat}><Ionicons name={cohActive ? 'sparkles-outline' : 'chatbubbles-outline'} size={28} color={cohActive ? '#7047EE' : styles.iconColor.color} /><Text style={styles.settingTitle}>{cohActive ? 'Ask Coh to organize something' : 'Start the family conversation'}</Text></View>} ListFooterComponent={cohActive && cohThinking ? <View style={styles.cohThinking}><Ionicons name="sparkles" size={15} color="#7047EE" /><Text style={styles.botAuthor}>Coh is thinking…</Text></View> : null} /><View style={[styles.composeRow, cohActive && styles.composeRowCoh]}><Pressable onPress={onAdd} style={[styles.composePlus, cohActive && styles.composeCohBadge]}>{cohActive ? <Ionicons name="sparkles" size={18} color="#fff" /> : <Ionicons name="add" size={22} color="#2257F4" />}</Pressable><TextInput value={draft} onChangeText={setDraft} placeholder={cohThinking ? 'Coh is thinking…' : cohActive ? 'Ask Coh anything about home…' : 'Message your family…'} placeholderTextColor="#8B93A5" editable={!cohThinking} style={[styles.composeInput, cohActive && styles.composeInputCoh]} returnKeyType="send" onSubmitEditing={onSend} /><Pressable disabled={cohThinking} onPress={onSend} style={[styles.sendButton, cohActive && styles.sendButtonCoh, cohThinking && { opacity: .55 }]}><Ionicons name={cohActive ? 'sparkles' : 'send'} size={17} color="#fff" /></Pressable></View></View>;
+}
+
+function messageChannel(message: ChatMessage): ChatChannel {
+  if (message.channel) return message.channel;
+  return message.bot || /(@coh|hey coh)\b/i.test(message.text) ? 'coh' : 'family';
+}
+
+function eventSaveReply(event: BotEvent, result: 'shared' | 'device' | 'failed') {
+  if (result === 'failed') {
+    return `I couldn’t save “${event.title}.” Check calendar access or your connection, then ask me to try again.`;
+  }
+  const destination = result === 'shared'
+    ? 'the shared family calendar'
+    : 'this iPhone’s calendar';
+  return `Done — “${event.title}” is on ${destination} for ${event.day} at ${event.time}.${event.reminder ? ` The reminder is ${event.reminder} minutes before.` : ''}${event.directions && event.place ? ` Directions to ${event.place} are included.` : ''}`;
+}
+
+function initials(name: string) {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  return (parts.length > 1 ? `${parts[0][0]}${parts[parts.length - 1][0]}` : parts[0]?.slice(0, 2) || 'FM').toUpperCase();
 }
 
 function MentionText({ text, mine, styles }: { text: string; mine: boolean; styles: any }) {
@@ -536,6 +1084,106 @@ function MentionText({ text, mine, styles }: { text: string; mine: boolean; styl
   const start = match.index;
   const end = start + match[0].length;
   return <Text style={[styles.messageText, mine && styles.messageTextMine]}>{text.slice(0, start)}<Text style={styles.cohMention}>✦ {match[0]}</Text>{text.slice(end)}</Text>;
+}
+
+function relatedName(value: any, fallback: string) {
+  const profile = Array.isArray(value) ? value[0] : value;
+  return profile?.display_name || fallback;
+}
+
+function cloudMessage(row: any, currentUserId: string): ChatMessage {
+  const mine = row.sender_id === currentUserId;
+  return {
+    id: `cloud-${row.id}`,
+    mine,
+    author: mine ? 'You' : relatedName(row.sender, 'Family'),
+    text: row.body,
+    channel: 'family',
+  };
+}
+
+function personToProfile(person: HouseholdPerson, index: number): FamilyProfile {
+  const colors = [
+    ['#DCE7FF', '#2257F4'],
+    ['#FFE1CF', '#D7550D'],
+    ['#D9F7ED', '#168866'],
+    ['#EADFFF', '#6E3AE2'],
+  ];
+  const [color, ink] = colors[index % colors.length];
+  return {
+    id: person.id,
+    linkedUserId: person.linked_user_id,
+    name: person.display_name,
+    dob: person.date_of_birth ?? '',
+    bio: person.bio ?? '',
+    role: person.role,
+    avatarUri: person.avatar_signed_url ?? undefined,
+    color,
+    ink,
+  };
+}
+
+function cloudEvent(row: any): BotEvent {
+  const startsAt = new Date(row.starts_at);
+  let metadata: any = {};
+  try { metadata = row.details ? JSON.parse(row.details) : {}; } catch { metadata = {}; }
+  return {
+    id: `cloud-${row.id}`,
+    sourceId: row.id,
+    title: row.title,
+    person: metadata.person || relatedName(row.creator, 'Family'),
+    day: startsAt.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' }),
+    dateISO: localDateKey(startsAt),
+    time: startsAt.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }),
+    place: row.location || undefined,
+    reminder: typeof metadata.reminder === 'number' ? metadata.reminder : undefined,
+    directions: typeof metadata.directions === 'boolean' ? metadata.directions : undefined,
+  };
+}
+
+function cloudChore(row: any, index: number): Chore {
+  const rewardId = appRewardId(row.reward_type);
+  const rewardValue = Number(row.reward_value ?? 10);
+  const colors = ['#2257F4', '#19A47B', '#7C4DFF', '#FF7A2E'];
+  const dueAt = row.due_at ? new Date(row.due_at) : null;
+  return {
+    id: row.id,
+    title: row.title,
+    owner: relatedName(row.assignee, 'Unassigned'),
+    due: dueAt ? dueAt.toLocaleString(undefined, { weekday: 'short', hour: 'numeric', minute: '2-digit' }) : 'No due time',
+    done: row.status === 'completed',
+    points: rewardValue,
+    rewardId,
+    rewardValue,
+    color: colors[index % colors.length],
+  };
+}
+
+function appRewardId(type?: string) {
+  if (type === 'game_time') return 'game';
+  if (type === 'vbucks') return 'vbucks';
+  if (type === 'allowance') return 'allowance';
+  return 'choice';
+}
+
+function databaseRewardType(rewardId: string) {
+  if (rewardId === 'game') return 'game_time';
+  if (rewardId === 'vbucks') return 'vbucks';
+  if (rewardId === 'allowance') return 'allowance';
+  return 'custom';
+}
+
+function eventStartISO(event: BotEvent) {
+  if (!event.dateISO) return null;
+  const dateMatch = event.dateISO.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  const timeMatch = event.time.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+  if (!dateMatch || !timeMatch) return null;
+  let hour = Number(timeMatch[1]);
+  const minute = Number(timeMatch[2]);
+  const meridiem = timeMatch[3].toUpperCase();
+  if (meridiem === 'PM' && hour < 12) hour += 12;
+  if (meridiem === 'AM' && hour === 12) hour = 0;
+  return new Date(Number(dateMatch[1]), Number(dateMatch[2]) - 1, Number(dateMatch[3]), hour, minute).toISOString();
 }
 
 function eventFromCohDraft(draft: CohDraft): BotEvent | null {
@@ -652,13 +1300,19 @@ function parseClock(value: string) { const match = value.match(/(\d{1,2}):(\d{2}
 function weekdayNumber(day: string) { return ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'].indexOf(day) + 1; }
 function startOfDay(date: Date) { const next = new Date(date); next.setHours(0, 0, 0, 0); return next; }
 function addDays(date: Date, count: number) { const next = new Date(date); next.setDate(next.getDate() + count); return next; }
+function nextFollowUpDate() {
+  const next = new Date();
+  let days = (5 - next.getDay() + 7) % 7;
+  if (days === 0) days = 7;
+  next.setDate(next.getDate() + days);
+  next.setHours(17, 0, 0, 0);
+  return next;
+}
 function startOfWeek(date: Date) { const next = startOfDay(date); next.setDate(next.getDate() - next.getDay()); return next; }
 function sameDay(a: Date, b: Date) { return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate(); }
 function localDateKey(date: Date) { return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`; }
-function liveUpcoming() { return upcoming.map((event, index) => { const date = addDays(new Date(), index + 2); return { ...event, date: String(date.getDate()), month: date.toLocaleDateString(undefined, { month: 'short' }).toUpperCase() }; }); }
-
-function FamilyProfilesScreen({ styles, profiles, onEdit, onAdd }: { styles: any; profiles: FamilyProfile[]; onEdit: (profile: FamilyProfile) => void; onAdd: () => void }) {
-  return <ScrollView contentContainerStyle={styles.scrollContent}><View style={styles.familyHero}><View><Text style={styles.progressLabel}>YOUR HOUSEHOLD</Text><Text style={styles.familyHeroTitle}>{profiles.length} family members</Text><Text style={styles.muted}>Profiles help Coh personalize schedules, rewards, reminders, and recaps.</Text></View><Pressable onPress={onAdd} style={styles.addProfileButton}><Ionicons name="person-add" size={20} color="#fff" /></Pressable></View><Text style={styles.sectionTitle}>People</Text>{profiles.map((profile) => <Pressable key={profile.id} onPress={() => onEdit(profile)} style={styles.profileRow}><ProfileAvatar profile={profile} styles={styles} size="large" /><View style={styles.flex}><Text style={styles.profileName}>{profile.name || 'New family member'}</Text><Text style={styles.muted}>{profile.role}{profile.dob ? ` · Born ${profile.dob}` : ''}</Text><Text numberOfLines={1} style={styles.profileBio}>{profile.bio || 'Add a bio, interests, allergies, school, or anything Coh should know.'}</Text></View><Ionicons name="create-outline" size={20} color={styles.iconColor.color} /></Pressable>)}<Pressable onPress={onAdd} style={styles.outlineAction}><Ionicons name="person-add-outline" size={19} color="#2257F4" /><Text style={styles.outlineActionText}>Add family member</Text></Pressable></ScrollView>;
+function FamilyProfilesScreen({ styles, profiles, onEdit, onAdd, onInvite }: { styles: any; profiles: FamilyProfile[]; onEdit: (profile: FamilyProfile) => void; onAdd: () => void; onInvite: () => void }) {
+  return <ScrollView contentContainerStyle={styles.scrollContent}><View style={styles.familyHero}><View style={styles.flex}><Text style={styles.progressLabel}>YOUR HOUSEHOLD</Text><Text style={styles.familyHeroTitle}>{profiles.length} family members</Text><Text style={styles.muted}>Profiles help Coh personalize schedules, rewards, reminders, and recaps.</Text></View><Pressable onPress={onAdd} style={styles.addProfileButton}><Ionicons name="person-add" size={20} color="#fff" /></Pressable></View><Pressable onPress={onInvite} style={styles.inviteFamilyCard}><View style={styles.inviteFamilyIcon}><Ionicons name="mail-unread" size={21} color="#fff" /></View><View style={styles.flex}><Text style={styles.settingTitle}>Invite another family member</Text><Text style={styles.muted}>Create a secure household invitation and share it from your iPhone.</Text></View><Ionicons name="chevron-forward" size={19} color={styles.iconColor.color} /></Pressable><Text style={styles.sectionTitle}>People</Text>{profiles.map((profile) => <Pressable key={profile.id} onPress={() => onEdit(profile)} style={styles.profileRow}><ProfileAvatar profile={profile} styles={styles} size="large" /><View style={styles.flex}><Text style={styles.profileName}>{profile.name || 'New family member'}</Text><Text style={styles.muted}>{profile.role}{profile.dob ? ` · Born ${profile.dob}` : ''}</Text><Text numberOfLines={1} style={styles.profileBio}>{profile.bio || 'Add a bio, interests, allergies, school, or anything Coh should know.'}</Text></View><Ionicons name="create-outline" size={20} color={styles.iconColor.color} /></Pressable>)}<Pressable onPress={onAdd} style={styles.outlineAction}><Ionicons name="person-add-outline" size={19} color="#2257F4" /><Text style={styles.outlineActionText}>Add family profile</Text></Pressable></ScrollView>;
 }
 
 function ProfileAvatar({ profile, styles, size }: { profile: FamilyProfile; styles: any; size?: string }) {
@@ -673,17 +1327,30 @@ function ProfileEditorModal({ visible, profile, styles, dark, onClose, onSave }:
   async function choosePhoto() {
     const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (!permission.granted) return;
-    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], allowsEditing: true, aspect: [1, 1], quality: .8 });
-    if (!result.canceled) setDraft((current) => current ? { ...current, avatarUri: result.assets[0].uri } : current);
+    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], allowsEditing: true, aspect: [1, 1], quality: .75, base64: true });
+    if (!result.canceled) {
+      const asset = result.assets[0];
+      setDraft((current) => current ? {
+        ...current,
+        avatarUri: asset.uri,
+        avatarBase64: asset.base64 ?? undefined,
+        avatarMime: asset.mimeType,
+      } : current);
+    }
   }
   const update = (patch: Partial<FamilyProfile>) => setDraft((current) => current ? { ...current, ...patch } : current);
-  return <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}><KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.modalBackdrop}><Pressable style={styles.modalDismiss} onPress={onClose} /><ScrollView style={styles.profileSheet} contentContainerStyle={styles.profileSheetContent} keyboardShouldPersistTaps="handled"><View style={styles.modalHandle} /><View style={styles.modalHead}><View><Text style={styles.eyebrow}>FAMILY PROFILE</Text><Text style={styles.modalTitle}>{draft.name ? `Edit ${draft.name}` : 'Add someone'}</Text></View><Pressable onPress={onClose} style={styles.iconButton}><Ionicons name="close" size={21} color={styles.iconColor.color} /></Pressable></View><Pressable onPress={choosePhoto} style={styles.photoEditor}><ProfileAvatar profile={draft} styles={styles} size="large" /><View><Text style={styles.settingTitle}>Profile picture</Text><Text style={styles.link}>Choose from Photos</Text></View></Pressable><Text style={styles.fieldLabel}>NAME</Text><TextInput value={draft.name} onChangeText={(name) => update({ name })} placeholder="Full name" placeholderTextColor="#8B93A5" style={styles.modalInput} /><Text style={styles.fieldLabel}>DATE OF BIRTH</Text><TextInput value={draft.dob} onChangeText={(dob) => update({ dob })} placeholder="MM/DD/YYYY" placeholderTextColor="#8B93A5" keyboardType="numbers-and-punctuation" style={styles.modalInput} /><Text style={styles.fieldLabel}>ROLE</Text><View style={styles.chipRow}>{['Adult admin', 'Family member', 'Child'].map((role) => <Pressable key={role} onPress={() => update({ role })} style={[styles.choiceChip, draft.role === role && styles.choiceChipActive]}><Text style={[styles.choiceChipText, draft.role === role && styles.choiceChipTextActive]}>{role}</Text></Pressable>)}</View><Text style={styles.fieldLabel}>ABOUT</Text><TextInput value={draft.bio} onChangeText={(bio) => update({ bio })} multiline placeholder="Interests, allergies, school, preferences, or anything useful for the family" placeholderTextColor="#8B93A5" style={[styles.modalInput, styles.modalTextArea]} /><Text style={styles.profilePrivacy}>This information stays inside your Coho household and is used to personalize family assistance.</Text><Pressable disabled={!draft.name.trim()} onPress={() => onSave(draft)} style={[styles.saveButton, !draft.name.trim() && { opacity: .45 }]}><Text style={styles.saveButtonText}>Save profile</Text></Pressable></ScrollView><StatusBar style={dark ? 'light' : 'dark'} /></KeyboardAvoidingView></Modal>;
+  return <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}><KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.modalBackdrop}><Pressable style={styles.modalDismiss} onPress={onClose} /><ScrollView style={styles.profileSheet} contentContainerStyle={styles.profileSheetContent} keyboardShouldPersistTaps="handled"><View style={styles.modalHandle} /><View style={styles.modalHead}><View><Text style={styles.eyebrow}>FAMILY PROFILE</Text><Text style={styles.modalTitle}>{draft.name ? `Edit ${draft.name}` : 'Add someone'}</Text></View><Pressable onPress={onClose} style={styles.iconButton}><Ionicons name="close" size={21} color={styles.iconColor.color} /></Pressable></View><Pressable onPress={choosePhoto} style={styles.photoEditor}><ProfileAvatar profile={draft} styles={styles} size="large" /><View><Text style={styles.settingTitle}>Profile picture</Text><Text style={styles.link}>Choose from Photos</Text></View></Pressable><Text style={styles.fieldLabel}>NAME</Text><TextInput value={draft.name} onChangeText={(name) => update({ name })} placeholder="Full name" placeholderTextColor="#8B93A5" style={styles.modalInput} /><Text style={styles.fieldLabel}>DATE OF BIRTH</Text><TextInput value={draft.dob} onChangeText={(dob) => update({ dob })} placeholder="YYYY-MM-DD" placeholderTextColor="#8B93A5" keyboardType="numbers-and-punctuation" style={styles.modalInput} /><Text style={styles.fieldLabel}>ROLE</Text><View style={styles.chipRow}>{(['Adult admin', 'Family member', 'Child'] as FamilyProfile['role'][]).map((role) => <Pressable key={role} onPress={() => update({ role })} style={[styles.choiceChip, draft.role === role && styles.choiceChipActive]}><Text style={[styles.choiceChipText, draft.role === role && styles.choiceChipTextActive]}>{role}</Text></Pressable>)}</View><Text style={styles.fieldLabel}>ABOUT</Text><TextInput value={draft.bio} onChangeText={(bio) => update({ bio })} multiline placeholder="Interests, allergies, school, preferences, or anything useful for the family" placeholderTextColor="#8B93A5" style={[styles.modalInput, styles.modalTextArea]} /><Text style={styles.profilePrivacy}>This information stays inside your Coho household and is used to personalize family assistance.</Text><Pressable disabled={!draft.name.trim()} onPress={() => onSave(draft)} style={[styles.saveButton, !draft.name.trim() && { opacity: .45 }]}><Text style={styles.saveButtonText}>Save profile</Text></Pressable></ScrollView><StatusBar style={dark ? 'light' : 'dark'} /></KeyboardAvoidingView></Modal>;
 }
 
 function MoreMenu({ styles, setView }: any) {
   const items = [
     ['Chief of Home', 'home-outline', '#7047EE', 'Personal briefings, week ahead, and follow-ups'],
     ['Family', 'people-outline', '#2257F4', 'Members, roles, and family invitations'],
+    ['Family Inbox', 'mail-unread-outline', '#FF7A2E', 'One private address for school, appointments, and activities'],
+    ['Meals & Groceries', 'restaurant-outline', '#D7550D', 'Meal plans, shared groceries, and Coh Home Chef'],
+    ['Family Places', 'location-outline', '#19A47B', 'Opt-in location, arrivals, and departures'],
+    ['Trips', 'airplane-outline', '#7047EE', 'Private schedules with friends and other families'],
+    ['Calendar Sync', 'calendar-outline', '#2257F4', 'Connect selected calendars on this iPhone'],
     ['Notes', 'document-text-outline', '#7C4DFF', 'Lists, instructions, and family details'],
     ['Recaps', 'sparkles-outline', '#2257F4', 'Daily summaries by push and email'],
     ['Integrations', 'extension-puzzle-outline', '#19A47B', 'Skylight, calendars, email, and more'],
@@ -692,7 +1359,7 @@ function MoreMenu({ styles, setView }: any) {
   return <ScrollView contentContainerStyle={styles.scrollContent}><Text style={styles.moreIntro}>Everything else your household needs, without cluttering the everyday view.</Text><View style={styles.moreGrid}>{items.map(([title, icon, color, detail]) => <Pressable key={title} onPress={() => setView(title)} style={styles.moreCard}><View style={[styles.moreIcon, { backgroundColor: `${color}18` }]}><Ionicons name={icon as any} size={25} color={color} /></View><Text style={styles.moreTitle}>{title}</Text><Text style={styles.moreDetail}>{detail}</Text><Ionicons name="chevron-forward" size={18} color={styles.iconColor.color} style={styles.moreChevron} /></Pressable>)}</View></ScrollView>;
 }
 
-function ChiefOfHomeScreen({ styles, prefs, setPrefs, onActivate }: { styles: any; prefs: ChiefPrefs; setPrefs: (value: ChiefPrefs) => void; onActivate: () => void }) {
+function ChiefOfHomeScreen({ styles, prefs, memberNames, setPrefs, onActivate }: { styles: any; prefs: ChiefPrefs; memberNames: string[]; setPrefs: (value: ChiefPrefs) => void; onActivate: () => void }) {
   const update = (patch: Partial<ChiefPrefs>) => setPrefs({ ...prefs, ...patch });
   const toggleMember = (name: string) => update({ members: prefs.members.includes(name) ? prefs.members.filter((item) => item !== name) : [...prefs.members, name] });
   const briefingRows = [
@@ -701,32 +1368,97 @@ function ChiefOfHomeScreen({ styles, prefs, setPrefs, onActivate }: { styles: an
     { key: 'followUp', icon: 'refresh-outline', color: '#19A47B', title: 'Weekly follow-up', detail: `${prefs.followUpDay} at ${prefs.followUpTime}`, times: ['4:00 PM', '5:00 PM', '6:00 PM'] },
   ];
   return <ScrollView contentContainerStyle={styles.scrollContent}>
-    <LinearGradient colors={['#24116D', '#7047EE']} style={styles.chiefHero}><View style={styles.chiefBadge}><Ionicons name="home" size={22} color="#7047EE" /></View><Text style={styles.recapHeroLabel}>KINCUE</Text><Text style={styles.chiefHeroTitle}>Your Chief of Home</Text><Text style={styles.recapHeroText}>The right family information, resurfaced before anyone has to remember it.</Text></LinearGradient>
+    <LinearGradient colors={['#24116D', '#7047EE']} style={styles.chiefHero}><View style={styles.chiefBadge}><Ionicons name="home" size={22} color="#7047EE" /></View><Text style={styles.recapHeroLabel}>COHO</Text><Text style={styles.chiefHeroTitle}>Your Chief of Home</Text><Text style={styles.recapHeroText}>The right family information, resurfaced before anyone has to remember it.</Text></LinearGradient>
     <Text style={styles.sectionTitle}>Your briefings</Text>
     {briefingRows.map((row) => <View key={row.key} style={styles.chiefSettingCard}><View style={styles.settingRowTop}><View style={[styles.integrationIcon, { backgroundColor: `${row.color}18` }]}><Ionicons name={row.icon as any} size={22} color={row.color} /></View><View style={styles.flex}><Text style={styles.settingTitle}>{row.title}</Text><Text style={styles.muted}>{row.detail}</Text></View><Switch value={(prefs as any)[row.key]} onValueChange={(value) => update({ [row.key]: value })} trackColor={{ true: '#6687FF' }} /></View><View style={styles.chipRow}>{row.times.map((time) => { const field = row.key === 'daily' ? 'dailyTime' : row.key === 'weekAhead' ? 'weekAheadTime' : 'followUpTime'; return <Pressable key={time} onPress={() => update({ [field]: time })} style={[styles.choiceChip, (prefs as any)[field] === time && styles.choiceChipActive]}><Text style={[styles.choiceChipText, (prefs as any)[field] === time && styles.choiceChipTextActive]}>{time}</Text></Pressable>; })}</View></View>)}
     <Text style={styles.sectionTitle}>Include</Text><View style={styles.preferenceGrid}>{([['events', 'Appointments & events'], ['chores', 'Chores'], ['followUps', 'Follow-ups'], ['messages', 'Important messages']] as const).map(([key, label]) => <Pressable key={key} onPress={() => update({ [key]: !prefs[key] })} style={[styles.preferenceTile, prefs[key] && styles.preferenceTileActive]}><Ionicons name={prefs[key] ? 'checkmark-circle' : 'ellipse-outline'} size={19} color={prefs[key] ? '#19A47B' : styles.iconColor.color} /><Text style={styles.preferenceText}>{label}</Text></Pressable>)}</View>
-    <Text style={styles.sectionTitle}>Family members</Text><View style={styles.chipRow}>{familyNames().map((name) => <Pressable key={name} onPress={() => toggleMember(name)} style={[styles.memberChip, prefs.members.includes(name) && styles.memberChipActive]}><Text style={[styles.choiceChipText, prefs.members.includes(name) && styles.choiceChipTextActive]}>{name}</Text></Pressable>)}</View>
-    <Text style={styles.sectionTitle}>Delivery</Text><View style={styles.settingRow}><Ionicons name="notifications-outline" size={21} color="#7047EE" /><View style={styles.flex}><Text style={styles.settingTitle}>Push notifications</Text><Text style={styles.muted}>Delivered to this iPhone</Text></View><Switch value={prefs.push} onValueChange={(push) => update({ push })} trackColor={{ true: '#6687FF' }} /></View><View style={styles.settingRow}><Ionicons name="mail-outline" size={21} color="#2257F4" /><View style={styles.flex}><Text style={styles.settingTitle}>Email copy</Text><Text style={styles.muted}>Available when family email delivery is connected</Text></View><Switch value={prefs.email} onValueChange={(email) => update({ email })} trackColor={{ true: '#6687FF' }} /></View><View style={styles.settingRow}><Ionicons name="moon-outline" size={21} color="#7C4DFF" /><View style={styles.flex}><Text style={styles.settingTitle}>Quiet hours</Text><Text style={styles.muted}>9:00 PM–7:00 AM · urgent alerts only</Text></View><Switch value={prefs.quietHours} onValueChange={(quietHours) => update({ quietHours })} trackColor={{ true: '#6687FF' }} /></View>
+    <Text style={styles.sectionTitle}>Family members</Text><View style={styles.chipRow}>{memberNames.map((name) => <Pressable key={name} onPress={() => toggleMember(name)} style={[styles.memberChip, prefs.members.includes(name) && styles.memberChipActive]}><Text style={[styles.choiceChipText, prefs.members.includes(name) && styles.choiceChipTextActive]}>{name}</Text></Pressable>)}</View>
+    <Text style={styles.sectionTitle}>Delivery</Text><View style={styles.settingRow}><Ionicons name="notifications-outline" size={21} color="#7047EE" /><View style={styles.flex}><Text style={styles.settingTitle}>Push notifications</Text><Text style={styles.muted}>Delivered to this iPhone</Text></View><Switch value={prefs.push} onValueChange={(push) => update({ push })} trackColor={{ true: '#6687FF' }} /></View><View style={styles.settingRow}><Ionicons name="mail-outline" size={21} color="#2257F4" /><View style={styles.flex}><Text style={styles.settingTitle}>Email copy</Text><Text style={styles.muted}>Delivered to your verified Coho sign-in email</Text></View><Switch value={prefs.email} onValueChange={(email) => update({ email })} trackColor={{ true: '#6687FF' }} /></View><View style={styles.settingRow}><Ionicons name="moon-outline" size={21} color="#7C4DFF" /><View style={styles.flex}><Text style={styles.settingTitle}>Quiet hours</Text><Text style={styles.muted}>9:00 PM–7:00 AM · urgent alerts only</Text></View><Switch value={prefs.quietHours} onValueChange={(quietHours) => update({ quietHours })} trackColor={{ true: '#6687FF' }} /></View>
     <Pressable onPress={onActivate} style={styles.saveButton}><Text style={styles.saveButtonText}>Save and schedule my briefings</Text></Pressable>
   </ScrollView>;
 }
 
-function NotesScreen({ styles, onAction }: any) {
-  const notes = [['🛒', 'Weekly groceries', '8 items · Updated 12 min ago'], ['🏡', 'Lake house details', 'Shared with everyone'], ['🍝', 'Dinner ideas', '12 recipes'], ['☎️', 'Emergency contacts', 'Pinned · Family admins'], ['🎁', 'Gift ideas', 'Private to adults'], ['🧳', 'PA packing list', '23 of 31 packed']];
-  return <ScrollView contentContainerStyle={styles.scrollContent}><TextInput placeholder="Search family notes" placeholderTextColor="#8B93A5" style={styles.searchInput} /><View style={styles.notesGrid}>{notes.map(([icon, title, meta]) => <Pressable key={title} onPress={() => onAction(`${title} · ${meta}`)} style={styles.noteCard}><Text style={styles.noteEmoji}>{icon}</Text><Text style={styles.noteTitle}>{title}</Text><Text style={styles.muted}>{meta}</Text><Ionicons name="chevron-forward" size={16} color={styles.iconColor.color} style={styles.noteChevron} /></Pressable>)}</View></ScrollView>;
+function NotesScreen({ styles, householdId, userId, onAction }: { styles: any; householdId: string | null; userId: string | null; onAction: (message: string) => void }) {
+  const [notes, setNotes] = useState<SharedNote[]>([]);
+  const [query, setQuery] = useState('');
+  const [editor, setEditor] = useState<{ id?: string; title: string; body: string; pinned: boolean } | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  async function load() {
+    if (!householdId) return setNotes([]);
+    setNotes(await listSharedNotes(householdId));
+  }
+
+  useEffect(() => {
+    void load().catch(() => undefined);
+    if (!householdId) return;
+    return subscribeToHousehold('notes', householdId, () => void load());
+  }, [householdId]);
+
+  async function save() {
+    if (!editor?.title.trim() || !householdId || !userId) return;
+    setBusy(true);
+    try {
+      await saveFamilyNote({
+        ...editor,
+        householdId,
+        userId,
+      });
+      await load();
+      setEditor(null);
+      onAction('Shared family note saved');
+    } catch (error) {
+      onAction(error instanceof Error ? error.message : 'The note could not be saved.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const filtered = notes.filter((note) => `${note.title} ${note.body}`.toLowerCase().includes(query.trim().toLowerCase()));
+  return <>
+    <ScrollView contentContainerStyle={styles.scrollContent}>
+      <View style={styles.sectionHead}><View><Text style={styles.sectionTitle}>Shared family notes</Text><Text style={styles.muted}>Real-time household lists, instructions, and details</Text></View><Pressable onPress={() => setEditor({ title: '', body: '', pinned: false })} style={styles.addProfileButton}><Ionicons name="add" size={20} color="#fff" /></Pressable></View>
+      <TextInput value={query} onChangeText={setQuery} placeholder="Search family notes" placeholderTextColor="#8B93A5" style={styles.searchInput} />
+      {filtered.length === 0 ? <View style={styles.emptyChat}><Ionicons name="document-text-outline" size={28} color="#7C4DFF" /><Text style={styles.settingTitle}>{query ? 'No matching notes' : 'No shared notes yet'}</Text><Text style={styles.muted}>Create the first note and it will appear for the household in real time.</Text></View> : <View style={styles.notesGrid}>{filtered.map((note) => <Pressable key={note.id} onPress={() => setEditor(note)} style={styles.noteCard}><Ionicons name={note.pinned ? 'pin' : 'document-text-outline'} size={23} color={note.pinned ? '#FF7A2E' : '#7C4DFF'} /><Text style={styles.noteTitle}>{note.title}</Text><Text numberOfLines={3} style={styles.muted}>{note.body || 'No details yet'}</Text><Text style={styles.muted}>Updated {new Date(note.updated_at).toLocaleDateString()}</Text><Ionicons name="chevron-forward" size={16} color={styles.iconColor.color} style={styles.noteChevron} /></Pressable>)}</View>}
+    </ScrollView>
+    <Modal visible={Boolean(editor)} transparent animationType="slide" onRequestClose={() => setEditor(null)}>
+      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.modalBackdrop}>
+        <Pressable style={styles.modalDismiss} onPress={() => setEditor(null)} />
+        {editor && <View style={styles.modalSheet}>
+          <View style={styles.modalHandle} />
+          <View style={styles.modalHead}><View><Text style={styles.eyebrow}>SHARED NOTE</Text><Text style={styles.modalTitle}>{editor.id ? 'Edit family note' : 'New family note'}</Text></View><Pressable onPress={() => setEditor(null)} style={styles.iconButton}><Ionicons name="close" size={21} color={styles.iconColor.color} /></Pressable></View>
+          <Text style={styles.fieldLabel}>TITLE</Text><TextInput value={editor.title} onChangeText={(title) => setEditor({ ...editor, title })} placeholder="Note title" placeholderTextColor="#8B93A5" style={styles.modalInput} />
+          <Text style={styles.fieldLabel}>DETAILS</Text><TextInput value={editor.body} onChangeText={(body) => setEditor({ ...editor, body })} multiline placeholder="Everything the family should know…" placeholderTextColor="#8B93A5" style={[styles.modalInput, styles.modalTextArea]} />
+          <View style={styles.settingRow}><Ionicons name="pin-outline" size={21} color="#FF7A2E" /><View style={styles.flex}><Text style={styles.settingTitle}>Pin for the household</Text><Text style={styles.muted}>Keep this note at the top</Text></View><Switch value={editor.pinned} onValueChange={(pinned) => setEditor({ ...editor, pinned })} trackColor={{ true: '#FF7A2E' }} /></View>
+          <Pressable disabled={busy || !editor.title.trim()} onPress={save} style={[styles.saveButton, (busy || !editor.title.trim()) && { opacity: .5 }]}><Text style={styles.saveButtonText}>{busy ? 'Saving…' : 'Save shared note'}</Text></Pressable>
+        </View>}
+      </KeyboardAvoidingView>
+    </Modal>
+  </>;
 }
 
-function RecapsScreen({ styles, onAction, events, chores, messages }: any) {
-  const week = [['MON', 'Dentist follow-up · Chad', '9:30 AM'], ['TUE', 'Asher soccer practice', '6:00 PM'], ['WED', 'School pickup · Oliver', '3:15 PM'], ['THU', 'Lake trip packing deadline', '7:00 PM'], ['FRI', 'Family dinner reservation', '6:30 PM'], ['SAT', 'Knoebels family day', '10:00 AM'], ['SUN', 'Plan the coming week', '6:00 PM']];
+function RecapsScreen({ styles, onAction, onListen, onOpenEvent, onCompleteFollowUp, events, chores, messages, followUps }: any) {
   const openChores = chores.filter((item: any) => !item.done).length;
   const recentMessages = messages.filter((item: ChatMessage) => !item.bot).slice(-5).length;
   const syncTime = new Date().toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
-  return <ScrollView contentContainerStyle={styles.scrollContent}><LinearGradient colors={['#2257F4', '#7047EE']} style={styles.recapHero}><Ionicons name="sparkles" size={24} color="#fff" /><Text style={styles.recapHeroLabel}>LIVE DAILY SYNC · {syncTime.toUpperCase()}</Text><Text style={styles.recapHeroTitle}>Here’s what your home needs now.</Text><Text style={styles.recapHeroText}>{events.length} family event{events.length === 1 ? '' : 's'}, {openChores} open chore{openChores === 1 ? '' : 's'}, and {recentMessages} recent family message{recentMessages === 1 ? '' : 's'} are in your current briefing.</Text><View style={styles.recapActionRow}><Pressable onPress={() => onAction('Daily sync refreshed with the latest family activity')} style={styles.recapHeroButton}><Ionicons name="refresh" size={15} color="#2257F4" /><Text>Refresh now</Text></Pressable><Pressable onPress={() => onAction('Audio briefing playback is ready')} style={styles.recapHeroButton}><Ionicons name="play" size={15} color="#2257F4" /><Text>Listen</Text></Pressable></View></LinearGradient>{events.length > 0 && <><Text style={styles.sectionTitle}>Added by Coh</Text>{events.slice(-5).map((event: BotEvent) => <Pressable key={event.id} onPress={() => onAction(`${event.title} · ${event.day} at ${event.time}`)} style={styles.highlightRow}><Text style={styles.highlightTime}>{event.time}</Text><View style={styles.flex}><Text style={styles.highlightText}>{event.title}</Text><Text style={styles.muted}>{event.person} · {event.day}{event.place ? ` · ${event.place}` : ''}</Text></View><Ionicons name="sparkles" size={17} color="#7047EE" /></Pressable>)}</>}<Text style={styles.sectionTitle}>Week ahead</Text>{week.map(([day, text, time]) => <Pressable onPress={() => onAction(`${text} · ${time}`)} key={day} style={styles.highlightRow}><Text style={styles.highlightTime}>{day}</Text><View style={styles.flex}><Text style={styles.highlightText}>{text}</Text><Text style={styles.muted}>{time}</Text></View><Ionicons name="chevron-forward" size={17} color={styles.iconColor.color} /></Pressable>)}<Text style={styles.sectionTitle}>Needs follow-up</Text>{[['Dentist visit', 'Schedule the six-month follow-up'], ['School meeting', 'Return the signed permission form']].map(([title, detail]) => <View key={title} style={styles.followUpCard}><Ionicons name="refresh-circle" size={23} color="#19A47B" /><View style={styles.flex}><Text style={styles.settingTitle}>{title}</Text><Text style={styles.muted}>{detail}</Text></View><Pressable onPress={() => onAction(`${title} marked resolved`)} style={styles.connectButton}><Text style={styles.connectText}>Resolve</Text></Pressable></View>)}</ScrollView>;
+  const today = localDateKey(new Date());
+  const weekEvents = events.filter((event: BotEvent) => !event.dateISO || event.dateISO >= today).slice(0, 14);
+  return <ScrollView contentContainerStyle={styles.scrollContent}><LinearGradient colors={['#2257F4', '#7047EE']} style={styles.recapHero}><Ionicons name="sparkles" size={24} color="#fff" /><Text style={styles.recapHeroLabel}>LIVE DAILY SYNC · {syncTime.toUpperCase()}</Text><Text style={styles.recapHeroTitle}>Here’s what your home needs now.</Text><Text style={styles.recapHeroText}>{events.length} family event{events.length === 1 ? '' : 's'}, {openChores} open chore{openChores === 1 ? '' : 's'}, {followUps.length} follow-up{followUps.length === 1 ? '' : 's'}, and {recentMessages} recent family message{recentMessages === 1 ? '' : 's'} are in your current briefing.</Text><View style={styles.recapActionRow}><Pressable onPress={() => onAction('Daily sync refreshed with the latest family activity')} style={styles.recapHeroButton}><Ionicons name="refresh" size={15} color="#2257F4" /><Text>Refresh now</Text></Pressable><Pressable onPress={onListen} style={styles.recapHeroButton}><Ionicons name="volume-high" size={15} color="#2257F4" /><Text>Listen</Text></Pressable></View></LinearGradient><Text style={styles.sectionTitle}>Week ahead</Text>{weekEvents.length === 0 ? <View style={styles.emptyChat}><Ionicons name="calendar-clear-outline" size={28} color="#2257F4" /><Text style={styles.settingTitle}>No upcoming events</Text><Text style={styles.muted}>When Coh or a family member adds one, it will appear here.</Text></View> : weekEvents.map((event: BotEvent) => <Pressable key={event.id} onPress={() => onOpenEvent(event)} style={styles.highlightRow}><Text style={styles.highlightTime}>{event.dateISO ? new Date(`${event.dateISO}T12:00:00`).toLocaleDateString(undefined, { weekday: 'short' }).toUpperCase() : 'NEXT'}</Text><View style={styles.flex}><Text style={styles.highlightText}>{event.title}</Text><Text style={styles.muted}>{event.time} · {event.person}{event.place ? ` · ${event.place}` : ''}</Text></View><Ionicons name="chevron-forward" size={17} color="#7047EE" /></Pressable>)}<Text style={styles.sectionTitle}>Needs follow-up</Text>{followUps.length === 0 ? <View style={styles.emptyChat}><Ionicons name="refresh-circle-outline" size={28} color="#19A47B" /><Text style={styles.settingTitle}>Nothing needs follow-up</Text><Text style={styles.muted}>Open a shared appointment and choose “Add to follow-up” when it needs another step.</Text></View> : followUps.map((item: SharedFollowUp) => { const event = Array.isArray(item.event) ? item.event[0] : item.event; return <View key={item.id} style={styles.highlightRow}><Text style={styles.highlightTime}>{item.due_at ? new Date(item.due_at).toLocaleDateString(undefined, { weekday: 'short' }).toUpperCase() : 'OPEN'}</Text><View style={styles.flex}><Text style={styles.highlightText}>{event?.title || 'Appointment follow-up'}</Text><Text style={styles.muted}>{item.note || 'Check the outcome and capture the next step'}{event?.location ? ` · ${event.location}` : ''}</Text></View><Pressable accessibilityLabel={`Complete follow-up for ${event?.title || 'appointment'}`} onPress={() => onCompleteFollowUp(item.id)} style={styles.checkCircle}><Ionicons name="checkmark" size={16} color="#19A47B" /></Pressable></View>; })}</ScrollView>;
 }
 
 function IntegrationsScreen({ styles, connected, onConnect }: any) {
-  const items = [['Apple Calendar', 'calendar-outline', '#2257F4'], ['Skylight', 'cloud-outline', '#FF7A2E'], ['Google Calendar', 'logo-google', '#19A47B'], ['Outlook', 'mail-outline', '#2257F4'], ['iOS Notifications', 'phone-portrait-outline', '#7C4DFF'], ['Email Inbox', 'mail-unread-outline', '#FF7A2E'], ['Automations', 'flash-outline', '#7C4DFF']];
-  return <ScrollView contentContainerStyle={styles.scrollContent}><LinearGradient colors={['#24116D', '#6648EF']} style={styles.automationCard}><Ionicons name="flash" size={23} color="#fff" /><View style={styles.flex}><Text style={styles.automationLabel}>AUTOMATION IDEA</Text><Text style={styles.automationTitle}>Turn school emails into suggested family events.</Text></View></LinearGradient>{items.map(([name, icon, color]) => <View key={name} style={styles.integrationRow}><View style={[styles.integrationIcon, { backgroundColor: `${color}18` }]}><Ionicons name={icon as any} size={23} color={color} /></View><View style={styles.flex}><Text style={styles.integrationTitle}>{name}</Text><Text style={styles.muted}>{name === 'Skylight' ? 'Calendar and chore synchronization' : 'Keep family information flowing automatically'}</Text></View><Pressable onPress={() => onConnect(name)} style={[styles.connectButton, connected[name] && styles.connectedButton]}><Text style={[styles.connectText, connected[name] && styles.connectedText]}>{connected[name] ? 'Connected' : 'Connect'}</Text></Pressable></View>)}</ScrollView>;
+  const items = [
+    { name: 'iOS Notifications', icon: 'phone-portrait-outline', color: '#7C4DFF', detail: 'Daily syncs, week-ahead briefings, and reminders' },
+    { name: 'Family Inbox', icon: 'mail-unread-outline', color: '#FF7A2E', detail: 'Forward school and appointment email into a review queue' },
+    { name: 'Family Places', icon: 'location-outline', color: '#19A47B', detail: 'Consent-first phone location and arrival or departure alerts' },
+    { name: 'Apple Calendar', icon: 'calendar-outline', color: '#2257F4', detail: 'Read and write approved family events' },
+    { name: 'Google Calendar', icon: 'logo-google', color: '#19A47B', detail: 'Import selected calendars with per-calendar controls' },
+    { name: 'Outlook', icon: 'mail-outline', color: '#2257F4', detail: 'Calendar and forwarded-email connection' },
+    { name: 'Instacart', icon: 'basket-outline', color: '#19A47B', detail: 'Live local products, pricing, shopping lists, and checkout' },
+    { name: 'OpenTable', icon: 'restaurant-outline', color: '#D7550D', detail: 'Restaurant discovery and confirmed reservation handoff' },
+    { name: 'Skylight', icon: 'cloud-outline', color: '#FF7A2E', detail: 'Migration bridge for existing family schedules' },
+  ];
+  return <ScrollView contentContainerStyle={styles.scrollContent}><LinearGradient colors={['#24116D', '#6648EF']} style={styles.automationCard}><Ionicons name="flash" size={23} color="#fff" /><View style={styles.flex}><Text style={styles.automationLabel}>REVIEW FIRST</Text><Text style={styles.automationTitle}>Coh suggests events from email. A family member approves before anything reaches the calendar.</Text></View></LinearGradient>{items.map(({ name, icon, color, detail }) => <View key={name} style={styles.integrationRow}><View style={[styles.integrationIcon, { backgroundColor: `${color}18` }]}><Ionicons name={icon as any} size={23} color={color} /></View><View style={styles.flex}><Text style={styles.integrationTitle}>{name}</Text><Text style={styles.muted}>{detail}</Text></View><Pressable onPress={() => onConnect(name)} style={[styles.connectButton, connected[name] && styles.connectedButton]}><Text style={[styles.connectText, connected[name] && styles.connectedText]}>{connected[name] ? 'Connected' : name === 'iOS Notifications' ? 'Enable' : 'Set up'}</Text></Pressable></View>)}</ScrollView>;
 }
 
 function SettingsScreen({ styles, dark, onTheme, onNotifications, onFamily, onAction, profiles }: any) {
@@ -738,11 +1470,29 @@ function BottomTabs({ tab, setTab, styles }: any) {
   return <View style={styles.tabBar}>{tabs.map(([name, icon]) => <Pressable key={name} onPress={() => setTab(name)} style={styles.tabItem}><View style={[styles.tabIconWrap, tab === name && styles.tabIconActive]}><Ionicons name={(tab === name ? icon : `${icon}-outline`) as any} size={21} color={tab === name ? '#fff' : styles.iconColor.color} /></View><Text style={[styles.tabLabel, tab === name && styles.tabLabelActive]}>{name}</Text></Pressable>)}</View>;
 }
 
-function QuickAddModal({ visible, onClose, styles, type, setType, title, setTitle, onSave, dark }: any) {
-  return <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}><KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.modalBackdrop}><Pressable style={styles.modalDismiss} onPress={onClose} /><View style={styles.modalSheet}><View style={styles.modalHandle} /><View style={styles.modalHead}><View><Text style={styles.eyebrow}>QUICK ADD</Text><Text style={styles.modalTitle}>Share with the family</Text></View><Pressable onPress={onClose} style={styles.iconButton}><Ionicons name="close" size={21} color={styles.iconColor.color} /></Pressable></View><View style={styles.typeTabs}>{['Event', 'Chore', 'Note', 'Message'].map((item) => <Pressable key={item} onPress={() => setType(item)} style={[styles.typeTab, type === item && styles.typeTabActive]}><Text style={[styles.typeTabText, type === item && styles.typeTabTextActive]}>{item}</Text></Pressable>)}</View><Text style={styles.fieldLabel}>{type} title</Text><TextInput value={title} onChangeText={setTitle} autoFocus placeholder={`Add a ${type.toLowerCase()}…`} placeholderTextColor="#8B93A5" style={styles.modalInput} /><Text style={styles.fieldLabel}>Details</Text><TextInput multiline placeholder="Location, instructions, links, or anything the family should know" placeholderTextColor="#8B93A5" style={[styles.modalInput, styles.modalTextArea]} /><Pressable onPress={onSave} style={styles.saveButton}><Text style={styles.saveButtonText}>Add {type.toLowerCase()}</Text></Pressable></View><StatusBar style={dark ? 'light' : 'dark'} /></KeyboardAvoidingView></Modal>;
+function EventDetailModal({ event, styles, dark, onClose, onFollowUp }: { event: BotEvent | null; styles: any; dark: boolean; onClose: () => void; onFollowUp: (event: BotEvent) => void }) {
+  if (!event) return null;
+  const openDirections = () => {
+    if (!event.place) return;
+    const query = encodeURIComponent(event.place);
+    void Linking.openURL(Platform.OS === 'ios' ? `http://maps.apple.com/?q=${query}` : `https://www.google.com/maps/search/?api=1&query=${query}`);
+  };
+  return <Modal visible transparent animationType="slide" onRequestClose={onClose}><View style={styles.modalBackdrop}><Pressable style={styles.modalDismiss} onPress={onClose} /><View style={styles.modalSheet}><View style={styles.modalHandle} /><View style={styles.modalHead}><View style={styles.flex}><Text style={styles.eyebrow}>FAMILY EVENT</Text><Text style={styles.modalTitle}>{event.title}</Text></View><Pressable onPress={onClose} style={styles.iconButton}><Ionicons name="close" size={21} color={styles.iconColor.color} /></Pressable></View><View style={styles.eventDetailRow}><Ionicons name="calendar-outline" size={20} color="#2257F4" /><View><Text style={styles.settingTitle}>{event.day}</Text><Text style={styles.muted}>{event.time}</Text></View></View><View style={styles.eventDetailRow}><Ionicons name="person-outline" size={20} color="#7047EE" /><Text style={styles.settingTitle}>{event.person}</Text></View>{event.place && <Pressable accessibilityRole="button" accessibilityLabel={`Open directions to ${event.place}`} onPress={openDirections} style={styles.eventDetailRow}><Ionicons name="location-outline" size={20} color="#19A47B" /><View style={styles.flex}><Text style={styles.settingTitle}>{event.place}</Text><Text style={styles.link}>Open directions</Text></View><Ionicons name="open-outline" size={18} color="#2257F4" /></Pressable>}{event.reminder && <View style={styles.eventDetailRow}><Ionicons name="notifications-outline" size={20} color="#FF7A2E" /><Text style={styles.settingTitle}>{event.reminder}-minute reminder</Text></View>}<Pressable onPress={() => onFollowUp(event)} style={styles.outlineAction}><Ionicons name="refresh-circle-outline" size={19} color="#19A47B" /><Text style={[styles.outlineActionText, { color: '#168866' }]}>Add to weekly follow-up</Text></Pressable><Pressable onPress={onClose} style={styles.saveButton}><Text style={styles.saveButtonText}>Done</Text></Pressable></View><StatusBar style={dark ? 'light' : 'dark'} /></View></Modal>;
 }
 
-function ShareToCueModal({ visible, styles, dark, value, onChange, hasImage, error, onCancel, onApprove }: any) {
+function ChoreRewardModal({ chore, styles, dark, onClose, onSave }: { chore: Chore | null; styles: any; dark: boolean; onClose: () => void; onSave: (chore: Chore) => void }) {
+  const [draft, setDraft] = useState<Chore | null>(chore);
+  useEffect(() => setDraft(chore), [chore]);
+  if (!draft) return null;
+  const selected = rewardGoals.find((reward) => reward.id === draft.rewardId) ?? rewardGoals[0];
+  return <Modal visible transparent animationType="slide" onRequestClose={onClose}><KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.modalBackdrop}><Pressable style={styles.modalDismiss} onPress={onClose} /><View style={styles.modalSheet}><View style={styles.modalHandle} /><View style={styles.modalHead}><View style={styles.flex}><Text style={styles.eyebrow}>CHORE REWARD</Text><Text style={styles.modalTitle}>{draft.title}</Text><Text style={styles.muted}>{draft.owner} earns this when the chore is completed.</Text></View><Pressable onPress={onClose} style={styles.iconButton}><Ionicons name="close" size={21} color={styles.iconColor.color} /></Pressable></View><Text style={styles.fieldLabel}>REWARD TYPE</Text><View style={styles.rewardModalGrid}>{rewardGoals.map((reward) => <Pressable key={reward.id} onPress={() => setDraft({ ...draft, rewardId: reward.id })} style={[styles.rewardModalChoice, draft.rewardId === reward.id && { borderColor: reward.color, backgroundColor: `${reward.color}12` }]}><Ionicons name={reward.icon as any} size={20} color={reward.color} /><Text style={styles.choiceChipText}>{reward.title}</Text></Pressable>)}</View><Text style={styles.fieldLabel}>VALUE EARNED</Text><View style={styles.rewardValueRow}>{[5, 10, 15, 20, 30, 50].map((value) => <Pressable key={value} onPress={() => setDraft({ ...draft, rewardValue: value, points: value })} style={[styles.choiceChip, draft.rewardValue === value && { backgroundColor: selected.color, borderColor: selected.color }]}><Text style={[styles.choiceChipText, draft.rewardValue === value && styles.choiceChipTextActive]}>+{value}</Text></Pressable>)}</View><Pressable onPress={() => onSave(draft)} style={[styles.saveButton, { backgroundColor: selected.color }]}><Text style={styles.saveButtonText}>Save chore reward</Text></Pressable></View><StatusBar style={dark ? 'light' : 'dark'} /></KeyboardAvoidingView></Modal>;
+}
+
+function QuickAddModal({ visible, onClose, styles, type, setType, title, setTitle, details, setDetails, onSave, dark }: any) {
+  return <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}><KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.modalBackdrop}><Pressable style={styles.modalDismiss} onPress={onClose} /><View style={styles.modalSheet}><View style={styles.modalHandle} /><View style={styles.modalHead}><View><Text style={styles.eyebrow}>QUICK ADD</Text><Text style={styles.modalTitle}>Share with the family</Text></View><Pressable onPress={onClose} style={styles.iconButton}><Ionicons name="close" size={21} color={styles.iconColor.color} /></Pressable></View><View style={styles.typeTabs}>{['Event', 'Chore', 'Note', 'Message'].map((item) => <Pressable key={item} onPress={() => setType(item)} style={[styles.typeTab, type === item && styles.typeTabActive]}><Text style={[styles.typeTabText, type === item && styles.typeTabTextActive]}>{item}</Text></Pressable>)}</View><Text style={styles.fieldLabel}>{type} title</Text><TextInput value={title} onChangeText={setTitle} autoFocus placeholder={`Add a ${type.toLowerCase()}…`} placeholderTextColor="#8B93A5" style={styles.modalInput} /><Text style={styles.fieldLabel}>Details</Text><TextInput value={details} onChangeText={setDetails} multiline placeholder="Location, instructions, links, or anything the family should know" placeholderTextColor="#8B93A5" style={[styles.modalInput, styles.modalTextArea]} /><Pressable disabled={!title.trim()} onPress={onSave} style={[styles.saveButton, !title.trim() && styles.disabled]}><Text style={styles.saveButtonText}>{type === 'Event' ? 'Continue with Coh' : `Add ${type.toLowerCase()}`}</Text></Pressable></View><StatusBar style={dark ? 'light' : 'dark'} /></KeyboardAvoidingView></Modal>;
+}
+
+function ShareToCohModal({ visible, styles, dark, value, onChange, hasImage, error, onCancel, onApprove }: any) {
   return <Modal visible={visible} transparent animationType="slide" onRequestClose={onCancel}>
     <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.modalBackdrop}>
       <Pressable style={styles.modalDismiss} onPress={onCancel} />
@@ -757,7 +1507,7 @@ function ShareToCueModal({ visible, styles, dark, value, onChange, hasImage, err
         <Text style={styles.fieldLabel}>REVIEW OR EDIT BEFORE SENDING</Text>
         <TextInput value={value} onChangeText={onChange} multiline placeholder={hasImage ? 'Example: Haircut for Chad Wednesday at 9:30 AM' : 'Selected text or link'} placeholderTextColor="#8B93A5" style={[styles.modalInput, styles.sharePreviewInput]} />
         {error && <Text style={styles.shareError}>The shared item could not be read. Nothing has been saved.</Text>}
-        <View style={styles.shareActions}><Pressable onPress={onCancel} style={styles.cancelButton}><Text style={styles.cancelButtonText}>Cancel</Text></Pressable><Pressable onPress={onApprove} style={styles.approveButton}><Ionicons name="sparkles" size={16} color="#fff" /><Text style={styles.saveButtonText}>Ask Cue</Text></Pressable></View>
+        <View style={styles.shareActions}><Pressable onPress={onCancel} style={styles.cancelButton}><Text style={styles.cancelButtonText}>Cancel</Text></Pressable><Pressable onPress={onApprove} style={styles.approveButton}><Ionicons name="sparkles" size={16} color="#fff" /><Text style={styles.saveButtonText}>Ask Coh</Text></Pressable></View>
       </View>
       <StatusBar style={dark ? 'light' : 'dark'} />
     </KeyboardAvoidingView>
@@ -796,6 +1546,9 @@ function createStyles(t: Theme) {
     modalBackdrop: { flex: 1, backgroundColor: '#0C111D88', justifyContent: 'flex-end' }, modalDismiss: { flex: 1 }, modalSheet: { backgroundColor: t.surfaceStrong, borderTopLeftRadius: 28, borderTopRightRadius: 28, paddingHorizontal: 19, paddingTop: 9, paddingBottom: Platform.OS === 'ios' ? 28 : 18 }, modalHandle: { width: 39, height: 4, borderRadius: 2, backgroundColor: t.line, alignSelf: 'center', marginBottom: 15 }, modalHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' }, modalTitle: { color: t.text, fontSize: 23, fontWeight: '800', letterSpacing: -.7 }, typeTabs: { flexDirection: 'row', borderRadius: 14, padding: 4, backgroundColor: t.canvas, marginTop: 19 }, typeTab: { flex: 1, minHeight: 38, borderRadius: 10, alignItems: 'center', justifyContent: 'center' }, typeTabActive: { backgroundColor: t.surfaceStrong }, typeTabText: { color: t.muted, fontSize: 10, fontWeight: '700' }, typeTabTextActive: { color: t.primary }, fieldLabel: { color: t.muted, fontSize: 9, fontWeight: '800', marginTop: 15, marginBottom: 6 }, modalInput: { minHeight: 46, borderRadius: 13, borderWidth: 1, borderColor: t.line, backgroundColor: t.surface, color: t.text, paddingHorizontal: 12 }, modalTextArea: { minHeight: 83, paddingTop: 12, textAlignVertical: 'top' }, saveButton: { minHeight: 48, borderRadius: 15, backgroundColor: t.primary, alignItems: 'center', justifyContent: 'center', marginTop: 18 }, saveButtonText: { color: '#fff', fontSize: 12, fontWeight: '800' },
     privacyCard: { minHeight: 66, borderRadius: 16, padding: 12, marginTop: 16, flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: '#19A47B12', borderWidth: 1, borderColor: '#19A47B35' }, privacyText: { color: t.text, fontSize: 10, lineHeight: 15, flex: 1, fontWeight: '600' }, sharedAttachment: { minHeight: 62, borderRadius: 15, padding: 12, marginTop: 10, flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line }, sharePreviewInput: { minHeight: 110, paddingTop: 12, textAlignVertical: 'top' }, shareError: { color: '#D64545', fontSize: 10, marginTop: 8 }, shareActions: { flexDirection: 'row', gap: 10, marginTop: 16 }, cancelButton: { flex: 1, minHeight: 48, borderRadius: 15, borderWidth: 1, borderColor: t.line, alignItems: 'center', justifyContent: 'center' }, cancelButtonText: { color: t.text, fontSize: 12, fontWeight: '800' }, approveButton: { flex: 1.4, minHeight: 48, borderRadius: 15, backgroundColor: t.primary, flexDirection: 'row', gap: 7, alignItems: 'center', justifyContent: 'center' },
     cohThinking: { alignSelf: 'flex-start', flexDirection: 'row', alignItems: 'center', gap: 8, marginLeft: 40, minHeight: 38, paddingHorizontal: 13, borderRadius: 16, backgroundColor: '#7047EE14', borderWidth: 1, borderColor: '#7047EE35' },
+    chatModeTabs: { flexDirection: 'row', gap: 8, paddingHorizontal: 14, paddingVertical: 9, backgroundColor: t.surfaceStrong, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: t.line }, chatModeTab: { flex: 1, minHeight: 39, borderRadius: 13, flexDirection: 'row', gap: 7, alignItems: 'center', justifyContent: 'center', backgroundColor: t.surface, borderWidth: 1, borderColor: t.line }, chatModeTabActive: { backgroundColor: t.primary, borderColor: t.primary }, chatModeCohActive: { backgroundColor: '#7047EE', borderColor: '#7047EE' }, chatModeText: { color: t.text, fontSize: 10, fontWeight: '800' }, chatModeTextActive: { color: '#fff' }, emptyChat: { minHeight: 180, alignItems: 'center', justifyContent: 'center', gap: 10, opacity: .82 },
+    choreRewardText: { fontSize: 9, fontWeight: '800', marginTop: 4 }, rewardModalGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 }, rewardModalChoice: { width: '48.5%', minHeight: 58, borderRadius: 15, padding: 11, flexDirection: 'row', gap: 8, alignItems: 'center', backgroundColor: t.surface, borderWidth: 1, borderColor: t.line }, rewardValueRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 }, eventDetailRow: { minHeight: 62, borderRadius: 16, marginTop: 10, padding: 12, flexDirection: 'row', alignItems: 'center', gap: 11, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line },
+    fullModalHeader: { minHeight: 72, paddingHorizontal: 18, paddingVertical: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', backgroundColor: t.surfaceStrong, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: t.line }, inviteFamilyCard: { minHeight: 82, borderRadius: 19, padding: 13, flexDirection: 'row', alignItems: 'center', gap: 11, backgroundColor: '#7047EE12', borderWidth: 1, borderColor: '#7047EE35' }, inviteFamilyIcon: { width: 45, height: 45, borderRadius: 15, backgroundColor: '#7047EE', alignItems: 'center', justifyContent: 'center' },
   });
 }
 

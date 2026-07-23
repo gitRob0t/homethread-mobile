@@ -13,7 +13,9 @@
       "buildNumber": "1",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false,
-        "NSUserNotificationsUsageDescription": "Coho uses notifications for family reminders, upcoming events, and daily recaps."
+        "NSUserNotificationsUsageDescription": "Coho uses notifications for family reminders, upcoming events, daily recaps, and Family Places alerts.",
+        "NSCalendarsFullAccessUsageDescription": "Coho reads only the iPhone calendars you select so your household can coordinate approved events.",
+        "NSCalendarsWriteOnlyAccessUsageDescription": "Coho can add events you approve to the iPhone calendar you choose."
       }
     },
     "android": {
@@ -39,6 +41,17 @@
         "expo-image-picker",
         {
           "photosPermission": "Coho uses your selected photo as a family member's profile picture."
+        }
+      ],
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Coho uses your location only when you choose to share it with your household or create a Family Place.",
+          "locationAlwaysAndWhenInUsePermission": "Coho uses background location only after you enable live sharing and arrival or departure alerts.",
+          "locationAlwaysPermission": "Coho uses background location only after you enable live sharing and arrival or departure alerts.",
+          "motionUsagePermission": false,
+          "isIosBackgroundLocationEnabled": true,
+          "isAndroidBackgroundLocationEnabled": true
         }
       ],
       [

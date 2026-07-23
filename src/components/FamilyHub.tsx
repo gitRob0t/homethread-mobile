@@ -3,6 +3,7 @@ import {
   ActivityIndicator,
   Pressable,
   ScrollView,
+  Share,
   StyleSheet,
   Text,
   TextInput,
@@ -66,9 +67,15 @@ export default function FamilyHub() {
     setBusy(true);
     setMessage('');
     try {
-      await inviteFamilyMember(householdId, email, role);
+      const invitation = await inviteFamilyMember(householdId, email, role);
+      if (invitation?.invitation_token) {
+        await Share.share({
+          title: `Join ${householdName} on Coho`,
+          message: `Join our family command center on Coho: homethread://invite/${invitation.invitation_token}`,
+        });
+      }
       setEmail('');
-      setMessage('Invitation created and ready to share.');
+      setMessage('Invitation created. Share the secure link with your family member.');
       await load();
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'Unable to send invitation.');
@@ -120,7 +127,7 @@ export default function FamilyHub() {
         </View>
         {!!message && <Text style={styles.message}>{message}</Text>}
         <Pressable disabled={busy} onPress={sendInvite} style={[styles.button, busy && styles.disabled]}>
-          {busy ? <ActivityIndicator color="#fff" /> : <Text style={styles.buttonText}>Create invitation</Text>}
+          {busy ? <ActivityIndicator color="#fff" /> : <Text style={styles.buttonText}>Create and share invitation</Text>}
         </Pressable>
       </View>
 
