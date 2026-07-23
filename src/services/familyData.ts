@@ -161,30 +161,43 @@ export async function completeEventFollowUp(followUpId: string, userId: string) 
 export async function listSharedChores(householdId: string) {
   const { data, error } = await supabase
     .from('chores')
-    .select('id, title, assigned_to, due_at, status, reward_type, reward_value, reward_label, assignee:profiles!chores_assigned_to_fkey(display_name)')
+    .select('id, title, details, assigned_to, assigned_person_id, due_at, recurrence_rule, reminder_minutes, status, reward_type, reward_value, reward_label, assignee:profiles!chores_assigned_to_fkey(display_name), assigned_person:household_people!chores_assigned_person_id_fkey(id, display_name, linked_user_id)')
     .eq('household_id', householdId)
+    .order('due_at', { ascending: true, nullsFirst: false })
     .order('created_at', { ascending: true });
   if (error) throw error;
   return data ?? [];
 }
 
-export async function createFamilyChore(
-  householdId: string,
-  userId: string,
-  title: string,
-  details = '',
-  assignedTo: string | null = null,
-) {
+export async function createFamilyChore(input: {
+  householdId: string;
+  userId: string;
+  title: string;
+  details?: string | null;
+  assignedPersonId?: string | null;
+  assignedUserId?: string | null;
+  dueAt?: string | null;
+  recurrenceRule?: string | null;
+  reminderMinutes?: number | null;
+  rewardType?: 'points' | 'game_time' | 'vbucks' | 'allowance' | 'custom';
+  rewardValue?: number;
+  rewardLabel?: string | null;
+}) {
   const { data, error } = await supabase
     .from('chores')
     .insert({
-      household_id: householdId,
-      created_by: userId,
-      title: title.trim(),
-      details: details.trim() || null,
-      assigned_to: assignedTo,
-      reward_type: 'points',
-      reward_value: 10,
+      household_id: input.householdId,
+      created_by: input.userId,
+      title: input.title.trim(),
+      details: input.details?.trim() || null,
+      assigned_person_id: input.assignedPersonId ?? null,
+      assigned_to: input.assignedUserId ?? null,
+      due_at: input.dueAt ?? null,
+      recurrence_rule: input.recurrenceRule ?? null,
+      reminder_minutes: input.reminderMinutes ?? null,
+      reward_type: input.rewardType ?? 'points',
+      reward_value: Math.max(0, input.rewardValue ?? 10),
+      reward_label: input.rewardLabel?.trim() || null,
     })
     .select('id')
     .single();
@@ -194,6 +207,11 @@ export async function createFamilyChore(
 
 export async function updateFamilyChore(choreId: string, patch: Record<string, unknown>) {
   const { error } = await supabase.from('chores').update(patch).eq('id', choreId);
+  if (error) throw error;
+}
+
+export async function deleteFamilyChore(choreId: string) {
+  const { error } = await supabase.from('chores').delete().eq('id', choreId);
   if (error) throw error;
 }
 

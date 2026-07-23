@@ -70,7 +70,8 @@
             "NSExtensionActivationSupportsImageWithMaxCount": 1
           }
         }
-      ]
+      ],
+      "@react-native-community/datetimepicker"
     ]
   }
 }

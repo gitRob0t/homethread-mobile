@@ -11,6 +11,7 @@ import {
   TravelHubScreen,
 } from './src/components/HouseholdOS';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import DateTimePicker from '@react-native-community/datetimepicker';
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -58,6 +59,7 @@ import {
   createEventFollowUp,
   createFamilyChore,
   createFamilyEvent,
+  deleteFamilyChore,
   listEventFollowUps,
   listSharedChores,
   listSharedEvents,
@@ -72,6 +74,7 @@ import {
   updateFamilyChore,
 } from './src/services/familyData';
 import {
+  Alert,
   FlatList,
   Image,
   KeyboardAvoidingView,
@@ -123,7 +126,37 @@ type BotEvent = {
   sourceCalendarId?: string;
   recurrenceRule?: string;
 };
-type Chore = { id: string; title: string; owner: string; due: string; done: boolean; points: number; rewardId: string; rewardValue: number; color: string };
+type ChoreRepeat = 'none' | 'daily' | 'weekdays' | 'weekly' | 'biweekly' | 'monthly';
+type Chore = {
+  id: string;
+  title: string;
+  details: string;
+  owner: string;
+  assignedPersonId: string | null;
+  assignedUserId: string | null;
+  dueAt: string | null;
+  due: string;
+  recurrence: ChoreRepeat;
+  recurrenceRule: string | null;
+  reminderMinutes: number | null;
+  done: boolean;
+  points: number;
+  rewardId: string;
+  rewardValue: number;
+  rewardLabel: string | null;
+  color: string;
+};
+type ChoreFormValue = {
+  title: string;
+  details: string;
+  assignedPersonId: string | null;
+  dueAt: Date;
+  recurrence: ChoreRepeat;
+  reminderMinutes: number | null;
+  rewardId: string;
+  rewardValue: number;
+  rewardLabel: string;
+};
 type BotField = 'title' | 'day' | 'time' | 'meridiem' | 'place' | 'directions' | 'reminder' | 'confirm';
 type BotDraft = { title?: string; person?: string; day?: string; dateISO?: string; time?: string; meridiem?: 'AM' | 'PM'; place?: string; reminder?: number; directions?: boolean; awaiting: BotField };
 type ChiefPrefs = { daily: boolean; dailyTime: string; weekAhead: boolean; weekAheadDay: string; weekAheadTime: string; followUp: boolean; followUpDay: string; followUpTime: string; push: boolean; email: boolean; quietHours: boolean; events: boolean; chores: boolean; messages: boolean; followUps: boolean; members: string[] };
@@ -151,6 +184,23 @@ const rewardGoals: RewardGoal[] = [
   { id: 'choice', title: 'My choice', detail: 'Pick a family privilege', cost: 50, icon: 'star', color: '#FF9F1C' },
 ];
 
+const choreRewardOptions = [
+  { id: 'points', title: 'Points', icon: 'trophy', color: '#2257F4', presets: [5, 10, 15, 20, 30, 50] },
+  { id: 'game', title: 'Game time', icon: 'game-controller', color: '#7047EE', presets: [15, 30, 45, 60] },
+  { id: 'vbucks', title: 'V-Bucks', icon: 'diamond', color: '#2257F4', presets: [100, 200, 500, 1000] },
+  { id: 'allowance', title: 'Allowance', icon: 'cash', color: '#19A47B', presets: [1, 2, 5, 10, 20] },
+  { id: 'choice', title: 'Custom', icon: 'star', color: '#FF9F1C', presets: [1] },
+] as const;
+
+const choreRepeatOptions: Array<{ id: ChoreRepeat; label: string; rule: string | null }> = [
+  { id: 'none', label: 'Does not repeat', rule: null },
+  { id: 'daily', label: 'Daily', rule: 'FREQ=DAILY' },
+  { id: 'weekdays', label: 'Weekdays', rule: 'FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR' },
+  { id: 'weekly', label: 'Weekly', rule: 'FREQ=WEEKLY' },
+  { id: 'biweekly', label: 'Every 2 weeks', rule: 'FREQ=WEEKLY;INTERVAL=2' },
+  { id: 'monthly', label: 'Monthly', rule: 'FREQ=MONTHLY' },
+];
+
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
     shouldPlaySound: true,
@@ -172,6 +222,7 @@ function CohoApp() {
   const [quickAddType, setQuickAddType] = useState('Event');
   const [quickAddTitle, setQuickAddTitle] = useState('');
   const [quickAddDetails, setQuickAddDetails] = useState('');
+  const [quickAddSaving, setQuickAddSaving] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [chores, setChores] = useState<Chore[]>([]);
   const [rewardMember, setRewardMember] = useState('');
@@ -224,8 +275,16 @@ function CohoApp() {
       if (savedEvents) setBotEvents(JSON.parse(savedEvents));
       if (savedChores) setChores(JSON.parse(savedChores).map((chore: Chore) => ({
         ...chore,
+        details: chore.details ?? '',
+        assignedPersonId: chore.assignedPersonId ?? null,
+        assignedUserId: chore.assignedUserId ?? null,
+        dueAt: chore.dueAt ?? null,
+        recurrence: chore.recurrence ?? 'none',
+        recurrenceRule: chore.recurrenceRule ?? null,
+        reminderMinutes: chore.reminderMinutes ?? null,
         rewardId: chore.rewardId ?? 'choice',
         rewardValue: chore.rewardValue ?? chore.points ?? 10,
+        rewardLabel: chore.rewardLabel ?? null,
       })));
     }).catch(() => undefined).finally(() => setLocalDataReady(true));
     Notifications.getPermissionsAsync().then((permission) => {
@@ -364,26 +423,54 @@ function CohoApp() {
     setTimeout(() => setNotice(null), 2600);
   }
 
-  async function saveQuickAdd() {
-    if (!quickAddTitle.trim()) return;
-    const title = quickAddTitle.trim();
-    const details = quickAddDetails.trim();
-    setQuickAddOpen(false);
-    setQuickAddTitle('');
-    setQuickAddDetails('');
+  async function saveQuickAdd(choreForm?: ChoreFormValue) {
+    const title = (choreForm?.title ?? quickAddTitle).trim();
+    const details = (choreForm?.details ?? quickAddDetails).trim();
+    if (!title || quickAddSaving) return;
+    const finish = () => {
+      setQuickAddOpen(false);
+      setQuickAddTitle('');
+      setQuickAddDetails('');
+    };
     if (quickAddType === 'Chore') {
       if (!householdId || !currentUserId) {
         showNotice('Join a household before sharing a family chore.');
         return;
       }
+      if (!choreForm) {
+        showNotice('Choose the chore owner, schedule, and reward before saving.');
+        return;
+      }
+      const assignee = profiles.find((profile) => profile.id === choreForm.assignedPersonId) ?? null;
+      setQuickAddSaving(true);
       try {
-        await createFamilyChore(householdId, currentUserId, title, details);
-        showNotice('Chore added to the shared household');
-      } catch {
-        showNotice('The chore could not be shared. Try again when Coho is online.');
+        await createFamilyChore({
+          householdId,
+          userId: currentUserId,
+          title,
+          details,
+          assignedPersonId: assignee?.id ?? null,
+          assignedUserId: assignee?.linkedUserId ?? null,
+          dueAt: choreForm.dueAt.toISOString(),
+          recurrenceRule: recurrenceRuleFor(choreForm.recurrence),
+          reminderMinutes: choreForm.reminderMinutes,
+          rewardType: databaseRewardType(choreForm.rewardId),
+          rewardValue: choreForm.rewardValue,
+          rewardLabel: choreForm.rewardId === 'choice'
+            ? choreForm.rewardLabel.trim()
+            : choreRewardMeta(choreForm.rewardId).title,
+        });
+        finish();
+        await reloadSharedData(householdId, currentUserId);
+        showNotice(`${title} assigned${assignee ? ` to ${assignee.name}` : ''}`);
+      } catch (error) {
+        showNotice(error instanceof Error ? error.message : 'The chore could not be shared. Try again when Coho is online.');
+      } finally {
+        setQuickAddSaving(false);
       }
       return;
     }
+    finish();
     if (quickAddType === 'Message') {
       setChatMode('family');
       setTab('Chat');
@@ -558,13 +645,20 @@ function CohoApp() {
               profile.name.localeCompare(response.draft.person ?? '', undefined, { sensitivity: 'base' }) === 0,
             )
             : null;
-          await createFamilyChore(
+          await createFamilyChore({
             householdId,
-            currentUserId,
-            response.draft.title,
-            response.draft.notes ?? '',
-            assignee?.linkedUserId ?? null,
-          );
+            userId: currentUserId,
+            title: response.draft.title,
+            details: response.draft.notes ?? '',
+            assignedPersonId: assignee?.id ?? null,
+            assignedUserId: assignee?.linkedUserId ?? null,
+            dueAt: response.draft.due_at,
+            recurrenceRule: response.draft.recurrence_rule,
+            reminderMinutes: response.draft.reminder_minutes,
+            rewardType: response.draft.reward_type ?? 'points',
+            rewardValue: response.draft.reward_value ?? 10,
+            rewardLabel: response.draft.reward_label,
+          });
           addBotMessage(`Done — “${response.draft.title}” is now a shared chore${assignee ? ` for ${assignee.name}` : ''}. Open Chores to choose what it earns.`);
           showNotice('Coh added the chore to the household');
         }
@@ -840,7 +934,7 @@ function CohoApp() {
     }
     const { data } = await supabase
       .from('chores')
-      .select('id, title, assigned_to, due_at, status, reward_type, reward_value, reward_label, assignee:profiles!chores_assigned_to_fkey(display_name)')
+      .select('id, title, details, assigned_to, assigned_person_id, due_at, recurrence_rule, reminder_minutes, status, reward_type, reward_value, reward_label, assignee:profiles!chores_assigned_to_fkey(display_name), assigned_person:household_people!chores_assigned_person_id_fkey(id, display_name, linked_user_id)')
       .eq('id', choreId)
       .maybeSingle();
     if (data) setEditingChore(cloudChore(data, chores.length));
@@ -1024,24 +1118,57 @@ function CohoApp() {
     }
   }
 
-  async function saveChoreReward(updated: Chore) {
-    setChores((items) => items.map((item) => item.id === updated.id ? updated : item));
-    setEditingChore(null);
-    if (!householdId) {
-      showNotice(`${updated.title} reward updated on this iPhone`);
-      return;
-    }
+  async function saveChoreSettings(choreId: string, draft: ChoreFormValue) {
+    const assignee = profiles.find((profile) => profile.id === draft.assignedPersonId) ?? null;
+    if (!householdId) return;
     try {
-      const reward = rewardGoals.find((item) => item.id === updated.rewardId) ?? rewardGoals[0];
-      await updateFamilyChore(updated.id, {
-        reward_type: databaseRewardType(updated.rewardId),
-        reward_value: updated.rewardValue,
-        reward_label: reward.title,
+      await updateFamilyChore(choreId, {
+        title: draft.title.trim(),
+        details: draft.details.trim() || null,
+        assigned_person_id: assignee?.id ?? null,
+        assigned_to: assignee?.linkedUserId ?? null,
+        due_at: draft.dueAt.toISOString(),
+        recurrence_rule: recurrenceRuleFor(draft.recurrence),
+        reminder_minutes: draft.reminderMinutes,
+        reward_type: databaseRewardType(draft.rewardId),
+        reward_value: draft.rewardValue,
+        reward_label: draft.rewardId === 'choice'
+          ? draft.rewardLabel.trim()
+          : choreRewardMeta(draft.rewardId).title,
+        updated_at: new Date().toISOString(),
       });
-      showNotice(`${updated.title} reward updated for the family`);
-    } catch {
-      showNotice('The reward is saved on this iPhone but could not be shared yet.');
+      setEditingChore(null);
+      await reloadSharedData(householdId, currentUserId);
+      showNotice(`${draft.title.trim()} updated for the family`);
+    } catch (error) {
+      showNotice(error instanceof Error ? error.message : 'The chore could not be updated for the family.');
     }
+  }
+
+  function deleteChore(chore: Chore) {
+    Alert.alert(
+      'Delete chore?',
+      `“${chore.title}” will be removed for the whole family.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: () => {
+            void (async () => {
+              try {
+                await deleteFamilyChore(chore.id);
+                setEditingChore(null);
+                if (householdId) await reloadSharedData(householdId, currentUserId);
+                showNotice('Chore deleted');
+              } catch (error) {
+                showNotice(error instanceof Error ? error.message : 'The chore could not be deleted.');
+              }
+            })();
+          },
+        },
+      ],
+    );
   }
 
   async function speakDailySync(snapshotSummary?: string) {
@@ -1323,6 +1450,9 @@ function CohoApp() {
         setTitle={setQuickAddTitle}
         details={quickAddDetails}
         setDetails={setQuickAddDetails}
+        profiles={profiles}
+        currentUserId={currentUserId}
+        saving={quickAddSaving}
         onSave={saveQuickAdd}
         dark={dark}
       />
@@ -1340,7 +1470,7 @@ function CohoApp() {
       <ProfileEditorModal visible={Boolean(editingProfile)} profile={editingProfile} styles={styles} dark={dark} onClose={() => setEditingProfile(null)} onSave={saveFamilyProfile} />
       <Modal visible={familyHubOpen} animationType="slide" onRequestClose={() => setFamilyHubOpen(false)}><SafeAreaView style={styles.safeArea}><View style={styles.fullModalHeader}><View><Text style={styles.eyebrow}>HOUSEHOLD ACCESS</Text><Text style={styles.modalTitle}>Invite your family</Text></View><Pressable onPress={() => setFamilyHubOpen(false)} style={styles.iconButton}><Ionicons name="close" size={21} color={styles.iconColor.color} /></Pressable></View><FamilyHub /></SafeAreaView></Modal>
       <EventDetailModal event={selectedEvent} styles={styles} dark={dark} onClose={() => setSelectedEvent(null)} onFollowUp={markEventForFollowUp} />
-      <ChoreRewardModal chore={editingChore} styles={styles} dark={dark} onClose={() => setEditingChore(null)} onSave={saveChoreReward} />
+      <ChoreEditorModal chore={editingChore} profiles={profiles} styles={styles} dark={dark} onClose={() => setEditingChore(null)} onSave={saveChoreSettings} onDelete={deleteChore} />
       <SecondUserWelcomeModal
         visible={secondUserWelcomeOpen}
         householdName={householdName}
@@ -1377,7 +1507,7 @@ function TodayScreen({ styles, events, chores, onCalendar, onRecap, onOpenEvent,
   const openChores = chores.filter((chore: Chore) => !chore.done);
   const cards = [
     ...todaysEvents.map((event: BotEvent) => ({ kind: 'event', item: event, title: event.title, value: event.time, detail: `${event.person}${event.place ? ` · ${event.place}` : ''}`, icon: 'calendar-outline', color: '#2257F4', tint: '#DCE7FF' })),
-    ...openChores.map((chore: Chore) => ({ kind: 'chore', item: chore, title: chore.title, value: chore.due, detail: `${chore.owner} · +${chore.rewardValue}`, icon: 'checkmark-done-outline', color: '#19A47B', tint: '#D9F7ED' })),
+    ...openChores.map((chore: Chore) => ({ kind: 'chore', item: chore, title: chore.title, value: chore.due, detail: `${chore.owner} · ${formatChoreReward(chore)}`, icon: 'checkmark-done-outline', color: '#19A47B', tint: '#D9F7ED' })),
   ].slice(0, 4);
   const upcomingEvents = events.filter((event: BotEvent) => !event.dateISO || event.dateISO >= today).slice(0, 5);
   return <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
@@ -1409,20 +1539,30 @@ function CalendarScreen({ styles, botEvents, focusDate, onOpenEvent, onAction, o
 }
 
 function ChoresScreen({ styles, chores, memberNames, onToggle, onConfigure, rewardMember, setRewardMember, selectedRewards, onSelectReward, onAdd }: any) {
-  const completed = chores.filter((item: any) => item.done).length;
-  const balances = memberNames.reduce((result: Record<string, number>, name: string) => ({ ...result, [name]: chores.filter((item: any) => item.owner === name && item.done).reduce((sum: number, item: any) => sum + item.rewardValue, 0) }), {} as Record<string, number>);
+  const weekStart = startOfWeek(new Date());
+  const weekEnd = addDays(weekStart, 7);
+  const visibleChores = chores.filter((item: Chore) => {
+    if (!item.dueAt) return true;
+    const dueAt = new Date(item.dueAt);
+    if (Number.isNaN(dueAt.getTime())) return true;
+    return item.done
+      ? dueAt >= weekStart && dueAt < weekEnd
+      : dueAt < weekEnd;
+  });
+  const completed = visibleChores.filter((item: Chore) => item.done).length;
+  const balances = memberNames.reduce((result: Record<string, number>, name: string) => ({ ...result, [name]: chores.filter((item: Chore) => item.owner === name && item.done && item.rewardId === 'points').reduce((sum: number, item: Chore) => sum + item.rewardValue, 0) }), {} as Record<string, number>);
   const selected = rewardGoals.find((reward) => reward.id === selectedRewards[rewardMember]) ?? rewardGoals[0];
   const balance = balances[rewardMember] ?? 0;
   const progress = Math.min(100, Math.round(balance / selected.cost * 100));
   return <ScrollView contentContainerStyle={styles.scrollContent}>
-    <View style={styles.progressCard}><View><Text style={styles.progressLabel}>FAMILY PROGRESS</Text><Text style={styles.progressValue}>{completed} of {chores.length}</Text><Text style={styles.muted}>chores complete today</Text></View><View style={styles.progressRing}><Text style={styles.progressPercent}>{chores.length ? Math.round(completed / chores.length * 100) : 0}%</Text></View></View>
+    <View style={styles.progressCard}><View><Text style={styles.progressLabel}>FAMILY PROGRESS</Text><Text style={styles.progressValue}>{completed} of {visibleChores.length}</Text><Text style={styles.muted}>due or completed this week</Text></View><View style={styles.progressRing}><Text style={styles.progressPercent}>{visibleChores.length ? Math.round(completed / visibleChores.length * 100) : 0}%</Text></View></View>
     <Text style={styles.sectionTitle}>Earn rewards</Text>
     {memberNames.length === 0 ? <View style={styles.emptyChat}><Ionicons name="people-outline" size={28} color="#7047EE" /><Text style={styles.settingTitle}>Add a family profile first</Text><Text style={styles.muted}>Rewards are personalized to real people in this household.</Text></View> : <>
       <View style={styles.memberRewardTabs}>{memberNames.map((name: string) => <Pressable key={name} onPress={() => setRewardMember(name)} style={[styles.memberRewardTab, rewardMember === name && styles.memberRewardTabActive]}><Text style={[styles.memberRewardName, rewardMember === name && styles.memberRewardNameActive]}>{name}</Text><Text style={[styles.memberRewardPoints, rewardMember === name && styles.memberRewardNameActive]}>{balances[name] ?? 0} pts</Text></Pressable>)}</View>
       <View style={styles.rewardHero}><View style={[styles.rewardIcon, { backgroundColor: `${selected.color}20` }]}><Ionicons name={selected.icon as any} size={25} color={selected.color} /></View><View style={styles.flex}><Text style={styles.progressLabel}>{rewardMember.toUpperCase()} IS EARNING TOWARD</Text><Text style={styles.rewardHeroTitle}>{selected.title} · {selected.detail}</Text><View style={styles.rewardProgressTrack}><View style={[styles.rewardProgressFill, { width: `${progress}%`, backgroundColor: selected.color }]} /></View><Text style={styles.rewardProgressText}>{balance} of {selected.cost} points · {Math.max(0, selected.cost - balance)} to go</Text></View></View>
       <Text style={styles.rewardPrompt}>What does {rewardMember} want to earn?</Text><ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.rewardChoices}>{rewardGoals.map((reward) => { const active = selected.id === reward.id; return <Pressable key={reward.id} onPress={() => onSelectReward(rewardMember, reward.id)} style={[styles.rewardChoice, active && { borderColor: reward.color, backgroundColor: `${reward.color}12` }]}><Ionicons name={reward.icon as any} size={21} color={reward.color} /><Text style={styles.rewardChoiceTitle}>{reward.title}</Text><Text style={styles.muted}>{reward.detail}</Text><Text style={[styles.rewardCost, { color: reward.color }]}>{reward.cost} points</Text>{active && <Ionicons name="checkmark-circle" size={18} color={reward.color} style={styles.rewardSelected} />}</Pressable>; })}</ScrollView>
     </>}
-    <Text style={styles.sectionTitle}>This week</Text>{chores.length === 0 && <View style={styles.emptyChat}><Ionicons name="checkbox-outline" size={28} color="#19A47B" /><Text style={styles.settingTitle}>No shared chores yet</Text><Text style={styles.muted}>Add one, then choose exactly what completing it earns.</Text></View>}{chores.map((chore: Chore) => { const reward = rewardGoals.find((item) => item.id === chore.rewardId) ?? rewardGoals[0]; return <Pressable key={chore.id} onPress={() => onConfigure(chore)} style={styles.choreRow}><Pressable accessibilityLabel={chore.done ? `Mark ${chore.title} incomplete` : `Complete ${chore.title}`} onPress={() => onToggle(chore.id)} style={[styles.checkCircle, chore.done && { backgroundColor: '#19A47B', borderColor: '#19A47B' }]}>{chore.done && <Ionicons name="checkmark" size={17} color="#fff" />}</Pressable><View style={styles.flex}><Text style={[styles.choreTitle, chore.done && styles.struck]}>{chore.title}</Text><Text style={styles.muted}>{chore.owner} · {chore.due}</Text><Text style={[styles.choreRewardText, { color: reward.color }]}>{reward.title} · +{chore.rewardValue}</Text></View><View style={[styles.pointPill, { backgroundColor: `${reward.color}14` }]}><Ionicons name={reward.icon as any} size={12} color={reward.color} /><Text style={[styles.pointPillText, { color: reward.color }]}>Edit</Text></View><View style={[styles.ownerDot, { backgroundColor: chore.color }]} /></Pressable>; })}<Pressable onPress={onAdd} style={styles.outlineAction}><Ionicons name="add" size={19} color="#2257F4" /><Text style={styles.outlineActionText}>Add a chore</Text></Pressable>
+    <Text style={styles.sectionTitle}>This week</Text>{visibleChores.length === 0 && <View style={styles.emptyChat}><Ionicons name="checkbox-outline" size={28} color="#19A47B" /><Text style={styles.settingTitle}>No chores due this week</Text><Text style={styles.muted}>Add one, assign it, schedule it, and choose exactly what completing it earns.</Text></View>}{visibleChores.map((chore: Chore) => { const reward = choreRewardMeta(chore.rewardId); return <Pressable key={chore.id} onPress={() => onConfigure(chore)} style={styles.choreRow}><Pressable accessibilityLabel={chore.done ? `Mark ${chore.title} incomplete` : `Complete ${chore.title}`} onPress={() => onToggle(chore.id)} style={[styles.checkCircle, chore.done && { backgroundColor: '#19A47B', borderColor: '#19A47B' }]}>{chore.done && <Ionicons name="checkmark" size={17} color="#fff" />}</Pressable><View style={styles.flex}><Text style={[styles.choreTitle, chore.done && styles.struck]}>{chore.title}</Text><Text style={styles.muted}>{chore.owner} · {chore.due}</Text><Text style={styles.choreScheduleText}>{recurrenceLabel(chore.recurrence)}{chore.reminderMinutes != null ? ` · Remind ${chore.reminderMinutes === 0 ? 'at due time' : `${chore.reminderMinutes} min before`}` : ''}</Text><Text style={[styles.choreRewardText, { color: reward.color }]}>{formatChoreReward(chore)}</Text></View><View style={[styles.pointPill, { backgroundColor: `${reward.color}14` }]}><Ionicons name={reward.icon as any} size={12} color={reward.color} /><Text style={[styles.pointPillText, { color: reward.color }]}>Edit</Text></View><View style={[styles.ownerDot, { backgroundColor: chore.color }]} /></Pressable>; })}<Pressable onPress={onAdd} style={styles.outlineAction}><Ionicons name="add" size={19} color="#2257F4" /><Text style={styles.outlineActionText}>Add a chore</Text></Pressable>
   </ScrollView>;
 }
 
@@ -1537,21 +1677,31 @@ function cloudChore(row: any, index: number): Chore {
   const rewardValue = Number(row.reward_value ?? 10);
   const colors = ['#2257F4', '#19A47B', '#7C4DFF', '#FF7A2E'];
   const dueAt = row.due_at ? new Date(row.due_at) : null;
+  const assignedPerson = Array.isArray(row.assigned_person) ? row.assigned_person[0] : row.assigned_person;
   return {
     id: row.id,
     title: row.title,
-    owner: relatedName(row.assignee, 'Unassigned'),
-    due: dueAt ? dueAt.toLocaleString(undefined, { weekday: 'short', hour: 'numeric', minute: '2-digit' }) : 'No due time',
+    details: row.details ?? '',
+    owner: assignedPerson?.display_name || relatedName(row.assignee, 'Unassigned'),
+    assignedPersonId: row.assigned_person_id ?? assignedPerson?.id ?? null,
+    assignedUserId: row.assigned_to ?? assignedPerson?.linked_user_id ?? null,
+    dueAt: dueAt && !Number.isNaN(dueAt.getTime()) ? dueAt.toISOString() : null,
+    due: dueAt ? dueAt.toLocaleString(undefined, { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : 'No due time',
+    recurrence: recurrenceFromRule(row.recurrence_rule),
+    recurrenceRule: row.recurrence_rule ?? null,
+    reminderMinutes: typeof row.reminder_minutes === 'number' ? row.reminder_minutes : row.reminder_minutes == null ? null : Number(row.reminder_minutes),
     done: row.status === 'completed',
     points: rewardValue,
     rewardId,
     rewardValue,
+    rewardLabel: row.reward_label ?? null,
     color: colors[index % colors.length],
   };
 }
 
 function appRewardId(type?: string) {
   if (type === 'game_time') return 'game';
+  if (type === 'points') return 'points';
   if (type === 'vbucks') return 'vbucks';
   if (type === 'allowance') return 'allowance';
   return 'choice';
@@ -1559,9 +1709,126 @@ function appRewardId(type?: string) {
 
 function databaseRewardType(rewardId: string) {
   if (rewardId === 'game') return 'game_time';
+  if (rewardId === 'points') return 'points';
   if (rewardId === 'vbucks') return 'vbucks';
   if (rewardId === 'allowance') return 'allowance';
   return 'custom';
+}
+
+function recurrenceFromRule(rule?: string | null): ChoreRepeat {
+  return choreRepeatOptions.find((option) => option.rule === rule)?.id ?? 'none';
+}
+
+function recurrenceRuleFor(recurrence: ChoreRepeat) {
+  return choreRepeatOptions.find((option) => option.id === recurrence)?.rule ?? null;
+}
+
+function recurrenceLabel(recurrence: ChoreRepeat) {
+  return choreRepeatOptions.find((option) => option.id === recurrence)?.label ?? 'Does not repeat';
+}
+
+function choreRewardMeta(rewardId: string) {
+  return choreRewardOptions.find((option) => option.id === rewardId) ?? choreRewardOptions[0];
+}
+
+function formatChoreReward(chore: Pick<Chore, 'rewardId' | 'rewardValue' | 'rewardLabel'>) {
+  const value = Number(chore.rewardValue);
+  if (chore.rewardId === 'game') return `${value} min game time`;
+  if (chore.rewardId === 'vbucks') return `${value.toLocaleString()} V-Bucks`;
+  if (chore.rewardId === 'allowance') return `$${value.toLocaleString()} allowance`;
+  if (chore.rewardId === 'choice') return chore.rewardLabel || 'Custom reward';
+  return `${value.toLocaleString()} points`;
+}
+
+function defaultChoreDue() {
+  const due = new Date();
+  due.setSeconds(0, 0);
+  due.setMinutes(Math.ceil(due.getMinutes() / 5) * 5);
+  due.setHours(18, 0, 0, 0);
+  if (due.getTime() <= Date.now() + 30 * 60 * 1000) {
+    due.setDate(due.getDate() + 1);
+    due.setHours(9, 0, 0, 0);
+  }
+  return due;
+}
+
+function defaultChoreForm(
+  profiles: FamilyProfile[],
+  currentUserId: string | null,
+  title = '',
+  details = '',
+): ChoreFormValue {
+  const defaultOwner = profiles.find((profile) => profile.linkedUserId === currentUserId) ?? profiles[0] ?? null;
+  return {
+    title,
+    details,
+    assignedPersonId: defaultOwner?.id ?? null,
+    dueAt: defaultChoreDue(),
+    recurrence: 'none',
+    reminderMinutes: 30,
+    rewardId: 'points',
+    rewardValue: 10,
+    rewardLabel: '',
+  };
+}
+
+function choreToForm(chore: Chore, profiles: FamilyProfile[]): ChoreFormValue {
+  const dueAt = chore.dueAt ? new Date(chore.dueAt) : defaultChoreDue();
+  const owner = profiles.find((profile) => profile.id === chore.assignedPersonId)
+    ?? profiles.find((profile) => profile.linkedUserId === chore.assignedUserId)
+    ?? profiles.find((profile) => profile.name === chore.owner);
+  return {
+    title: chore.title,
+    details: chore.details,
+    assignedPersonId: owner?.id ?? null,
+    dueAt: Number.isNaN(dueAt.getTime()) ? defaultChoreDue() : dueAt,
+    recurrence: chore.recurrence,
+    reminderMinutes: chore.reminderMinutes,
+    rewardId: chore.rewardId,
+    rewardValue: chore.rewardValue,
+    rewardLabel: chore.rewardLabel ?? '',
+  };
+}
+
+function mergeChoreDate(current: Date, next: Date, mode: 'date' | 'time') {
+  const merged = new Date(current);
+  if (mode === 'date') {
+    merged.setFullYear(next.getFullYear(), next.getMonth(), next.getDate());
+  } else {
+    merged.setHours(next.getHours(), next.getMinutes(), 0, 0);
+  }
+  return merged;
+}
+
+function rewardValueLabel(rewardId: string) {
+  if (rewardId === 'game') return 'MINUTES EARNED';
+  if (rewardId === 'vbucks') return 'V-BUCKS EARNED';
+  if (rewardId === 'allowance') return 'DOLLARS EARNED';
+  return 'POINTS EARNED';
+}
+
+function rewardPresetLabel(rewardId: string, value: number) {
+  if (rewardId === 'game') return `${value} min`;
+  if (rewardId === 'vbucks') return value.toLocaleString();
+  if (rewardId === 'allowance') return `$${value}`;
+  return `+${value}`;
+}
+
+function choreFormSummary(value: ChoreFormValue, profiles: FamilyProfile[]) {
+  const owner = profiles.find((profile) => profile.id === value.assignedPersonId)?.name ?? 'Anyone';
+  const due = value.dueAt.toLocaleString(undefined, {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  });
+  const reward = formatChoreReward({
+    rewardId: value.rewardId,
+    rewardValue: value.rewardValue,
+    rewardLabel: value.rewardLabel,
+  });
+  return `${owner} · ${due} · ${recurrenceLabel(value.recurrence)} · ${reward}`;
 }
 
 function eventStartISO(event: BotEvent) {
@@ -1970,16 +2237,203 @@ function SecondUserWelcomeModal({
   );
 }
 
-function ChoreRewardModal({ chore, styles, dark, onClose, onSave }: { chore: Chore | null; styles: any; dark: boolean; onClose: () => void; onSave: (chore: Chore) => void }) {
-  const [draft, setDraft] = useState<Chore | null>(chore);
-  useEffect(() => setDraft(chore), [chore]);
-  if (!draft) return null;
-  const selected = rewardGoals.find((reward) => reward.id === draft.rewardId) ?? rewardGoals[0];
-  return <Modal visible transparent animationType="slide" onRequestClose={onClose}><KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.modalBackdrop}><Pressable style={styles.modalDismiss} onPress={onClose} /><View style={styles.modalSheet}><View style={styles.modalHandle} /><View style={styles.modalHead}><View style={styles.flex}><Text style={styles.eyebrow}>CHORE REWARD</Text><Text style={styles.modalTitle}>{draft.title}</Text><Text style={styles.muted}>{draft.owner} earns this when the chore is completed.</Text></View><Pressable onPress={onClose} style={styles.iconButton}><Ionicons name="close" size={21} color={styles.iconColor.color} /></Pressable></View><Text style={styles.fieldLabel}>REWARD TYPE</Text><View style={styles.rewardModalGrid}>{rewardGoals.map((reward) => <Pressable key={reward.id} onPress={() => setDraft({ ...draft, rewardId: reward.id })} style={[styles.rewardModalChoice, draft.rewardId === reward.id && { borderColor: reward.color, backgroundColor: `${reward.color}12` }]}><Ionicons name={reward.icon as any} size={20} color={reward.color} /><Text style={styles.choiceChipText}>{reward.title}</Text></Pressable>)}</View><Text style={styles.fieldLabel}>VALUE EARNED</Text><View style={styles.rewardValueRow}>{[5, 10, 15, 20, 30, 50].map((value) => <Pressable key={value} onPress={() => setDraft({ ...draft, rewardValue: value, points: value })} style={[styles.choiceChip, draft.rewardValue === value && { backgroundColor: selected.color, borderColor: selected.color }]}><Text style={[styles.choiceChipText, draft.rewardValue === value && styles.choiceChipTextActive]}>+{value}</Text></Pressable>)}</View><Pressable onPress={() => onSave(draft)} style={[styles.saveButton, { backgroundColor: selected.color }]}><Text style={styles.saveButtonText}>Save chore reward</Text></Pressable></View><StatusBar style={dark ? 'light' : 'dark'} /></KeyboardAvoidingView></Modal>;
+function ChoreEditorModal({
+  chore,
+  profiles,
+  styles,
+  dark,
+  onClose,
+  onSave,
+  onDelete,
+}: {
+  chore: Chore | null;
+  profiles: FamilyProfile[];
+  styles: any;
+  dark: boolean;
+  onClose: () => void;
+  onSave: (choreId: string, draft: ChoreFormValue) => Promise<void>;
+  onDelete: (chore: Chore) => void;
+}) {
+  const [draft, setDraft] = useState<ChoreFormValue>(() => defaultChoreForm(profiles, null));
+  const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    if (chore) setDraft(choreToForm(chore, profiles));
+  }, [chore, profiles]);
+  if (!chore) return null;
+  const invalid = !draft.title.trim() || (draft.rewardId === 'choice' && !draft.rewardLabel.trim());
+  const save = async () => {
+    if (invalid || saving) return;
+    setSaving(true);
+    try {
+      await onSave(chore.id, draft);
+    } finally {
+      setSaving(false);
+    }
+  };
+  return <Modal visible transparent animationType="slide" onRequestClose={onClose}>
+    <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.modalBackdrop}>
+      <Pressable style={styles.modalDismiss} onPress={onClose} />
+      <View style={[styles.modalSheet, styles.choreModalSheet]}>
+        <View style={styles.modalHandle} />
+        <View style={styles.modalHead}>
+          <View style={styles.flex}><Text style={styles.eyebrow}>CHORE DETAILS</Text><Text style={styles.modalTitle}>Edit chore</Text><Text style={styles.muted}>Update the owner, schedule, repeat pattern, reminder, and reward.</Text></View>
+          <Pressable onPress={onClose} style={styles.iconButton}><Ionicons name="close" size={21} color={styles.iconColor.color} /></Pressable>
+        </View>
+        <ScrollView keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false} contentContainerStyle={styles.choreFormContent}>
+          <ChoreFormFields value={draft} onChange={setDraft} profiles={profiles} styles={styles} dark={dark} autoFocus={false} />
+          <Pressable disabled={invalid || saving} onPress={() => void save()} style={[styles.saveButton, (invalid || saving) && styles.disabled]}>
+            <Text style={styles.saveButtonText}>{saving ? 'Saving…' : 'Save chore'}</Text>
+          </Pressable>
+          <Pressable disabled={saving} onPress={() => onDelete(chore)} style={styles.deleteChoreButton}>
+            <Ionicons name="trash-outline" size={17} color="#D64545" /><Text style={styles.deleteChoreText}>Delete chore</Text>
+          </Pressable>
+        </ScrollView>
+      </View>
+      <StatusBar style={dark ? 'light' : 'dark'} />
+    </KeyboardAvoidingView>
+  </Modal>;
 }
 
-function QuickAddModal({ visible, onClose, styles, type, setType, title, setTitle, details, setDetails, onSave, dark }: any) {
-  return <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}><KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.modalBackdrop}><Pressable style={styles.modalDismiss} onPress={onClose} /><View style={styles.modalSheet}><View style={styles.modalHandle} /><View style={styles.modalHead}><View><Text style={styles.eyebrow}>QUICK ADD</Text><Text style={styles.modalTitle}>Share with the family</Text></View><Pressable onPress={onClose} style={styles.iconButton}><Ionicons name="close" size={21} color={styles.iconColor.color} /></Pressable></View><View style={styles.typeTabs}>{['Event', 'Chore', 'Note', 'Message'].map((item) => <Pressable key={item} onPress={() => setType(item)} style={[styles.typeTab, type === item && styles.typeTabActive]}><Text style={[styles.typeTabText, type === item && styles.typeTabTextActive]}>{item}</Text></Pressable>)}</View><Text style={styles.fieldLabel}>{type} title</Text><TextInput value={title} onChangeText={setTitle} autoFocus placeholder={`Add a ${type.toLowerCase()}…`} placeholderTextColor="#8B93A5" style={styles.modalInput} /><Text style={styles.fieldLabel}>Details</Text><TextInput value={details} onChangeText={setDetails} multiline placeholder="Location, instructions, links, or anything the family should know" placeholderTextColor="#8B93A5" style={[styles.modalInput, styles.modalTextArea]} /><Pressable disabled={!title.trim()} onPress={onSave} style={[styles.saveButton, !title.trim() && styles.disabled]}><Text style={styles.saveButtonText}>{type === 'Event' ? 'Continue with Coh' : `Add ${type.toLowerCase()}`}</Text></Pressable></View><StatusBar style={dark ? 'light' : 'dark'} /></KeyboardAvoidingView></Modal>;
+function QuickAddModal({
+  visible,
+  onClose,
+  styles,
+  type,
+  setType,
+  title,
+  setTitle,
+  details,
+  setDetails,
+  profiles,
+  currentUserId,
+  saving,
+  onSave,
+  dark,
+}: any) {
+  const [choreDraft, setChoreDraft] = useState<ChoreFormValue>(() => defaultChoreForm(profiles, currentUserId));
+  useEffect(() => {
+    if (visible && type === 'Chore') {
+      setChoreDraft(defaultChoreForm(profiles, currentUserId, title, details));
+    }
+  }, [visible, type]);
+  const updateChore = (next: ChoreFormValue) => {
+    setChoreDraft(next);
+    setTitle(next.title);
+    setDetails(next.details);
+  };
+  const invalidChore = !choreDraft.title.trim() || (choreDraft.rewardId === 'choice' && !choreDraft.rewardLabel.trim());
+  return <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+    <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.modalBackdrop}>
+      <Pressable style={styles.modalDismiss} onPress={onClose} />
+      <View style={[styles.modalSheet, type === 'Chore' && styles.choreModalSheet]}>
+        <View style={styles.modalHandle} />
+        <View style={styles.modalHead}>
+          <View><Text style={styles.eyebrow}>QUICK ADD</Text><Text style={styles.modalTitle}>Share with the family</Text></View>
+          <Pressable onPress={onClose} style={styles.iconButton}><Ionicons name="close" size={21} color={styles.iconColor.color} /></Pressable>
+        </View>
+        <View style={styles.typeTabs}>{['Event', 'Chore', 'Note', 'Message'].map((item) => <Pressable key={item} onPress={() => setType(item)} style={[styles.typeTab, type === item && styles.typeTabActive]}><Text style={[styles.typeTabText, type === item && styles.typeTabTextActive]}>{item}</Text></Pressable>)}</View>
+        {type === 'Chore' ? <ScrollView keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false} contentContainerStyle={styles.choreFormContent}>
+          <ChoreFormFields value={choreDraft} onChange={updateChore} profiles={profiles} styles={styles} dark={dark} autoFocus />
+          <Pressable disabled={invalidChore || saving} onPress={() => void onSave(choreDraft)} style={[styles.saveButton, (invalidChore || saving) && styles.disabled]}>
+            <Text style={styles.saveButtonText}>{saving ? 'Adding chore…' : 'Add chore'}</Text>
+          </Pressable>
+        </ScrollView> : <>
+          <Text style={styles.fieldLabel}>{type} title</Text>
+          <TextInput value={title} onChangeText={setTitle} autoFocus placeholder={`Add a ${type.toLowerCase()}…`} placeholderTextColor="#8B93A5" style={styles.modalInput} />
+          <Text style={styles.fieldLabel}>Details</Text>
+          <TextInput value={details} onChangeText={setDetails} multiline placeholder="Location, instructions, links, or anything the family should know" placeholderTextColor="#8B93A5" style={[styles.modalInput, styles.modalTextArea]} />
+          <Pressable disabled={!title.trim()} onPress={() => void onSave()} style={[styles.saveButton, !title.trim() && styles.disabled]}><Text style={styles.saveButtonText}>{type === 'Event' ? 'Continue with Coh' : `Add ${type.toLowerCase()}`}</Text></Pressable>
+        </>}
+      </View>
+      <StatusBar style={dark ? 'light' : 'dark'} />
+    </KeyboardAvoidingView>
+  </Modal>;
+}
+
+function ChoreFormFields({
+  value,
+  onChange,
+  profiles,
+  styles,
+  dark,
+  autoFocus,
+}: {
+  value: ChoreFormValue;
+  onChange: (next: ChoreFormValue) => void;
+  profiles: FamilyProfile[];
+  styles: any;
+  dark: boolean;
+  autoFocus?: boolean;
+}) {
+  const reward = choreRewardMeta(value.rewardId);
+  const reminderOptions: Array<{ value: number | null; label: string }> = [
+    { value: null, label: 'None' },
+    { value: 0, label: 'At due time' },
+    { value: 15, label: '15 min' },
+    { value: 30, label: '30 min' },
+    { value: 60, label: '1 hour' },
+    { value: 1440, label: '1 day' },
+  ];
+  return <>
+    <Text style={styles.fieldLabel}>CHORE</Text>
+    <TextInput value={value.title} onChangeText={(title) => onChange({ ...value, title })} autoFocus={autoFocus} placeholder="What needs to get done?" placeholderTextColor="#8B93A5" style={styles.modalInput} />
+
+    <Text style={styles.fieldLabel}>OWNER</Text>
+    <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choreOwnerChoices}>
+      <Pressable onPress={() => onChange({ ...value, assignedPersonId: null })} style={[styles.choreOwnerChip, value.assignedPersonId === null && styles.choreOwnerChipActive]}>
+        <Ionicons name="people-outline" size={16} color={value.assignedPersonId === null ? '#fff' : styles.iconColor.color} />
+        <Text style={[styles.choreOwnerText, value.assignedPersonId === null && styles.choreOwnerTextActive]}>Unassigned</Text>
+      </Pressable>
+      {profiles.map((profile) => {
+        const active = value.assignedPersonId === profile.id;
+        return <Pressable key={profile.id} onPress={() => onChange({ ...value, assignedPersonId: profile.id })} style={[styles.choreOwnerChip, active && styles.choreOwnerChipActive]}>
+          <View style={[styles.choreOwnerAvatar, { backgroundColor: active ? '#fff' : profile.color }]}><Text style={[styles.avatarText, { color: active ? '#2257F4' : profile.ink }]}>{initials(profile.name)}</Text></View>
+          <Text style={[styles.choreOwnerText, active && styles.choreOwnerTextActive]}>{profile.name}</Text>
+        </Pressable>;
+      })}
+    </ScrollView>
+
+    <Text style={styles.fieldLabel}>DUE DATE & TIME</Text>
+    <View style={styles.choreDateRow}>
+      <View style={styles.choreDateField}><Ionicons name="calendar-outline" size={18} color="#2257F4" /><DateTimePicker value={value.dueAt} mode="date" display={Platform.OS === 'ios' ? 'compact' : 'default'} themeVariant={dark ? 'dark' : 'light'} onChange={(_, next) => next && onChange({ ...value, dueAt: mergeChoreDate(value.dueAt, next, 'date') })} /></View>
+      <View style={styles.choreDateField}><Ionicons name="time-outline" size={18} color="#7047EE" /><DateTimePicker value={value.dueAt} mode="time" minuteInterval={5} display={Platform.OS === 'ios' ? 'compact' : 'default'} themeVariant={dark ? 'dark' : 'light'} onChange={(_, next) => next && onChange({ ...value, dueAt: mergeChoreDate(value.dueAt, next, 'time') })} /></View>
+    </View>
+
+    <Text style={styles.fieldLabel}>REPEAT</Text>
+    <View style={styles.choreOptionWrap}>{choreRepeatOptions.map((option) => {
+      const active = value.recurrence === option.id;
+      return <Pressable key={option.id} onPress={() => onChange({ ...value, recurrence: option.id })} style={[styles.choiceChip, active && styles.choiceChipActive]}><Text style={[styles.choiceChipText, active && styles.choiceChipTextActive]}>{option.label}</Text></Pressable>;
+    })}</View>
+
+    <Text style={styles.fieldLabel}>REMINDER</Text>
+    <View style={styles.choreOptionWrap}>{reminderOptions.map((option) => {
+      const active = value.reminderMinutes === option.value;
+      return <Pressable key={option.label} onPress={() => onChange({ ...value, reminderMinutes: option.value })} style={[styles.choiceChip, active && styles.choiceChipActive]}><Text style={[styles.choiceChipText, active && styles.choiceChipTextActive]}>{option.label}</Text></Pressable>;
+    })}</View>
+
+    <Text style={styles.fieldLabel}>REWARD</Text>
+    <View style={styles.rewardModalGrid}>{choreRewardOptions.map((option) => {
+      const active = value.rewardId === option.id;
+      return <Pressable key={option.id} onPress={() => onChange({ ...value, rewardId: option.id, rewardValue: option.presets[0] })} style={[styles.rewardModalChoice, active && { borderColor: option.color, backgroundColor: `${option.color}12` }]}>
+        <Ionicons name={option.icon as any} size={20} color={option.color} /><Text style={styles.choiceChipText}>{option.title}</Text>
+      </Pressable>;
+    })}</View>
+    {value.rewardId === 'choice' ? <>
+      <Text style={styles.fieldLabel}>CUSTOM REWARD</Text>
+      <TextInput value={value.rewardLabel} onChangeText={(rewardLabel) => onChange({ ...value, rewardLabel })} placeholder="Example: Pick Friday’s movie" placeholderTextColor="#8B93A5" style={styles.modalInput} />
+    </> : <>
+      <Text style={styles.fieldLabel}>{rewardValueLabel(value.rewardId)}</Text>
+      <View style={styles.rewardValueRow}>{reward.presets.map((amount) => {
+        const active = value.rewardValue === amount;
+        return <Pressable key={amount} onPress={() => onChange({ ...value, rewardValue: amount })} style={[styles.choiceChip, active && { backgroundColor: reward.color, borderColor: reward.color }]}><Text style={[styles.choiceChipText, active && styles.choiceChipTextActive]}>{rewardPresetLabel(value.rewardId, amount)}</Text></Pressable>;
+      })}</View>
+      <TextInput value={String(value.rewardValue)} onChangeText={(amount) => onChange({ ...value, rewardValue: Math.max(0, Number(amount.replace(/[^0-9.]/g, '')) || 0) })} keyboardType="decimal-pad" placeholder="Custom amount" placeholderTextColor="#8B93A5" style={[styles.modalInput, styles.choreRewardInput]} />
+    </>}
+
+    <Text style={styles.fieldLabel}>INSTRUCTIONS</Text>
+    <TextInput value={value.details} onChangeText={(details) => onChange({ ...value, details })} multiline placeholder="Where, how, supplies needed, or anything the owner should know" placeholderTextColor="#8B93A5" style={[styles.modalInput, styles.modalTextArea]} />
+    <View style={styles.choreSummaryCard}><Ionicons name="checkmark-circle-outline" size={20} color="#19A47B" /><Text style={styles.choreSummaryText}>{choreFormSummary(value, profiles)}</Text></View>
+  </>;
 }
 
 function ShareToCohModal({ visible, styles, dark, value, onChange, hasImage, error, onCancel, onApprove }: any) {
@@ -2033,11 +2487,11 @@ function createStyles(t: Theme) {
     automationCard: { minHeight: 90, borderRadius: 20, padding: 16, flexDirection: 'row', gap: 12, alignItems: 'center' }, automationLabel: { color: '#FFFFFFA8', fontSize: 7, fontWeight: '800', letterSpacing: 1 }, automationTitle: { color: '#fff', fontSize: 12, fontWeight: '800', lineHeight: 17, marginTop: 3 }, integrationRow: { minHeight: 78, borderRadius: 18, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, padding: 12, flexDirection: 'row', alignItems: 'center', gap: 10 }, integrationIcon: { width: 43, height: 43, borderRadius: 14, alignItems: 'center', justifyContent: 'center' }, integrationTitle: { color: t.text, fontSize: 12, fontWeight: '800' }, connectButton: { minHeight: 31, borderRadius: 10, borderWidth: 1, borderColor: t.primary, paddingHorizontal: 9, alignItems: 'center', justifyContent: 'center' }, connectedButton: { borderColor: '#19A47B', backgroundColor: '#19A47B12' }, connectText: { color: t.primary, fontSize: 8, fontWeight: '800' }, connectedText: { color: '#19A47B' },
     chiefHero: { minHeight: 210, borderRadius: 24, padding: 22, justifyContent: 'center' }, chiefBadge: { width: 48, height: 48, borderRadius: 16, backgroundColor: '#fff', alignItems: 'center', justifyContent: 'center', marginBottom: 14 }, chiefHeroTitle: { color: '#fff', fontSize: 28, lineHeight: 32, fontWeight: '800', letterSpacing: -1, marginTop: 5 }, chiefSettingCard: { borderRadius: 19, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, padding: 13, gap: 12 }, settingRowTop: { flexDirection: 'row', alignItems: 'center', gap: 10 }, chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 }, choiceChip: { minHeight: 34, borderRadius: 11, borderWidth: 1, borderColor: t.line, paddingHorizontal: 11, alignItems: 'center', justifyContent: 'center', backgroundColor: t.surfaceStrong }, choiceChipActive: { backgroundColor: t.primary, borderColor: t.primary }, choiceChipText: { color: t.text, fontSize: 9, fontWeight: '800' }, choiceChipTextActive: { color: '#fff' }, preferenceGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 9 }, preferenceTile: { width: '48.5%', minHeight: 58, borderRadius: 15, padding: 11, flexDirection: 'row', gap: 8, alignItems: 'center', backgroundColor: t.surface, borderWidth: 1, borderColor: t.line }, preferenceTileActive: { borderColor: '#19A47B55', backgroundColor: '#19A47B0D' }, preferenceText: { color: t.text, fontSize: 10, fontWeight: '700', flex: 1 }, memberChip: { minHeight: 36, borderRadius: 18, borderWidth: 1, borderColor: t.line, paddingHorizontal: 14, alignItems: 'center', justifyContent: 'center', backgroundColor: t.surface }, memberChipActive: { backgroundColor: t.primary, borderColor: t.primary }, followUpCard: { minHeight: 72, borderRadius: 18, padding: 12, flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line },
     personSetting: { minHeight: 65, borderRadius: 17, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, padding: 11, flexDirection: 'row', alignItems: 'center', gap: 10 }, settingRow: { minHeight: 70, borderRadius: 17, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, padding: 13, flexDirection: 'row', alignItems: 'center', gap: 11 }, settingTitle: { color: t.text, fontSize: 12, fontWeight: '800' },
-    modalBackdrop: { flex: 1, backgroundColor: '#0C111D88', justifyContent: 'flex-end' }, modalDismiss: { flex: 1 }, modalSheet: { backgroundColor: t.surfaceStrong, borderTopLeftRadius: 28, borderTopRightRadius: 28, paddingHorizontal: 19, paddingTop: 9, paddingBottom: Platform.OS === 'ios' ? 28 : 18 }, modalHandle: { width: 39, height: 4, borderRadius: 2, backgroundColor: t.line, alignSelf: 'center', marginBottom: 15 }, modalHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' }, modalTitle: { color: t.text, fontSize: 23, fontWeight: '800', letterSpacing: -.7 }, typeTabs: { flexDirection: 'row', borderRadius: 14, padding: 4, backgroundColor: t.canvas, marginTop: 19 }, typeTab: { flex: 1, minHeight: 38, borderRadius: 10, alignItems: 'center', justifyContent: 'center' }, typeTabActive: { backgroundColor: t.surfaceStrong }, typeTabText: { color: t.muted, fontSize: 10, fontWeight: '700' }, typeTabTextActive: { color: t.primary }, fieldLabel: { color: t.muted, fontSize: 9, fontWeight: '800', marginTop: 15, marginBottom: 6 }, modalInput: { minHeight: 46, borderRadius: 13, borderWidth: 1, borderColor: t.line, backgroundColor: t.surface, color: t.text, paddingHorizontal: 12 }, modalTextArea: { minHeight: 83, paddingTop: 12, textAlignVertical: 'top' }, saveButton: { minHeight: 48, borderRadius: 15, backgroundColor: t.primary, alignItems: 'center', justifyContent: 'center', marginTop: 18 }, saveButtonText: { color: '#fff', fontSize: 12, fontWeight: '800' },
+    modalBackdrop: { flex: 1, backgroundColor: '#0C111D88', justifyContent: 'flex-end' }, modalDismiss: { flex: 1 }, modalSheet: { backgroundColor: t.surfaceStrong, borderTopLeftRadius: 28, borderTopRightRadius: 28, paddingHorizontal: 19, paddingTop: 9, paddingBottom: Platform.OS === 'ios' ? 28 : 18 }, choreModalSheet: { maxHeight: '94%', paddingBottom: Platform.OS === 'ios' ? 12 : 8 }, modalHandle: { width: 39, height: 4, borderRadius: 2, backgroundColor: t.line, alignSelf: 'center', marginBottom: 15 }, modalHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' }, modalTitle: { color: t.text, fontSize: 23, fontWeight: '800', letterSpacing: -.7 }, typeTabs: { flexDirection: 'row', borderRadius: 14, padding: 4, backgroundColor: t.canvas, marginTop: 19 }, typeTab: { flex: 1, minHeight: 38, borderRadius: 10, alignItems: 'center', justifyContent: 'center' }, typeTabActive: { backgroundColor: t.surfaceStrong }, typeTabText: { color: t.muted, fontSize: 10, fontWeight: '700' }, typeTabTextActive: { color: t.primary }, fieldLabel: { color: t.muted, fontSize: 9, fontWeight: '800', marginTop: 15, marginBottom: 6 }, modalInput: { minHeight: 46, borderRadius: 13, borderWidth: 1, borderColor: t.line, backgroundColor: t.surface, color: t.text, paddingHorizontal: 12 }, modalTextArea: { minHeight: 83, paddingTop: 12, textAlignVertical: 'top' }, saveButton: { minHeight: 48, borderRadius: 15, backgroundColor: t.primary, alignItems: 'center', justifyContent: 'center', marginTop: 18 }, saveButtonText: { color: '#fff', fontSize: 12, fontWeight: '800' }, disabled: { opacity: .45 },
     privacyCard: { minHeight: 66, borderRadius: 16, padding: 12, marginTop: 16, flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: '#19A47B12', borderWidth: 1, borderColor: '#19A47B35' }, privacyText: { color: t.text, fontSize: 10, lineHeight: 15, flex: 1, fontWeight: '600' }, sharedAttachment: { minHeight: 62, borderRadius: 15, padding: 12, marginTop: 10, flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line }, sharePreviewInput: { minHeight: 110, paddingTop: 12, textAlignVertical: 'top' }, shareError: { color: '#D64545', fontSize: 10, marginTop: 8 }, shareActions: { flexDirection: 'row', gap: 10, marginTop: 16 }, cancelButton: { flex: 1, minHeight: 48, borderRadius: 15, borderWidth: 1, borderColor: t.line, alignItems: 'center', justifyContent: 'center' }, cancelButtonText: { color: t.text, fontSize: 12, fontWeight: '800' }, approveButton: { flex: 1.4, minHeight: 48, borderRadius: 15, backgroundColor: t.primary, flexDirection: 'row', gap: 7, alignItems: 'center', justifyContent: 'center' },
     cohThinking: { alignSelf: 'flex-start', flexDirection: 'row', alignItems: 'center', gap: 8, marginLeft: 40, minHeight: 38, paddingHorizontal: 13, borderRadius: 16, backgroundColor: '#7047EE14', borderWidth: 1, borderColor: '#7047EE35' },
     chatModeTabs: { flexDirection: 'row', gap: 8, paddingHorizontal: 14, paddingVertical: 9, backgroundColor: t.surfaceStrong, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: t.line }, chatModeTab: { flex: 1, minHeight: 39, borderRadius: 13, flexDirection: 'row', gap: 7, alignItems: 'center', justifyContent: 'center', backgroundColor: t.surface, borderWidth: 1, borderColor: t.line }, chatModeTabActive: { backgroundColor: t.primary, borderColor: t.primary }, chatModeCohActive: { backgroundColor: '#7047EE', borderColor: '#7047EE' }, chatModeText: { color: t.text, fontSize: 10, fontWeight: '800' }, chatModeTextActive: { color: '#fff' }, emptyChat: { minHeight: 180, alignItems: 'center', justifyContent: 'center', gap: 10, opacity: .82 },
-    choreRewardText: { fontSize: 9, fontWeight: '800', marginTop: 4 }, rewardModalGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 }, rewardModalChoice: { width: '48.5%', minHeight: 58, borderRadius: 15, padding: 11, flexDirection: 'row', gap: 8, alignItems: 'center', backgroundColor: t.surface, borderWidth: 1, borderColor: t.line }, rewardValueRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 }, eventDetailRow: { minHeight: 62, borderRadius: 16, marginTop: 10, padding: 12, flexDirection: 'row', alignItems: 'center', gap: 11, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line },
+    choreRewardText: { fontSize: 9, fontWeight: '800', marginTop: 4 }, choreScheduleText: { color: t.muted, fontSize: 8, fontWeight: '700', marginTop: 3 }, choreFormContent: { paddingTop: 2, paddingBottom: Platform.OS === 'ios' ? 28 : 18 }, choreOwnerChoices: { gap: 8, paddingRight: 18 }, choreOwnerChip: { minHeight: 42, borderRadius: 15, paddingHorizontal: 11, flexDirection: 'row', alignItems: 'center', gap: 7, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line }, choreOwnerChipActive: { backgroundColor: t.primary, borderColor: t.primary }, choreOwnerText: { color: t.text, fontSize: 10, fontWeight: '800' }, choreOwnerTextActive: { color: '#fff' }, choreOwnerAvatar: { width: 25, height: 25, borderRadius: 9, alignItems: 'center', justifyContent: 'center' }, choreDateRow: { flexDirection: 'row', gap: 8 }, choreDateField: { flex: 1, minHeight: 48, borderRadius: 14, paddingHorizontal: 10, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, overflow: 'hidden' }, choreOptionWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 }, choreRewardInput: { marginTop: 8 }, choreSummaryCard: { minHeight: 58, borderRadius: 15, padding: 12, marginTop: 15, flexDirection: 'row', alignItems: 'center', gap: 9, backgroundColor: '#19A47B12', borderWidth: 1, borderColor: '#19A47B35' }, choreSummaryText: { color: t.text, fontSize: 9, lineHeight: 14, flex: 1, fontWeight: '700' }, deleteChoreButton: { minHeight: 44, marginTop: 10, borderRadius: 14, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7, backgroundColor: '#D645450D', borderWidth: 1, borderColor: '#D6454535' }, deleteChoreText: { color: '#D64545', fontSize: 10, fontWeight: '800' }, rewardModalGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 }, rewardModalChoice: { width: '48.5%', minHeight: 58, borderRadius: 15, padding: 11, flexDirection: 'row', gap: 8, alignItems: 'center', backgroundColor: t.surface, borderWidth: 1, borderColor: t.line }, rewardValueRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 }, eventDetailRow: { minHeight: 62, borderRadius: 16, marginTop: 10, padding: 12, flexDirection: 'row', alignItems: 'center', gap: 11, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line },
     fullModalHeader: { minHeight: 72, paddingHorizontal: 18, paddingVertical: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', backgroundColor: t.surfaceStrong, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: t.line }, inviteFamilyCard: { minHeight: 82, borderRadius: 19, padding: 13, flexDirection: 'row', alignItems: 'center', gap: 11, backgroundColor: '#7047EE12', borderWidth: 1, borderColor: '#7047EE35' }, inviteFamilyIcon: { width: 45, height: 45, borderRadius: 15, backgroundColor: '#7047EE', alignItems: 'center', justifyContent: 'center' },
     welcomePage: { flex: 1, backgroundColor: t.canvas },
     welcomeContent: { padding: 18, paddingBottom: 36, gap: 12 },
