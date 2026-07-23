@@ -1,0 +1,5 @@
+[functions.send-household-invite]
+# Invitation landing pages are opened from email and text before the recipient
+# has a Coho session. POST requests still validate the caller's bearer token
+# inside the function before an invitation can be created.
+verify_jwt = false

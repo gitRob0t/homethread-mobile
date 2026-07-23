@@ -1,6 +1,6 @@
 {
   "name": "homethread-mobile",
-  "description": "The native HomeThread family command center for iOS and Android.",
+  "description": "Coho, your Chief of Home for iOS and Android.",
   "license": "UNLICENSED",
   "version": "1.0.0",
   "private": true,
@@ -8,12 +8,22 @@
   "dependencies": {
     "@expo/vector-icons": "^15.1.1",
     "@react-native-async-storage/async-storage": "^2.2.0",
+    "@react-native-community/datetimepicker": "9.1.0",
     "@supabase/supabase-js": "^2.57.4",
-    "expo": "~57.0.6",
+    "expo": "~57.0.8",
+    "expo-asset": "~57.0.6",
+    "expo-audio": "~57.0.2",
+    "expo-calendar": "~57.0.1",
     "expo-font": "~57.0.1",
+    "expo-image-picker": "~57.0.6",
     "expo-linear-gradient": "^57.0.1",
-    "expo-notifications": "^57.0.5",
+    "expo-linking": "~57.0.4",
+    "expo-location": "~57.0.6",
+    "expo-notifications": "~57.0.7",
+    "expo-share-intent": "^8.0.1",
+    "expo-speech": "~57.0.1",
     "expo-status-bar": "~57.0.1",
+    "expo-task-manager": "~57.0.6",
     "react": "19.2.3",
     "react-native": "0.86.0",
     "react-native-url-polyfill": "^2.0.0"
@@ -29,6 +39,10 @@
     "ios": "expo start --ios",
     "web": "expo start --web",
     "typecheck": "tsc --noEmit",
-    "doctor": "npx expo-doctor"
+    "doctor": "npx expo-doctor",
+    "eval:coh": "node scripts/coh-evals.mjs",
+    "eval:backend": "node scripts/backend-contracts.mjs",
+    "release:check": "bash scripts/release-check.sh",
+    "deploy:supabase": "bash scripts/deploy-supabase.sh"
   }
 }

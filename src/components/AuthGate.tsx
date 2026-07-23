@@ -1,8 +1,10 @@
 import type { Session } from '@supabase/supabase-js';
-import { ReactNode, useEffect, useState } from 'react';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { ReactNode, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
+  Linking,
   Platform,
   Pressable,
   SafeAreaView,
@@ -13,15 +15,38 @@ import {
 } from 'react-native';
 
 import { supabase } from '../lib/supabase';
-import { resetPassword, signIn, signOut, signUp } from '../services/auth';
-import { createHousehold, listHouseholds } from '../services/households';
+import { completeAuthRedirect, resetPassword, signIn, signOut, signUp } from '../services/auth';
+import { acceptHouseholdInvitation, createHousehold, listHouseholds } from '../services/households';
+import { acceptTravelInvitation } from '../services/householdOperations';
 
 type Props = { children: ReactNode };
+type InviteLink = { kind: 'household' | 'trip'; token: string };
 
 export default function AuthGate({ children }: Props) {
   const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState(true);
   const [hasHousehold, setHasHousehold] = useState(false);
+  const processedInitialUrl = useRef(false);
+
+  async function acceptInviteAndRefresh(invite: InviteLink) {
+    const storageKey = pendingInviteKey(invite.kind);
+    if (!session) {
+      await AsyncStorage.setItem(storageKey, invite.token);
+      return;
+    }
+    setLoading(true);
+    try {
+      if (invite.kind === 'household') {
+        await acceptHouseholdInvitation(invite.token);
+        setHasHousehold(true);
+      } else {
+        await acceptTravelInvitation(invite.token);
+      }
+      await AsyncStorage.removeItem(storageKey);
+    } finally {
+      setLoading(false);
+    }
+  }
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => setSession(data.session));
@@ -33,12 +58,44 @@ export default function AuthGate({ children }: Props) {
   }, []);
 
   useEffect(() => {
+    if (!processedInitialUrl.current) {
+      processedInitialUrl.current = true;
+      Linking.getInitialURL().then((url) => {
+        if (!url) return;
+        const invite = invitationFromUrl(url);
+        if (invite) void acceptInviteAndRefresh(invite);
+        else completeAuthRedirect(url).catch(() => undefined);
+      });
+    }
+    const subscription = Linking.addEventListener('url', ({ url }) => {
+      const invite = invitationFromUrl(url);
+      if (invite) void acceptInviteAndRefresh(invite);
+      else completeAuthRedirect(url).catch(() => undefined);
+    });
+    return () => subscription.remove();
+  }, [session]);
+
+  useEffect(() => {
     if (!session) {
       setLoading(false);
       return;
     }
     setLoading(true);
-    listHouseholds()
+    Promise.all([
+      AsyncStorage.getItem(pendingInviteKey('household')),
+      AsyncStorage.getItem(pendingInviteKey('trip')),
+    ])
+      .then(async ([householdToken, tripToken]) => {
+        if (householdToken) {
+          await acceptHouseholdInvitation(householdToken);
+          await AsyncStorage.removeItem('coho-pending-household-invite');
+        }
+        if (tripToken) {
+          await acceptTravelInvitation(tripToken);
+          await AsyncStorage.removeItem('coho-pending-travel-invite');
+        }
+        return listHouseholds();
+      })
       .then((memberships) => setHasHousehold(memberships.length > 0))
       .finally(() => setLoading(false));
   }, [session]);
@@ -49,6 +106,18 @@ export default function AuthGate({ children }: Props) {
     return <HouseholdSetup onCreated={() => setHasHousehold(true)} />;
   }
   return <>{children}</>;
+}
+
+function pendingInviteKey(kind: InviteLink['kind']) {
+  return kind === 'household' ? 'coho-pending-household-invite' : 'coho-pending-travel-invite';
+}
+
+function invitationFromUrl(url: string): InviteLink | null {
+  const household = url.match(/^(?:coho|homethread):\/\/invite\/([a-f0-9]+)(?:[/?#]|$)/i);
+  if (household?.[1]) return { kind: 'household', token: household[1] };
+  const trip = url.match(/^(?:coho|homethread):\/\/trip-invite\/([a-f0-9]+)(?:[/?#]|$)/i);
+  if (trip?.[1]) return { kind: 'trip', token: trip[1] };
+  return null;
 }
 
 function LoadingScreen() {
@@ -80,7 +149,7 @@ function AuthScreen() {
     try {
       if (mode === 'signup') {
         const result = await signUp(email, password, name);
-        if (!result.session) setMessage('Check your email to confirm your HomeThread account.');
+        if (!result.session) setMessage('Check your email to confirm your Coho account.');
       } else {
         await signIn(email, password);
       }
@@ -156,7 +225,7 @@ function AuthScreen() {
 
           {mode === 'signin' && <Pressable onPress={forgotPassword}><Text style={styles.textButton}>Forgot password?</Text></Pressable>}
           <Pressable onPress={() => { setMode(mode === 'signin' ? 'signup' : 'signin'); setMessage(''); }}>
-            <Text style={styles.switchText}>{mode === 'signin' ? 'New to HomeThread? Create an account' : 'Already have an account? Sign in'}</Text>
+            <Text style={styles.switchText}>{mode === 'signin' ? 'New to Coho? Create an account' : 'Already have an account? Sign in'}</Text>
           </Pressable>
         </View>
       </KeyboardAvoidingView>
@@ -192,7 +261,7 @@ function HouseholdSetup({ onCreated }: { onCreated: () => void }) {
           <TextInput
             value={name}
             onChangeText={setName}
-            placeholder="The Cragle Family"
+            placeholder="Your family name"
             placeholderTextColor="#8790A3"
             autoCapitalize="words"
             style={styles.input}
@@ -213,7 +282,7 @@ function BrandMark() {
   return (
     <View style={styles.brandRow}>
       <View style={styles.logo}><Text style={styles.logoText}>⌂</Text></View>
-      <Text style={styles.brand}>HomeThread</Text>
+      <Text style={styles.brand}>Coho</Text>
     </View>
   );
 }
