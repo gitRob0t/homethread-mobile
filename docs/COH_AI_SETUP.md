@@ -1,6 +1,9 @@
 # Coh AI production setup
 
-Coh runs through a Supabase Edge Function so the OpenAI API key never ships in the iPhone app. The mobile client automatically falls back to its local guided assistant when the function is unavailable.
+Coh runs through a Supabase Edge Function so the OpenAI API key never ships in
+the iPhone app. If the model is unavailable, the server still enforces
+deterministic missing-detail questions for actionable requests and records a
+scrubbed failure event for investigation.
 
 ## 1. Apply the database migration
 
@@ -8,7 +11,7 @@ From the repository directory, link the Supabase project and push the migration:
 
 ```bash
 supabase login
-supabase link --project-ref cbkpgkiuikpcrefcbutq
+supabase link --project-ref YOUR_PROJECT_REF
 supabase db push
 ```
 
@@ -19,7 +22,7 @@ The migration creates private conversation history and an auditable queue of pro
 Create an OpenAI project API key. Do not place it in `App.tsx`, `app.json`, an Expo environment variable, GitHub, or chat.
 
 ```bash
-supabase secrets set OPENAI_API_KEY=YOUR_KEY OPENAI_MODEL=gpt-5.6-sol --project-ref cbkpgkiuikpcrefcbutq
+supabase secrets set OPENAI_API_KEY=YOUR_KEY OPENAI_MODEL=gpt-5.6-sol --project-ref YOUR_PROJECT_REF
 ```
 
 `gpt-5.6-sol` is the quality-first default for Coh, because this assistant is the product’s core interaction layer. The function keeps the model configurable without rebuilding the app, so a lower-cost tier can be evaluated later against the same structured-output tests.
@@ -27,45 +30,49 @@ supabase secrets set OPENAI_API_KEY=YOUR_KEY OPENAI_MODEL=gpt-5.6-sol --project-
 To activate the real Instacart handoff, add the server-side key supplied through the Instacart Developer Platform:
 
 ```bash
-supabase secrets set INSTACART_API_KEY=YOUR_INSTACART_KEY --project-ref cbkpgkiuikpcrefcbutq
+supabase secrets set INSTACART_API_KEY=YOUR_INSTACART_KEY --project-ref YOUR_PROJECT_REF
 ```
 
 To activate the family inbox and briefing email copies, verify receiving and sending domains in Resend, then add a full-access server key, the webhook signing secret, and the verified From address:
 
 ```bash
-supabase secrets set RESEND_API_KEY=YOUR_RESEND_KEY RESEND_WEBHOOK_SECRET=YOUR_WHSEC_SECRET COHO_FROM_EMAIL="Coho <briefings@YOUR_VERIFIED_DOMAIN>" --project-ref cbkpgkiuikpcrefcbutq
+supabase secrets set RESEND_API_KEY=YOUR_RESEND_KEY RESEND_WEBHOOK_SECRET=YOUR_WHSEC_SECRET COHO_FROM_EMAIL="Coho <briefings@YOUR_VERIFIED_DOMAIN>" --project-ref YOUR_PROJECT_REF
 ```
 
 Create a separate random secret for scheduled briefings:
 
 ```bash
 openssl rand -hex 32
-supabase secrets set BRIEFING_CRON_SECRET=PASTE_THE_RANDOM_VALUE --project-ref cbkpgkiuikpcrefcbutq
+supabase secrets set BRIEFING_CRON_SECRET=PASTE_THE_RANDOM_VALUE --project-ref YOUR_PROJECT_REF
 ```
 
-## 3. Deploy the production functions
+## 3. Deploy the production backend
 
 ```bash
-supabase functions deploy coh-assistant --project-ref cbkpgkiuikpcrefcbutq
-supabase functions deploy instacart-shopping-list --project-ref cbkpgkiuikpcrefcbutq
-supabase functions deploy resend-inbound --no-verify-jwt --project-ref cbkpgkiuikpcrefcbutq
-supabase functions deploy send-household-briefings --no-verify-jwt --project-ref cbkpgkiuikpcrefcbutq
+npm run deploy:supabase
 ```
 
-The webhook and scheduler functions deliberately bypass the platform JWT gateway because their callers are Resend and Supabase Cron. They still reject requests unless the Resend signature or private cron secret verifies.
+The checked-in deployment script applies pending migrations and deploys Coh,
+Inbox extraction, notifications, automations, privacy, invitations, calendar
+OAuth/sync, commerce handoff, webhooks, and briefings. Public entry functions
+bypass the platform JWT gateway only when they verify a provider signature,
+authenticated session, service token, or private cron secret internally.
 
 No new iOS build is required after deploying or updating an Edge Function. Restart Coho, sign in, and send:
 
 > Hey Coh, I have a haircut Wednesday.
 
-Coh should ask for missing details one at a time, summarize the complete event, request confirmation, and add it to the in-app calendar only after an explicit “add it” or equivalent confirmation.
+Coh should ask for missing details one at a time, summarize the complete event,
+request confirmation, and add it to the family calendar only after an explicit
+“add it” or equivalent confirmation. Run `npm run eval:coh` before every
+assistant release; add a test account token to run the live contract scenarios.
 
 ## 4. Activate the family inbox
 
 1. In Resend, verify the same receiving domain stored in `household_inboxes.domain` (currently `inbox.coho.ai`).
 2. Add this webhook endpoint and subscribe it to `email.received`:
 
-   `https://cbkpgkiuikpcrefcbutq.supabase.co/functions/v1/resend-inbound`
+   `https://YOUR_PROJECT.supabase.co/functions/v1/resend-inbound`
 
 3. In Coho, open **More → Family Inbox**, reserve the family alias, and send a test email to that exact address.
 4. Confirm that the message appears in **Needs review**. Reject it or explicitly choose **Review with Coh**.
@@ -76,7 +83,7 @@ The receiver verifies the raw Resend/Svix signature, rejects stale requests, ded
 
 Deploying the function does not create a schedule by itself. In Supabase Dashboard, use **Integrations → Cron** to invoke:
 
-`https://cbkpgkiuikpcrefcbutq.supabase.co/functions/v1/send-household-briefings`
+`https://YOUR_PROJECT.supabase.co/functions/v1/send-household-briefings`
 
 Run it every 15 minutes with method `POST` and header:
 

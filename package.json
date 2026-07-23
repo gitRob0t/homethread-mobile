@@ -38,6 +38,9 @@
     "ios": "expo start --ios",
     "web": "expo start --web",
     "typecheck": "tsc --noEmit",
-    "doctor": "npx expo-doctor"
+    "doctor": "npx expo-doctor",
+    "eval:coh": "node scripts/coh-evals.mjs",
+    "release:check": "bash scripts/release-check.sh",
+    "deploy:supabase": "bash scripts/deploy-supabase.sh"
   }
 }

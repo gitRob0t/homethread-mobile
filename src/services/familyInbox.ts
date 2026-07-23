@@ -10,10 +10,12 @@ export type HouseholdInbox = {
 };
 
 export type InboundAttachment = {
-  id?: string;
+  id: string;
   filename: string;
   content_type: string;
-  size: number;
+  byte_size: number;
+  status: 'metadata' | 'quarantined' | 'stored' | 'processed' | 'rejected' | 'failed';
+  processing_error: string | null;
 };
 
 export type InboundItem = {
@@ -23,12 +25,25 @@ export type InboundItem = {
   body_preview: string | null;
   body_text: string | null;
   received_at: string;
-  status: 'needs_review' | 'approved' | 'rejected' | 'imported' | 'failed';
-  attachments: InboundAttachment[];
+  status: 'queued' | 'processing' | 'needs_review' | 'needs_details' | 'ready' | 'approved' | 'executing' | 'imported' | 'rejected' | 'failed';
+  extraction_status: 'queued' | 'processing' | 'needs_details' | 'ready' | 'failed';
+  processing_error: string | null;
+  processed_at: string | null;
+  attachments: Array<{
+    id: string;
+    filename: string;
+    content_type: string;
+    size: number;
+  }>;
+  attachment_records: InboundAttachment[];
   recipient: string | null;
   extracted_data: {
     sender_trusted?: boolean;
     requires_human_review?: boolean;
+    summary?: string;
+    category?: string;
+    confidence?: number;
+    action_count?: number;
   } | null;
 };
 
@@ -64,7 +79,7 @@ export async function reserveHouseholdInbox(input: {
 export async function listInboundItems(householdId: string) {
   const { data, error } = await supabase
     .from('inbound_items')
-    .select('id, sender, subject, body_preview, body_text, received_at, status, attachments, recipient, extracted_data')
+    .select('id, sender, subject, body_preview, body_text, received_at, status, extraction_status, processing_error, processed_at, attachments, recipient, extracted_data, attachment_records:inbound_attachments(id, filename, content_type, byte_size, status, processing_error)')
     .eq('household_id', householdId)
     .order('received_at', { ascending: false })
     .limit(100);

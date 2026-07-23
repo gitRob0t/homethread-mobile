@@ -77,7 +77,7 @@ export async function sendFamilyMessage(householdId: string, senderId: string, b
 export async function listSharedEvents(householdId: string) {
   const { data, error } = await supabase
     .from('events')
-    .select('id, title, details, starts_at, ends_at, location, created_by, creator:profiles!events_created_by_fkey(display_name)')
+    .select('id, title, details, starts_at, ends_at, location, created_by, provider, source_calendar_id, recurrence_rule, status, creator:profiles!events_created_by_fkey(display_name)')
     .eq('household_id', householdId)
     .order('starts_at', { ascending: true });
   if (error) throw error;
@@ -195,6 +195,15 @@ export async function createFamilyChore(
 export async function updateFamilyChore(choreId: string, patch: Record<string, unknown>) {
   const { error } = await supabase.from('chores').update(patch).eq('id', choreId);
   if (error) throw error;
+}
+
+export async function setFamilyChoreCompleted(choreId: string, completed: boolean) {
+  const { data, error } = await supabase.rpc('set_household_chore_completed', {
+    target_chore: choreId,
+    is_completed: completed,
+  });
+  if (error) throw error;
+  return data;
 }
 
 export async function listSharedNotes(householdId: string) {

@@ -11,10 +11,11 @@ import {
 } from 'react-native';
 
 import {
-  inviteFamilyMember,
   listHouseholdMembers,
   listHouseholds,
   listInvitations,
+  sendHouseholdInvitation,
+  subscribeToHouseholdAccess,
 } from '../services/households';
 
 type Role = 'admin' | 'member' | 'child';
@@ -22,8 +23,24 @@ type Member = {
   user_id: string;
   role: string;
   profiles: { display_name: string; avatar_url: string | null }[];
+  onboarding: {
+    profile_completed: boolean;
+    notifications_completed: boolean;
+    calendar_completed: boolean;
+    tour_completed: boolean;
+    first_action_completed: boolean;
+    last_active_at: string;
+  } | null;
 };
-type Invitation = { id: string; email: string; role: string; status: string; expires_at: string };
+type Invitation = {
+  id: string;
+  email: string;
+  role: string;
+  status: string;
+  expires_at: string;
+  delivery_status?: string;
+  last_delivery_error?: string | null;
+};
 
 export default function FamilyHub() {
   const [householdId, setHouseholdId] = useState('');
@@ -37,8 +54,13 @@ export default function FamilyHub() {
 
   useEffect(() => { void load(); }, []);
 
-  async function load() {
-    setBusy(true);
+  useEffect(() => {
+    if (!householdId) return;
+    return subscribeToHouseholdAccess(householdId, () => void load(false));
+  }, [householdId]);
+
+  async function load(showSpinner = true) {
+    if (showSpinner) setBusy(true);
     try {
       const households = await listHouseholds();
       const first = households[0]?.households;
@@ -67,15 +89,17 @@ export default function FamilyHub() {
     setBusy(true);
     setMessage('');
     try {
-      const invitation = await inviteFamilyMember(householdId, email, role);
-      if (invitation?.invitation_token) {
+      const invitation = await sendHouseholdInvitation({ householdId, email, role });
+      if (!invitation.emailSent) {
         await Share.share({
           title: `Join ${householdName} on Coho`,
-          message: `Join our family command center on Coho: homethread://invite/${invitation.invitation_token}`,
+          message: `Join our family command center on Coho: ${invitation.inviteUrl}`,
         });
       }
       setEmail('');
-      setMessage('Invitation created. Share the secure link with your family member.');
+      setMessage(invitation.emailSent
+        ? 'Invitation emailed. Their household will appear here immediately after they join.'
+        : 'The secure invite is ready to share. Their household will appear here immediately after they join.');
       await load();
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'Unable to send invitation.');
@@ -92,23 +116,28 @@ export default function FamilyHub() {
       </View>
 
       <Text style={styles.sectionTitle}>Family members</Text>
-      {busy && members.length === 0 ? <ActivityIndicator color="#2257F4" /> : members.map((member) => (
-        <View key={member.user_id} style={styles.row}>
-          <View style={styles.avatar}>
-            <Text style={styles.avatarText}>{initials(member.profiles[0]?.display_name ?? 'Family')}</Text>
+      {busy && members.length === 0 ? <ActivityIndicator color="#2257F4" /> : members.map((member) => {
+        const readiness = memberReadiness(member);
+        return (
+          <View key={member.user_id} style={styles.row}>
+            <View style={styles.avatar}>
+              <Text style={styles.avatarText}>{initials(member.profiles[0]?.display_name ?? 'Family')}</Text>
+            </View>
+            <View style={styles.flex}>
+              <Text style={styles.name}>{member.profiles[0]?.display_name ?? 'Family member'}</Text>
+              <Text style={styles.meta}>{roleLabel(member.role)} · {readiness.detail}</Text>
+            </View>
+            <View style={[styles.activePill, { backgroundColor: readiness.background }]}>
+              <Text style={[styles.activeText, { color: readiness.color }]}>{readiness.label}</Text>
+            </View>
           </View>
-          <View style={styles.flex}>
-            <Text style={styles.name}>{member.profiles[0]?.display_name ?? 'Family member'}</Text>
-            <Text style={styles.meta}>{roleLabel(member.role)}</Text>
-          </View>
-          <View style={styles.activePill}><Text style={styles.activeText}>Active</Text></View>
-        </View>
-      ))}
+        );
+      })}
 
       <Text style={styles.sectionTitle}>Invite someone</Text>
       <View style={styles.card}>
         <Text style={styles.cardTitle}>Bring your family together</Text>
-        <Text style={styles.cardText}>They’ll receive access only to this household after accepting.</Text>
+        <Text style={styles.cardText}>Coho emails a secure link. After they accept, their calendar, chat, assignments, notifications, and Coh workspace update in real time.</Text>
         <TextInput
           value={email}
           onChangeText={setEmail}
@@ -127,7 +156,7 @@ export default function FamilyHub() {
         </View>
         {!!message && <Text style={styles.message}>{message}</Text>}
         <Pressable disabled={busy} onPress={sendInvite} style={[styles.button, busy && styles.disabled]}>
-          {busy ? <ActivityIndicator color="#fff" /> : <Text style={styles.buttonText}>Create and share invitation</Text>}
+          {busy ? <ActivityIndicator color="#fff" /> : <Text style={styles.buttonText}>Email secure invitation</Text>}
         </Pressable>
       </View>
 
@@ -136,7 +165,7 @@ export default function FamilyHub() {
         {invitations.map((invite) => (
           <View key={invite.id} style={styles.row}>
             <View style={[styles.avatar, styles.inviteAvatar]}><Text>✉️</Text></View>
-            <View style={styles.flex}><Text style={styles.name}>{invite.email}</Text><Text style={styles.meta}>{roleLabel(invite.role)} · Pending</Text></View>
+            <View style={styles.flex}><Text style={styles.name}>{invite.email}</Text><Text style={styles.meta}>{roleLabel(invite.role)} · {invite.delivery_status === 'sent' ? 'Email sent' : 'Share link ready'}</Text>{!!invite.last_delivery_error && <Text style={styles.warning}>Email delivery unavailable; use the share link.</Text>}</View>
           </View>
         ))}
       </>}
@@ -153,6 +182,28 @@ function roleLabel(role: string) {
   if (role === 'admin') return 'Adult admin';
   if (role === 'child') return 'Child account';
   return 'Family member';
+}
+
+function memberReadiness(member: Member) {
+  const state = member.onboarding;
+  if (!state) {
+    return { label: 'Joined', detail: 'setup not started', color: '#B46B12', background: '#FFF1D8' };
+  }
+  const lastActive = new Date(state.last_active_at).getTime();
+  const activeRecently = Number.isFinite(lastActive) && Date.now() - lastActive < 1000 * 60 * 60 * 24 * 2;
+  if (!state.tour_completed || !state.notifications_completed) {
+    const missing = [
+      !state.tour_completed && 'tour',
+      !state.notifications_completed && 'alerts',
+    ].filter(Boolean).join(' + ');
+    return { label: 'Setup', detail: `${missing} remaining`, color: '#B46B12', background: '#FFF1D8' };
+  }
+  if (!state.first_action_completed) {
+    return { label: 'Ready', detail: 'waiting for first action', color: '#2257F4', background: '#E4EBFF' };
+  }
+  return activeRecently
+    ? { label: 'Active', detail: 'recently used Coho', color: '#168866', background: '#E1F8F0' }
+    : { label: 'Ready', detail: 'fully set up', color: '#2257F4', background: '#E4EBFF' };
 }
 
 const styles = StyleSheet.create({
@@ -181,6 +232,7 @@ const styles = StyleSheet.create({
   roleText: { color: '#687188', fontSize: 9, fontWeight: '800' },
   roleTextActive: { color: '#2257F4' },
   message: { color: '#C44931', fontSize: 11, marginTop: 10 },
+  warning: { color: '#B46B12', fontSize: 9, marginTop: 3 },
   button: { minHeight: 48, borderRadius: 14, backgroundColor: '#2257F4', alignItems: 'center', justifyContent: 'center', marginTop: 12 },
   disabled: { opacity: 0.6 },
   buttonText: { color: '#FFFFFF', fontWeight: '900', fontSize: 12 },

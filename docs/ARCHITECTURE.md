@@ -25,13 +25,16 @@ Expo/React Native provides the iOS application, Android portability, over-the-ai
 - events and event follow-ups
 - chores and personalized rewards
 - notes and family messages
-- Coh conversations and auditable actions
-- notification preferences, devices, and deliveries
-- household inboxes, inbound items, and sender rules
+- Coh conversations, durable household actions, action history, and evaluation telemetry
+- notification preferences, devices, outbox, deliveries, and open receipts
+- household inboxes, inbound items, attachments, extraction results, and sender rules
 - location consent, family locations, and Places
 - grocery items and meal plans
 - trips, trip members, and itinerary items
 - integration connections
+- provider calendar links, cursors, and explicit conflict records
+- saved briefing snapshots and automation rules/runs
+- onboarding readiness and privacy export/deletion requests
 
 Every shared record carries a `household_id`. Authorization derives access from authenticated, server-side membership rather than a role supplied by the client.
 
@@ -42,6 +45,8 @@ Provider OAuth tokens must be encrypted server-side, scoped minimally, revocable
 The first integrations intentionally use supported public surfaces:
 
 - selected iOS calendars through EventKit;
+- direct Google and Outlook OAuth with encrypted refresh tokens and incremental
+  two-way synchronization;
 - inbound family email through Resend;
 - shopping-list handoff through Instacart;
 - restaurant discovery through OpenTable;
@@ -53,7 +58,12 @@ Coho must not claim unsupported access to Find My, AirTags, Skylight, personal m
 
 Coh receives the user's private Coh conversation plus a bounded household snapshot: member names and roles, upcoming events, open chores, unchecked groceries, and near-term meals. It does not receive family chat, inbound email bodies, precise location, payment data, provider secrets, or unlimited history.
 
-The model proposes a typed action. The application validates and displays that proposal. Events, chores, notes, shopping handoffs, reservations, invitations, purchases, and money movement require the appropriate user confirmation; successful writes are recorded rather than merely described.
+The model proposes a typed action. Server-side validation independently derives
+hard missing fields and asks one deterministic follow-up at a time. The
+application displays the complete proposal and requires explicit confirmation.
+Events, chores, notes, shopping handoffs, reservations, invitations, purchases,
+and money movement require the appropriate user confirmation; successful writes
+are recorded rather than merely described.
 
 ## Delivery and review
 
@@ -65,4 +75,10 @@ The briefing worker calculates each member's local schedule, honors independent 
 
 Coho may process information about children, locations, schedules, messages, and household routines. Location is off by default, opt-in per device, revocable, and deleted from the shared location record when sharing is disabled. Trip membership does not grant access to the household.
 
-Before public launch the service still needs age-aware onboarding, parental controls, family-member offboarding, complete export/deletion, retention controls, audit visibility, abuse prevention, observability, backups, a privacy policy, a data-processing inventory, and a documented incident-response process.
+Private JSON export, short-lived signed downloads, and verified in-app account
+deletion are implemented. Before public launch the service still needs
+age-aware onboarding, parental controls, family-member offboarding UX,
+retention controls, administrator-visible audit history, rate/abuse controls,
+centralized alerting, tested backup restoration, a published privacy policy, a
+data-processing inventory, penetration testing, and a documented
+incident-response process.

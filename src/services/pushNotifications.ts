@@ -35,9 +35,20 @@ export async function registerPushDevice(
     expo_push_token: token,
     platform: Platform.OS,
     enabled: true,
+    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+    locale: Intl.DateTimeFormat().resolvedOptions().locale || 'en-US',
     last_seen_at: new Date().toISOString(),
   }, { onConflict: 'expo_push_token' });
   if (error) throw error;
+  if (householdId) {
+    await supabase.from('member_onboarding_state').upsert({
+      household_id: householdId,
+      user_id: userId,
+      notifications_completed: true,
+      last_active_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    }, { onConflict: 'household_id,user_id' });
+  }
   return token;
 }
 

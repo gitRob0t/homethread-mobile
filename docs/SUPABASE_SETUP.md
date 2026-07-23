@@ -5,7 +5,8 @@ Coho uses Supabase for authentication, household-scoped data, realtime synchroni
 ## Create the project
 
 1. Create or select the Coho Supabase project.
-2. Link the CLI and run `supabase db push` so every migration in `supabase/migrations` is applied once.
+2. Link the CLI and run `npm run deploy:supabase` so every migration is applied
+   once and every Edge Function is deployed with its intended gateway mode.
 3. Enable email/password authentication. Enable Sign in with Apple before public production.
 4. Add the app's redirect scheme: `homethread://auth/callback` (the legacy scheme remains for installed-build continuity).
 5. Copy the project URL and publishable key into local environment variables.
@@ -25,7 +26,8 @@ Invitation acceptance, household creation, inbox reservation, and membership cha
 
 ## Production activation
 
-After `supabase db push`, configure the server-only secrets and deploy the functions listed in [COH_AI_SETUP.md](COH_AI_SETUP.md). Then configure:
+After configuring server-only secrets, follow
+[DEPLOYMENT.md](DEPLOYMENT.md). Then configure:
 
 - the Resend receiving domain and `email.received` webhook;
 - the verified transactional From address;

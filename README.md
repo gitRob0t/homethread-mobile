@@ -9,7 +9,11 @@ Coho is your Chief of Home: a shared family command center for calendars, chores
 - Shared calendar and upcoming events
 - Assignable, completable chores with per-chore rewards such as game time, V-Bucks, allowance, points, or a custom privilege
 - Separate family chat and private Coh workspace so AI follow-up questions do not overwhelm family messages
-- Multi-turn Coh event intake backed by a Supabase Edge Function, with a local fallback
+- Multi-turn, server-validated Coh action intake with exact missing-detail
+  questions, explicit confirmation, correction, telemetry, and automated
+  behavioral contracts
+- Family Inbox extraction for email, PDFs, screenshots, calendar files, and
+  approved attachments
 - Click-through event details from Coh and Daily Sync
 - Spoken Daily Sync playback configured for iPhone silent mode
 - Configurable daily, week-ahead, and follow-up notifications
@@ -18,6 +22,9 @@ Coho is your Chief of Home: a shared family command center for calendars, chores
 - Quick-add sheet for events, chores, notes, and messages
 - Local iOS notification permission, test notification, and recurring schedule flow
 - Selected iPhone calendar import and approved-event write-back through EventKit/Expo Calendar
+- Direct Google and Outlook OAuth with recurring events, incremental two-way
+  sync, source visibility, cancellation propagation, deduplication, and
+  in-app conflict resolution
 - Opt-in phone location, approximate or precise sharing, Family Places, and arrival/departure alerts
 - Shared grocery list, weekly meal planning, Coh Home Chef prompts, and a server-side Instacart shopping-list handoff
 - Private trip spaces with invited friends/families, shared itineraries, and an OpenTable discovery handoff
@@ -28,12 +35,14 @@ Coho is your Chief of Home: a shared family command center for calendars, chores
 Authentication, household membership, invitations, Row Level Security, realtime household data, Coh's server-side assistant, inbound email, provider handoffs, and briefing delivery are backed by Supabase. Provider credentials, domain verification, webhook registration, and the scheduled briefing invocation must be activated in the production accounts before the UI reports those integrations as connected.
 
 See [docs/PRODUCT_STRATEGY.md](docs/PRODUCT_STRATEGY.md) for the market research, product rules, privacy model, and delivery phases.
+Use [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for the validated backend and
+internal iOS release process.
 
 ## Run locally
 
 ```bash
 npm install
-npm run typecheck
+npm run release:check
 npm start
 ```
 
@@ -55,7 +64,9 @@ Scan the Expo QR code with a compatible development client, or run `npm run ios`
 - Keep family data tenant-scoped and encrypted in transit and at rest.
 - Use short-lived access tokens and platform keychain storage.
 - Require explicit family-admin approval for invitations and integrations.
-- Provide export, retention, account deletion, and child-data controls.
+- Keep the implemented private export and verified in-app account-deletion
+  flows operational; add age-aware retention and parental controls before a
+  public child-directed launch.
 - Keep AI-generated recaps private to the household and exclude them from model training by default.
 - Treat inbound email as untrusted, verify provider signatures, and require human review before Coh sees it.
 - Keep payment and purchase actions outside Coh's autonomous permissions; require itemized confirmation and provider receipts.

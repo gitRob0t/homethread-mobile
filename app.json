@@ -5,7 +5,10 @@
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
-    "scheme": "homethread",
+    "scheme": [
+      "coho",
+      "homethread"
+    ],
     "userInterfaceStyle": "automatic",
     "ios": {
       "supportsTablet": true,
@@ -13,12 +16,14 @@
       "buildNumber": "1",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false,
+        "NSMicrophoneUsageDescription": "Coho uses the microphone only when you choose to send Coh a voice request.",
         "NSUserNotificationsUsageDescription": "Coho uses notifications for family reminders, upcoming events, daily recaps, and Family Places alerts.",
         "NSCalendarsFullAccessUsageDescription": "Coho reads only the iPhone calendars you select so your household can coordinate approved events.",
         "NSCalendarsWriteOnlyAccessUsageDescription": "Coho can add events you approve to the iPhone calendar you choose."
       }
     },
     "android": {
+      "package": "com.homethread.family",
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/android-icon-foreground.png",

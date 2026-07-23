@@ -15,6 +15,18 @@ import {
 } from 'react-native';
 
 import {
+  type CalendarConflict,
+  type CalendarConnection,
+  type CalendarProvider,
+  disconnectCalendarConnection,
+  listCalendarConflicts,
+  listCalendarConnections,
+  resolveCalendarConflict,
+  saveCalendarConnectionSettings,
+  startCalendarConnection,
+  syncCalendarConnection,
+} from '../services/calendarConnections';
+import {
   type DeviceCalendarSettings,
   type DeviceCalendarSummary,
   getDeviceCalendarSettings,
@@ -69,7 +81,7 @@ export function CalendarConnectionScreen({
   userId,
   onNotice,
   onConnected,
-}: CommonProps & { onConnected: () => void }) {
+}: CommonProps & { onConnected: (source: CalendarProvider | 'device') => void }) {
   const styles = useMemo(() => makeStyles(dark), [dark]);
   const [calendars, setCalendars] = useState<DeviceCalendarSummary[]>([]);
   const [settings, setSettings] = useState<DeviceCalendarSettings>({
@@ -80,6 +92,21 @@ export function CalendarConnectionScreen({
   const [granted, setGranted] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [cloudConnections, setCloudConnections] = useState<CalendarConnection[]>([]);
+  const [conflicts, setConflicts] = useState<CalendarConflict[]>([]);
+
+  async function loadCloudConnections() {
+    if (!householdId) return;
+    const [connections, conflicts] = await Promise.all([
+      listCalendarConnections(householdId),
+      listCalendarConflicts(householdId),
+    ]);
+    setCloudConnections(connections);
+    setConflicts(conflicts);
+    connections
+      .filter((connection) => connection.status === 'active')
+      .forEach((connection) => onConnected(connection.provider));
+  }
 
   useEffect(() => {
     Promise.all([getDeviceCalendarSettings(), hasDeviceCalendarAccess()])
@@ -89,7 +116,111 @@ export function CalendarConnectionScreen({
         if (hasAccess) setCalendars(await listDeviceCalendars());
       })
       .catch(() => undefined);
-  }, []);
+    void loadCloudConnections().catch(() => undefined);
+    const subscription = Linking.addEventListener('url', ({ url }) => {
+      if (/^(?:coho|homethread):\/\/calendar-connected\//i.test(url)) {
+        setTimeout(() => void loadCloudConnections().catch(() => undefined), 700);
+      }
+    });
+    return () => subscription.remove();
+  }, [householdId]);
+
+  async function connectProvider(provider: CalendarProvider) {
+    if (!householdId) {
+      setError('Join a Coho household before connecting a calendar.');
+      return;
+    }
+    setBusy(true);
+    setError('');
+    try {
+      const authorizationUrl = await startCalendarConnection(householdId, provider);
+      await Linking.openURL(authorizationUrl);
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : 'The provider connection could not start.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function toggleCloudCalendar(connectionId: string, calendarId: string) {
+    setCloudConnections((current) => current.map((connection) => connection.id === connectionId
+      ? {
+        ...connection,
+        selected_calendars: connection.selected_calendars.map((calendar) =>
+          calendar.id === calendarId ? { ...calendar, selected: !calendar.selected } : calendar),
+      }
+      : connection));
+  }
+
+  async function saveCloudConnection(connection: CalendarConnection) {
+    setBusy(true);
+    setError('');
+    try {
+      await saveCalendarConnectionSettings({
+        connectionId: connection.id,
+        selectedCalendarIds: connection.selected_calendars
+          .filter((calendar) => calendar.selected)
+          .map((calendar) => calendar.id),
+        defaultWriteCalendarId: connection.default_write_calendar_id,
+        syncEnabled: connection.sync_enabled,
+      });
+      onNotice('Calendar choices saved. Coho is syncing changes both ways.');
+      await loadCloudConnections();
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : 'Calendar choices could not be saved.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function syncCloudConnection(connection: CalendarConnection) {
+    setBusy(true);
+    setError('');
+    try {
+      const result = await syncCalendarConnection(connection.id);
+      const summary = result.results?.[0];
+      if (summary && !summary.ok) throw new Error(summary.error || 'Calendar sync failed.');
+      onNotice(`Calendar synced · ${summary?.imported ?? 0} in · ${summary?.exported ?? 0} out`);
+      await loadCloudConnections();
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : 'Calendar sync failed.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function disconnectCloud(connection: CalendarConnection) {
+    setBusy(true);
+    setError('');
+    try {
+      await disconnectCalendarConnection(connection.id);
+      await loadCloudConnections();
+      onNotice(`${connection.provider === 'google' ? 'Google' : 'Outlook'} Calendar disconnected`);
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : 'Calendar connection could not be removed.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function resolveConflict(
+    conflict: CalendarConflict,
+    resolution: 'keep_local' | 'keep_provider',
+  ) {
+    setBusy(true);
+    setError('');
+    try {
+      await resolveCalendarConflict(conflict.id, resolution);
+      await loadCloudConnections();
+      onNotice(resolution === 'keep_local'
+        ? 'The Coho version now matches the connected calendar.'
+        : 'The connected calendar version is now in Coho.');
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : 'The calendar conflict could not be resolved.');
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function connect() {
     setBusy(true);
@@ -143,7 +274,7 @@ export function CalendarConnectionScreen({
       };
       await saveDeviceCalendarSettings(next);
       setSettings(next);
-      onConnected();
+      onConnected('device');
       onNotice(`${imported} event${imported === 1 ? '' : 's'} synced from this iPhone`);
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : 'Calendar sync failed.');
@@ -156,7 +287,7 @@ export function CalendarConnectionScreen({
     const next = { ...settings, writeBackCalendarId: calendarId };
     setSettings(next);
     await saveDeviceCalendarSettings(next);
-    if (calendarId) onConnected();
+    if (calendarId) onConnected('device');
     onNotice(calendarId
       ? 'Approved Coho events will also be saved to that iPhone calendar'
       : 'iPhone calendar write-back is off');
@@ -175,6 +306,99 @@ export function CalendarConnectionScreen({
         </Text>
       </View>
 
+      <Text style={styles.sectionTitle}>Direct two-way connections</Text>
+      <Text style={styles.meta}>Provider tokens stay encrypted on the server. Imported events keep their source and Coho detects simultaneous edits instead of silently overwriting them.</Text>
+      {(['google', 'outlook'] as CalendarProvider[]).map((provider) => {
+        const providerConnections = cloudConnections.filter((connection) =>
+          connection.provider === provider && connection.status !== 'disconnected');
+        if (!providerConnections.length) {
+          return <Pressable key={provider} disabled={busy} onPress={() => connectProvider(provider)} style={styles.providerCard}>
+            <View style={[styles.roundIcon, { backgroundColor: provider === 'google' ? '#4285F420' : '#0078D420' }]}>
+              <Ionicons name={provider === 'google' ? 'logo-google' : 'logo-microsoft'} size={21} color={provider === 'google' ? '#4285F4' : '#0078D4'} />
+            </View>
+            <View style={styles.flex}><Text style={styles.rowTitle}>Connect {provider === 'google' ? 'Google' : 'Outlook'} Calendar</Text><Text style={styles.meta}>OAuth · recurring events · incremental two-way sync</Text></View>
+            <Ionicons name="chevron-forward" size={19} color={styles.icon.color} />
+          </Pressable>;
+        }
+        return providerConnections.map((connection) => <View key={connection.id} style={styles.settingCard}>
+          <View style={styles.settingTop}>
+            <View style={[styles.roundIcon, { backgroundColor: provider === 'google' ? '#4285F420' : '#0078D420' }]}>
+              <Ionicons name={provider === 'google' ? 'logo-google' : 'logo-microsoft'} size={21} color={provider === 'google' ? '#4285F4' : '#0078D4'} />
+            </View>
+            <View style={styles.flex}>
+              <Text style={styles.rowTitle}>{connection.display_name || connection.provider_email || `${provider} calendar`}</Text>
+              <Text style={styles.meta}>{connection.status === 'active' ? `Last synced ${connection.last_synced_at ? relativeTime(connection.last_synced_at) : 'not yet'}` : connection.status}</Text>
+            </View>
+            <View style={styles.successPill}><Ionicons name={connection.status === 'active' ? 'checkmark-circle' : 'warning'} size={15} color={connection.status === 'active' ? '#168866' : '#B46B12'} /><Text style={styles.successText}>{connection.status}</Text></View>
+          </View>
+          {connection.selected_calendars.map((calendar) => <Pressable key={calendar.id} onPress={() => toggleCloudCalendar(connection.id, calendar.id)} style={[styles.row, calendar.selected && styles.rowSelected]}>
+            <View style={[styles.colorDot, { backgroundColor: calendar.color || '#2257F4' }]} />
+            <View style={styles.flex}><Text style={styles.rowTitle}>{calendar.name}</Text><Text style={styles.meta}>{calendar.primary ? 'Primary · ' : ''}{calendar.canWrite === false ? 'Read only' : 'Read and write'}</Text></View>
+            <Ionicons name={calendar.selected ? 'checkmark-circle' : 'ellipse-outline'} size={22} color={calendar.selected ? '#19A47B' : styles.icon.color} />
+          </Pressable>)}
+          <Text style={styles.label}>WRITE NEW COHO EVENTS TO</Text>
+          <View style={styles.chips}>
+            <Pressable onPress={() => setCloudConnections((current) => current.map((item) => item.id === connection.id ? { ...item, default_write_calendar_id: null } : item))} style={[styles.chip, !connection.default_write_calendar_id && styles.chipActive]}><Text style={[styles.chipText, !connection.default_write_calendar_id && styles.chipTextActive]}>Coho only</Text></Pressable>
+            {connection.selected_calendars.filter((calendar) => calendar.canWrite !== false).map((calendar) => <Pressable key={`write-${calendar.id}`} onPress={() => setCloudConnections((current) => current.map((item) => item.id === connection.id ? { ...item, default_write_calendar_id: calendar.id } : item))} style={[styles.chip, connection.default_write_calendar_id === calendar.id && styles.chipActive]}><Text style={[styles.chipText, connection.default_write_calendar_id === calendar.id && styles.chipTextActive]}>{calendar.name}</Text></Pressable>)}
+          </View>
+          {!!connection.last_error && <Text style={styles.error}>{connection.last_error}</Text>}
+          <View style={styles.actionGrid}>
+            <Pressable disabled={busy} onPress={() => saveCloudConnection(connection)} style={styles.primaryButton}><Ionicons name="save-outline" size={17} color="#fff" /><Text style={styles.primaryButtonText}>Save & sync</Text></Pressable>
+            <Pressable disabled={busy} onPress={() => syncCloudConnection(connection)} style={styles.secondaryButton}><Ionicons name="sync" size={17} color="#2257F4" /><Text style={styles.secondaryButtonText}>Sync now</Text></Pressable>
+          </View>
+          <Pressable disabled={busy} onPress={() => disconnectCloud(connection)} style={styles.secondaryButton}><Ionicons name="unlink-outline" size={17} color="#D34A3B" /><Text style={[styles.secondaryButtonText, { color: '#D34A3B' }]}>Disconnect this account</Text></Pressable>
+        </View>);
+      })}
+      {conflicts.length > 0 && <>
+        <View style={styles.conflictNotice}>
+          <Ionicons name="git-compare-outline" size={20} color="#B46B12" />
+          <View style={styles.flex}>
+            <Text style={styles.rowTitle}>{conflicts.length} simultaneous calendar edit{conflicts.length === 1 ? '' : 's'} need your choice</Text>
+            <Text style={styles.meta}>Both versions are safe. Pick the one the family should keep.</Text>
+          </View>
+        </View>
+        {conflicts.map((conflict) => {
+          const connection = cloudConnections.find((item) => item.id === conflict.connection_id);
+          const providerName = connection?.provider === 'outlook' ? 'Outlook' : 'Google';
+          const localVersion = calendarConflictVersion(conflict.local_payload, 'local');
+          const providerVersion = calendarConflictVersion(conflict.provider_payload, 'provider');
+          return <View key={conflict.id} style={styles.conflictCard}>
+            <View style={styles.settingTop}>
+              <View style={[styles.roundIcon, { backgroundColor: '#B46B1218' }]}>
+                <Ionicons name="calendar-outline" size={20} color="#B46B12" />
+              </View>
+              <View style={styles.flex}>
+                <Text style={styles.rowTitle}>{localVersion.title || providerVersion.title || 'Calendar event'}</Text>
+                <Text style={styles.meta}>Edited in both Coho and {providerName}</Text>
+              </View>
+            </View>
+            <View style={styles.versionCard}>
+              <Text style={styles.versionLabel}>COHO VERSION</Text>
+              <Text style={styles.versionTitle}>{localVersion.title}</Text>
+              <Text style={styles.meta}>{localVersion.when}</Text>
+              {!!localVersion.location && <Text style={styles.meta}>{localVersion.location}</Text>}
+            </View>
+            <View style={styles.versionCard}>
+              <Text style={styles.versionLabel}>{providerName.toUpperCase()} VERSION</Text>
+              <Text style={styles.versionTitle}>{providerVersion.deleted ? 'Deleted from calendar' : providerVersion.title}</Text>
+              {!providerVersion.deleted && <Text style={styles.meta}>{providerVersion.when}</Text>}
+              {!providerVersion.deleted && !!providerVersion.location && <Text style={styles.meta}>{providerVersion.location}</Text>}
+            </View>
+            <View style={styles.actionGrid}>
+              <Pressable disabled={busy} onPress={() => resolveConflict(conflict, 'keep_local')} style={[styles.primaryButton, styles.flex]}>
+                <Ionicons name="sparkles" size={16} color="#fff" />
+                <Text style={styles.primaryButtonText}>Keep Coho</Text>
+              </Pressable>
+              <Pressable disabled={busy} onPress={() => resolveConflict(conflict, 'keep_provider')} style={[styles.secondaryButton, styles.flex]}>
+                <Ionicons name="cloud-done-outline" size={17} color="#2257F4" />
+                <Text style={styles.secondaryButtonText}>Keep {providerName}</Text>
+              </Pressable>
+            </View>
+          </View>;
+        })}
+      </>}
+
+      <Text style={styles.sectionTitle}>This device</Text>
       {!granted ? (
         <Pressable disabled={busy} onPress={connect} style={styles.primaryButton}>
           {busy ? <ActivityIndicator color="#fff" /> : <>
@@ -183,7 +407,7 @@ export function CalendarConnectionScreen({
           </>}
         </Pressable>
       ) : <>
-        <Text style={styles.sectionTitle}>Read into the family calendar</Text>
+        <Text style={styles.sectionTitle}>Read iPhone calendars into Coho</Text>
         {calendars.map((calendar) => {
           const selected = settings.selectedCalendarIds.includes(calendar.id);
           return (
@@ -222,7 +446,7 @@ export function CalendarConnectionScreen({
       {!!error && <Text style={styles.error}>{error}</Text>}
       <View style={styles.privacyCard}>
         <Ionicons name="lock-closed" size={19} color="#19A47B" />
-        <Text style={styles.privacyText}>Calendar selection stays on this phone. Imported records keep their source label, and Coho does not import attendees or private event notes.</Text>
+        <Text style={styles.privacyText}>iPhone calendar choices stay on this phone. Direct provider grants are encrypted and revocable. Imported records keep their source label, and Coho does not import attendees or private event notes.</Text>
       </View>
     </ScrollView>
   );
@@ -700,6 +924,31 @@ function relativeTime(value: string) {
   return new Date(value).toLocaleDateString();
 }
 
+function calendarConflictVersion(
+  payload: Record<string, unknown>,
+  source: 'local' | 'provider',
+) {
+  const title = String(payload.title || 'Untitled event');
+  const startsAt = source === 'local' ? payload.starts_at : payload.startsAt;
+  const endsAt = source === 'local' ? payload.ends_at : payload.endsAt;
+  const location = payload.location ? String(payload.location) : '';
+  const deleted = source === 'provider' && Boolean(payload.deleted);
+  const start = typeof startsAt === 'string' ? new Date(startsAt) : null;
+  const end = typeof endsAt === 'string' ? new Date(endsAt) : null;
+  const validStart = start && !Number.isNaN(start.getTime());
+  const validEnd = end && !Number.isNaN(end.getTime());
+  const when = validStart
+    ? `${start.toLocaleString(undefined, {
+      weekday: 'short',
+      month: 'short',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+    })}${validEnd ? ` – ${end.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}` : ''}`
+    : 'Time not available';
+  return { title, when, location, deleted };
+}
+
 function capitalize(value: string) {
   return value.charAt(0).toUpperCase() + value.slice(1);
 }
@@ -775,6 +1024,11 @@ function makeStyles(dark: boolean) {
     rowSelected: { borderColor: '#19A47B77', backgroundColor: dark ? '#12352E' : '#F2FCF8' },
     checkedRow: { opacity: .62 },
     settingCard: { borderRadius: 21, padding: 15, gap: 10, backgroundColor: palette.surface, borderWidth: 1, borderColor: palette.line },
+    conflictNotice: { borderRadius: 18, padding: 14, flexDirection: 'row', gap: 11, alignItems: 'center', backgroundColor: '#B46B1212', borderWidth: 1, borderColor: '#B46B1240' },
+    conflictCard: { borderRadius: 21, padding: 15, gap: 10, backgroundColor: palette.surface, borderWidth: 1, borderColor: '#B46B1260' },
+    versionCard: { borderRadius: 15, padding: 12, backgroundColor: palette.surface2, borderWidth: 1, borderColor: palette.line },
+    versionLabel: { color: '#B46B12', fontSize: 8, fontWeight: '900', letterSpacing: .9 },
+    versionTitle: { color: palette.text, fontSize: 12, fontWeight: '800', marginTop: 5 },
     settingTop: { flexDirection: 'row', alignItems: 'center', gap: 10 },
     formCard: { borderRadius: 21, padding: 15, gap: 10, backgroundColor: palette.surface, borderWidth: 1, borderColor: palette.line },
     providerCard: { borderRadius: 18, padding: 14, flexDirection: 'row', gap: 11, backgroundColor: '#2257F410', borderWidth: 1, borderColor: '#2257F430' },

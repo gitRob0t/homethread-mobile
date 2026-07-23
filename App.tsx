@@ -1,6 +1,9 @@
 import AuthGate from './src/components/AuthGate';
+import AppErrorBoundary from './src/components/AppErrorBoundary';
+import AutomationRulesScreen from './src/components/AutomationRules';
 import FamilyInboxScreen from './src/components/FamilyInbox';
 import FamilyHub from './src/components/FamilyHub';
+import PrivacyDataScreen from './src/components/PrivacyData';
 import {
   CalendarConnectionScreen,
   FamilyPlacesScreen,
@@ -11,13 +14,25 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import { LinearGradient } from 'expo-linear-gradient';
-import { setAudioModeAsync } from 'expo-audio';
+import {
+  RecordingPresets,
+  requestRecordingPermissionsAsync,
+  setAudioModeAsync,
+  useAudioRecorder,
+  useAudioRecorderState,
+} from 'expo-audio';
 import * as Notifications from 'expo-notifications';
 import * as Speech from 'expo-speech';
 import { StatusBar } from 'expo-status-bar';
 import { ShareIntentProvider, useShareIntentContext } from 'expo-share-intent';
 import { useEffect, useMemo, useState } from 'react';
-import { askCoh, type CohDraft, type CohHistoryItem } from './src/services/cohAssistant';
+import {
+  askCoh,
+  attachmentFromUri,
+  type CohAttachment,
+  type CohDraft,
+  type CohHistoryItem,
+} from './src/services/cohAssistant';
 import { writeApprovedEventToDevice } from './src/services/deviceCalendar';
 import { supabase } from './src/lib/supabase';
 import {
@@ -30,6 +45,15 @@ import {
 import { addGroceryItems, upsertMealPlans } from './src/services/householdOperations';
 import { registerPushDevice, syncBriefingPreferences } from './src/services/pushNotifications';
 import {
+  getHouseholdAction,
+  listBriefingSnapshots,
+  recordMemberActive,
+  recordNotificationOpened,
+  subscribeToClosedLoop,
+  type BriefingSnapshot,
+  type HouseholdAction,
+} from './src/services/householdActions';
+import {
   completeEventFollowUp,
   createEventFollowUp,
   createFamilyChore,
@@ -41,6 +65,7 @@ import {
   listSharedNotes,
   saveFamilyNote,
   sendFamilyMessage,
+  setFamilyChoreCompleted,
   type SharedFollowUp,
   type SharedNote,
   subscribeToHousehold,
@@ -72,16 +97,32 @@ type MoreView =
   | 'Family'
   | 'Notes'
   | 'Recaps'
+  | 'Automations'
   | 'Integrations'
   | 'Calendar Sync'
   | 'Family Places'
   | 'Meals & Groceries'
   | 'Family Inbox'
   | 'Trips'
+  | 'Privacy'
   | 'Settings';
 type ChatChannel = 'family' | 'coh';
 type ChatMessage = { id: string; mine: boolean; author: string; text: string; bot?: boolean; channel?: ChatChannel };
-type BotEvent = { id: string; sourceId?: string; title: string; person: string; day: string; dateISO?: string; time: string; place?: string; reminder?: number; directions?: boolean };
+type BotEvent = {
+  id: string;
+  sourceId?: string;
+  title: string;
+  person: string;
+  day: string;
+  dateISO?: string;
+  time: string;
+  place?: string;
+  reminder?: number;
+  directions?: boolean;
+  provider?: 'coho' | 'google' | 'outlook' | 'apple' | string;
+  sourceCalendarId?: string;
+  recurrenceRule?: string;
+};
 type Chore = { id: string; title: string; owner: string; due: string; done: boolean; points: number; rewardId: string; rewardValue: number; color: string };
 type BotField = 'title' | 'day' | 'time' | 'meridiem' | 'place' | 'directions' | 'reminder' | 'confirm';
 type BotDraft = { title?: string; person?: string; day?: string; dateISO?: string; time?: string; meridiem?: 'AM' | 'PM'; place?: string; reminder?: number; directions?: boolean; awaiting: BotField };
@@ -121,6 +162,8 @@ Notifications.setNotificationHandler({
 
 function CohoApp() {
   const { hasShareIntent, shareIntent, resetShareIntent, error: shareError } = useShareIntentContext();
+  const voiceRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
+  const voiceRecorderState = useAudioRecorderState(voiceRecorder, 250);
   const systemScheme = useColorScheme();
   const [dark, setDark] = useState(systemScheme === 'dark');
   const [tab, setTab] = useState<Tab>('Today');
@@ -148,6 +191,7 @@ function CohoApp() {
   const [cohConversationId, setCohConversationId] = useState<string | null>(null);
   const [cohHistory, setCohHistory] = useState<CohHistoryItem[]>([]);
   const [cohThinking, setCohThinking] = useState(false);
+  const [voiceSending, setVoiceSending] = useState(false);
   const [connected, setConnected] = useState<Record<string, boolean>>({});
   const [sharePreviewOpen, setSharePreviewOpen] = useState(false);
   const [sharedDraft, setSharedDraft] = useState('');
@@ -156,6 +200,10 @@ function CohoApp() {
   const [householdId, setHouseholdId] = useState<string | null>(null);
   const [householdName, setHouseholdName] = useState('Your family');
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  const [initialInboxItemId, setInitialInboxItemId] = useState<string | null>(null);
+  const [initialRecapId, setInitialRecapId] = useState<string | null>(null);
+  const [briefingSnapshots, setBriefingSnapshots] = useState<BriefingSnapshot[]>([]);
+  const [secondUserWelcomeOpen, setSecondUserWelcomeOpen] = useState(false);
 
   useEffect(() => {
     AsyncStorage.getItem('homethread-theme').then((saved) => {
@@ -196,19 +244,32 @@ function CohoApp() {
 
   useEffect(() => {
     const openNotification = (response: Notifications.NotificationResponse | null) => {
-      const screen = response?.notification.request.content.data?.screen;
-      if (screen === 'Recaps') {
-        setMoreView('Recaps');
-        setTab('More');
+      const data = response?.notification.request.content.data as Record<string, unknown> | undefined;
+      if (!data) return;
+      if (typeof data.notificationId === 'string') {
+        void recordNotificationOpened(data.notificationId, { source: 'push', platform: Platform.OS })
+          .catch(() => undefined);
       }
-      if (screen === 'Family Inbox') {
-        setMoreView('Family Inbox');
-        setTab('More');
+      if (typeof data.deepLink === 'string') {
+        void openDeepLink(data.deepLink);
+        return;
       }
+      openLegacyNotification(data);
     };
     Notifications.getLastNotificationResponseAsync().then(openNotification).catch(() => undefined);
     const subscription = Notifications.addNotificationResponseReceivedListener(openNotification);
-    return () => subscription.remove();
+    Linking.getInitialURL().then((url) => {
+      if (url && /^(coho|homethread):\/\//i.test(url) && !/\/invite\//i.test(url)) {
+        void openDeepLink(url);
+      }
+    }).catch(() => undefined);
+    const linkSubscription = Linking.addEventListener('url', ({ url }) => {
+      if (!/\/invite\//i.test(url)) void openDeepLink(url);
+    });
+    return () => {
+      subscription.remove();
+      linkSubscription.remove();
+    };
   }, []);
 
   useEffect(() => {
@@ -228,14 +289,23 @@ function CohoApp() {
         setHouseholdId(household.id);
         setHouseholdName(household.name || 'Your family');
         setCurrentUserId(authData.user.id);
+        const membershipRole = memberships[0]?.role;
+        if (membershipRole && membershipRole !== 'owner') {
+          const welcomeSeen = await AsyncStorage.getItem(`coho-member-welcome:${authData.user.id}:${household.id}`);
+          if (!welcomeSeen && active) setSecondUserWelcomeOpen(true);
+        }
         await reloadSharedData(household.id, authData.user.id);
         const notificationPermission = await Notifications.getPermissionsAsync();
         if (notificationPermission.granted) {
           await registerPushDevice(authData.user.id, household.id).catch(() => undefined);
         }
+        await recordMemberActive(household.id).catch(() => undefined);
         if (!active) return;
         removeSubscriptions = (['messages', 'events', 'chores', 'event_follow_ups'] as const).map((table) =>
           subscribeToHousehold(table, household.id, () => void reloadSharedData(household.id, authData.user!.id)),
+        );
+        removeSubscriptions.push(
+          subscribeToClosedLoop(household.id, () => void reloadSharedData(household.id, authData.user!.id)),
         );
       } catch {
         showNotice('Coho is offline. Changes will stay on this iPhone until the household reconnects.');
@@ -251,12 +321,13 @@ function CohoApp() {
 
   async function reloadSharedData(targetHousehold = householdId, targetUser = currentUserId) {
     if (!targetHousehold || !targetUser) return;
-    const [sharedMessages, sharedEvents, sharedChores, sharedFollowUps, householdPeople] = await Promise.all([
+    const [sharedMessages, sharedEvents, sharedChores, sharedFollowUps, householdPeople, snapshots] = await Promise.all([
       listSharedMessages(targetHousehold),
       listSharedEvents(targetHousehold),
       listSharedChores(targetHousehold),
       listEventFollowUps(targetHousehold),
       listHouseholdPeople(targetHousehold),
+      listBriefingSnapshots(targetHousehold),
     ]);
     setMessages((current) => [
       ...current.filter((message) => messageChannel(message) === 'coh'),
@@ -265,6 +336,7 @@ function CohoApp() {
     setBotEvents(sharedEvents.map((event: any) => cloudEvent(event)));
     setChores(sharedChores.map((chore: any, index: number) => cloudChore(chore, index)));
     setFollowUps(sharedFollowUps);
+    setBriefingSnapshots(snapshots);
     const nextProfiles = householdPeople.map((person, index) => personToProfile(person, index));
     setProfiles(nextProfiles);
     setRewardMember((current) => nextProfiles.some((profile) => profile.name === current) ? current : nextProfiles[0]?.name ?? '');
@@ -378,27 +450,53 @@ function CohoApp() {
     resetShareIntent();
   }
 
-  function sendSharedItemToCoh() {
+  async function sendSharedItemToCoh() {
     const incoming = shareIntent as any;
-    const hasImage = Boolean(incoming?.files?.length);
+    const sharedFiles = Array.isArray(incoming?.files) ? incoming.files.slice(0, 4) : [];
     const text = sharedDraft.trim();
     setSharePreviewOpen(false);
-    resetShareIntent();
     setTab('Chat');
     setChatMode('coh');
-    if (!text) {
-      addBotMessage(hasImage
-        ? 'I received the screenshot, but image reading is not connected yet. Type the event details here and I’ll help add them.'
-        : 'I did not receive any readable text. Nothing was saved.');
-      return;
+    setCohThinking(true);
+    try {
+      const attachments = await Promise.all(sharedFiles.map((file: any) =>
+        attachmentFromUri({
+          uri: file.path,
+          name: file.fileName,
+          mimeType: file.mimeType,
+          size: file.size,
+        }),
+      ));
+      const promptText = text || (attachments.length
+        ? '@coh Read this attachment, tell me what it means for our family, and turn anything actionable into proposed events or tasks.'
+        : '');
+      if (!promptText) {
+        addBotMessage('I did not receive readable text or an attachment. Nothing was saved.');
+        return;
+      }
+      const prompt = promptText.match(/^\s*(@coh|hey coh|@bot|hey bot)/i)
+        ? promptText
+        : `@coh ${promptText}`;
+      setMessages((current) => [...current, {
+        id: `shared-${Date.now()}`,
+        mine: true,
+        author: 'You',
+        text: attachments.length ? `${prompt}\n📎 ${attachments.map((item) => item.name).join(', ')}` : prompt,
+        channel: 'coh',
+      }]);
+      await handleBotMessage(prompt, attachments);
+      setSharedDraft('');
+    } catch (nextError) {
+      addBotMessage(nextError instanceof Error
+        ? nextError.message
+        : 'I could not read that attachment. Nothing was saved.');
+    } finally {
+      resetShareIntent();
+      setCohThinking(false);
     }
-    const prompt = text.match(/^\s*(@coh|hey coh|@bot|hey bot)/i) ? text : `@coh ${text}`;
-    setMessages((current) => [...current, { id: `shared-${Date.now()}`, mine: true, author: 'You', text: prompt, channel: 'coh' }]);
-    setTimeout(() => void handleBotMessage(prompt), 50);
-    setSharedDraft('');
   }
 
-  async function handleBotMessage(text: string) {
+  async function handleBotMessage(text: string, attachments: CohAttachment[] = []) {
     const normalized = text.trim().toLowerCase();
     const directlyInvoked = normalized.startsWith('@coh') || normalized.startsWith('hey coh') || normalized.startsWith('@bot') || normalized.startsWith('hey bot');
     if (!directlyInvoked && !botDraft && !cohConversationId) return;
@@ -412,12 +510,38 @@ function CohoApp() {
         householdId,
         timezone,
         history: cohHistory,
+        attachments,
       });
       setCohConversationId(response.conversationId);
       setCohHistory((current) => [...current, { role: 'user' as const, content: text }, { role: 'assistant' as const, content: response.reply }].slice(-16));
       addBotMessage(response.reply);
 
-      if (response.status === 'confirmed' && response.proposed_action.type === 'create_event') {
+      if (response.status === 'confirmed' && response.action?.targetId) {
+        if (householdId && currentUserId) {
+          await reloadSharedData(householdId, currentUserId);
+        }
+        const targetLabel = response.action.targetTable === 'events'
+          ? 'the family calendar'
+          : response.action.targetTable === 'chores'
+            ? 'shared chores'
+            : response.action.targetTable === 'notes'
+              ? 'family notes'
+              : response.action.targetTable === 'grocery_items'
+                ? 'the grocery list'
+                : response.action.targetTable === 'meal_plans'
+                  ? 'the family meal plan'
+                  : 'Coho';
+        addBotMessage(`Done — it’s now in ${targetLabel}.`);
+        if (response.action.targetTable === 'events') setTab('Calendar');
+        if (response.action.targetTable === 'chores') setTab('Chores');
+        if (response.action.targetTable === 'notes') { setMoreView('Notes'); setTab('More'); }
+        if (response.action.targetTable === 'grocery_items' || response.action.targetTable === 'meal_plans') {
+          setMoreView('Meals & Groceries');
+          setTab('More');
+        }
+        setCohConversationId(null);
+        setCohHistory([]);
+      } else if (response.status === 'confirmed' && response.proposed_action.type === 'create_event') {
         const event = eventFromCohDraft(response.draft);
         if (event) {
           const result = await persistApprovedEvent(event);
@@ -498,14 +622,57 @@ function CohoApp() {
         setCohHistory([]);
       }
       return;
-    } catch {
-      // The local conversation engine keeps Coh useful while the remote service
-      // is unavailable. The next message retries the remote service automatically.
+    } catch (error) {
+      const detail = error instanceof Error && error.message
+        ? ` (${error.message})`
+        : '';
+      addBotMessage(`I couldn’t reach the secure Coh service, so I did not create anything. Your request is still here—try again in a moment.${detail}`);
+      return;
     } finally {
       setCohThinking(false);
     }
+  }
 
-    handleLocalBotMessage(text);
+  async function toggleVoiceRequest() {
+    if (voiceSending || cohThinking) return;
+    if (voiceRecorderState.isRecording) {
+      setVoiceSending(true);
+      try {
+        await voiceRecorder.stop();
+        await setAudioModeAsync({ allowsRecording: false, playsInSilentMode: true });
+        if (!voiceRecorder.uri) throw new Error('The voice note could not be saved.');
+        const attachment = await attachmentFromUri({
+          uri: voiceRecorder.uri,
+          name: `coh-voice-${Date.now()}.m4a`,
+          mimeType: 'audio/m4a',
+        });
+        const prompt = '@coh Listen to this voice note and help me finish the household action.';
+        setMessages((current) => [...current, {
+          id: `voice-${Date.now()}`,
+          mine: true,
+          author: 'You',
+          text: '🎙️ Voice request',
+          channel: 'coh',
+        }]);
+        await handleBotMessage(prompt, [attachment]);
+      } catch (nextError) {
+        addBotMessage(nextError instanceof Error ? nextError.message : 'I could not read that voice note.');
+      } finally {
+        setVoiceSending(false);
+      }
+      return;
+    }
+
+    const permission = await requestRecordingPermissionsAsync();
+    if (!permission.granted) {
+      showNotice('Microphone permission is needed only when you choose to speak to Coh.');
+      return;
+    }
+    await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
+    await voiceRecorder.prepareToRecordAsync();
+    voiceRecorder.record();
+    setChatMode('coh');
+    showNotice('Listening… tap the microphone again when you’re done');
   }
 
   function handleLocalBotMessage(text: string) {
@@ -607,6 +774,144 @@ function CohoApp() {
     setSelectedEvent(event);
     setTab('Calendar');
     setMoreView('Menu');
+  }
+
+  function openLegacyNotification(data: Record<string, unknown>) {
+    const screen = data.screen;
+    if (screen === 'Recaps') {
+      setInitialRecapId(null);
+      setMoreView('Recaps');
+      setTab('More');
+    } else if (screen === 'Family Inbox') {
+      setInitialInboxItemId(typeof data.itemId === 'string' ? data.itemId : null);
+      setMoreView('Family Inbox');
+      setTab('More');
+    } else if (screen === 'Chat') {
+      setChatMode('family');
+      setTab('Chat');
+    }
+  }
+
+  async function openActionTarget(action: HouseholdAction) {
+    if (!action.target_id) {
+      if (action.source_kind === 'family_inbox' && action.source_id) {
+        setInitialInboxItemId(action.source_id);
+        setMoreView('Family Inbox');
+        setTab('More');
+      } else {
+        setChatMode('coh');
+        setTab('Chat');
+      }
+      return;
+    }
+    if (action.target_table === 'events') {
+      const { data } = await supabase.from('events').select('*').eq('id', action.target_id).maybeSingle();
+      if (data) openCalendarEvent(cloudEvent(data));
+      else { setCalendarFocusDate(action.starts_at?.slice(0, 10) ?? null); setTab('Calendar'); }
+      return;
+    }
+    if (action.target_table === 'chores') {
+      if (action.target_id) await openChoreById(action.target_id);
+      else setTab('Chores');
+      return;
+    }
+    if (action.target_table === 'notes') {
+      setMoreView('Notes');
+      setTab('More');
+      return;
+    }
+    if (action.target_table === 'event_follow_ups') {
+      setMoreView('Recaps');
+      setTab('More');
+      return;
+    }
+    if (action.target_table === 'grocery_items' || action.target_table === 'meal_plans') {
+      setMoreView('Meals & Groceries');
+      setTab('More');
+    }
+  }
+
+  async function openChoreById(choreId: string) {
+    setTab('Chores');
+    const existing = chores.find((chore) => chore.id === choreId);
+    if (existing) {
+      setEditingChore(existing);
+      return;
+    }
+    const { data } = await supabase
+      .from('chores')
+      .select('id, title, assigned_to, due_at, status, reward_type, reward_value, reward_label, assignee:profiles!chores_assigned_to_fkey(display_name)')
+      .eq('id', choreId)
+      .maybeSingle();
+    if (data) setEditingChore(cloudChore(data, chores.length));
+  }
+
+  async function openDeepLink(url: string) {
+    const calendarConnection = url.match(
+      /^(?:coho|homethread):\/\/calendar-connected\/(google|outlook)(?:[/?#]|$)/i,
+    );
+    if (calendarConnection) {
+      const label = calendarConnection[1].toLowerCase() === 'google'
+        ? 'Google Calendar'
+        : 'Outlook';
+      setConnected((current) => ({ ...current, [label]: true }));
+      setMoreView('Calendar Sync');
+      setTab('More');
+      showNotice(`${label} connected. Coho is completing the first sync.`);
+      return;
+    }
+    const match = url.match(/^(?:coho|homethread):\/\/(action|event|chore|follow-up|message|inbox|recap|coh|automations)\/([^/?#]+)/i)
+      ?? url.match(/^https:\/\/(?:app\.)?coho\.ai\/(action|event|chore|follow-up|message|inbox|recap|coh|automations)\/([^/?#]+)/i);
+    if (!match) return;
+    const [, kind, id] = match;
+    if (kind.toLowerCase() === 'action') {
+      const action = await getHouseholdAction(id).catch(() => null);
+      if (action) await openActionTarget(action);
+      return;
+    }
+    if (kind.toLowerCase() === 'event') {
+      const { data } = await supabase.from('events').select('*').eq('id', id).maybeSingle();
+      if (data) openCalendarEvent(cloudEvent(data));
+      return;
+    }
+    if (kind.toLowerCase() === 'chore') {
+      await openChoreById(id);
+      return;
+    }
+    if (kind.toLowerCase() === 'follow-up' || kind.toLowerCase() === 'recap') {
+      setInitialRecapId(
+        kind.toLowerCase() === 'recap'
+          && !['daily', 'week-ahead', 'follow-up', 'latest'].includes(id.toLowerCase())
+          ? id
+          : null,
+      );
+      setMoreView('Recaps');
+      setTab('More');
+      return;
+    }
+    if (kind.toLowerCase() === 'message') {
+      setChatMode('family');
+      setTab('Chat');
+      return;
+    }
+    if (kind.toLowerCase() === 'coh') {
+      setChatMode('coh');
+      setMessageDraft(id === 'meal-plan'
+        ? '@coh Help me plan our family meals for the next seven days, then build the grocery list.'
+        : '@coh ');
+      setTab('Chat');
+      return;
+    }
+    if (kind.toLowerCase() === 'automations') {
+      setMoreView('Automations');
+      setTab('More');
+      return;
+    }
+    if (kind.toLowerCase() === 'inbox') {
+      setInitialInboxItemId(id);
+      setMoreView('Family Inbox');
+      setTab('More');
+    }
   }
 
   async function markEventForFollowUp(event: BotEvent) {
@@ -712,10 +1017,7 @@ function CohoApp() {
     setChores((items) => items.map((item) => item.id === choreId ? { ...item, done } : item));
     if (!householdId) return;
     try {
-      await updateFamilyChore(choreId, {
-        status: done ? 'completed' : 'open',
-        completed_at: done ? new Date().toISOString() : null,
-      });
+      await setFamilyChoreCompleted(choreId, done);
     } catch {
       setChores((items) => items.map((item) => item.id === choreId ? { ...item, done: !done } : item));
       showNotice('The chore could not be updated for the family.');
@@ -742,7 +1044,7 @@ function CohoApp() {
     }
   }
 
-  async function speakDailySync() {
+  async function speakDailySync(snapshotSummary?: string) {
     const openChores = chores.filter((item) => !item.done);
     const nextEvents = botEvents.slice(-4);
     const eventSummary = nextEvents.length
@@ -754,7 +1056,7 @@ function CohoApp() {
     try {
       await setAudioModeAsync({ playsInSilentMode: true });
       await Speech.stop();
-      Speech.speak(`Here is your Coho daily sync. ${eventSummary} ${choreSummary}`, {
+      Speech.speak(snapshotSummary || `Here is your Coho daily sync. ${eventSummary} ${choreSummary}`, {
         language: 'en-US',
         rate: 0.92,
         pitch: 1,
@@ -766,11 +1068,24 @@ function CohoApp() {
     }
   }
 
+  async function refreshDailySync() {
+    if (!householdId || !currentUserId) {
+      showNotice('Reconnect the household to refresh this sync.');
+      return;
+    }
+    try {
+      await reloadSharedData(householdId, currentUserId);
+      showNotice('Daily sync refreshed with the latest family activity');
+    } catch {
+      showNotice('The daily sync could not refresh. The last saved version is still available.');
+    }
+  }
+
   async function enableNotifications() {
     const permission = await Notifications.requestPermissionsAsync();
     if (permission.granted) {
       await Notifications.scheduleNotificationAsync({
-        content: { title: 'Coho is ready', body: 'Family reminders and daily recaps are now enabled.', sound: 'default' },
+        content: { title: 'Coho is ready', body: 'Family reminders and daily recaps are now enabled.', sound: 'default', data: { screen: 'Recaps', deepLink: 'coho://recap/latest' } },
         trigger: null,
       });
       await scheduleChiefNotifications(chiefPrefs);
@@ -784,6 +1099,28 @@ function CohoApp() {
       showNotice('iOS notifications enabled');
     } else {
       showNotice('Notification permission was not enabled');
+    }
+  }
+
+  async function finishSecondUserWelcome(destination: 'family' | 'coh' | 'today' = 'today') {
+    if (currentUserId && householdId) {
+      await AsyncStorage.setItem(`coho-member-welcome:${currentUserId}:${householdId}`, 'complete');
+      await supabase.from('member_onboarding_state').upsert({
+        household_id: householdId,
+        user_id: currentUserId,
+        tour_completed: true,
+        updated_at: new Date().toISOString(),
+      }, { onConflict: 'household_id,user_id' });
+    }
+    setSecondUserWelcomeOpen(false);
+    if (destination === 'family') {
+      setChatMode('family');
+      setTab('Chat');
+    } else if (destination === 'coh') {
+      setChatMode('coh');
+      setTab('Chat');
+    } else {
+      setTab('Today');
     }
   }
 
@@ -815,13 +1152,36 @@ function CohoApp() {
         bio: profile.bio,
         role: profile.role,
       });
+      if (profile.linkedUserId === currentUserId) {
+        await Promise.all([
+          supabase.from('profiles').update({
+            display_name: profile.name.trim(),
+            date_of_birth: profile.dob || null,
+            bio: profile.bio.trim() || null,
+            updated_at: new Date().toISOString(),
+          }).eq('id', currentUserId),
+          supabase.from('member_onboarding_state').upsert({
+            household_id: householdId,
+            user_id: currentUserId,
+            profile_completed: true,
+            last_active_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          }, { onConflict: 'household_id,user_id' }),
+        ]);
+      }
       if (profile.avatarBase64) {
-        await uploadHouseholdPersonAvatar({
+        const avatarPath = await uploadHouseholdPersonAvatar({
           householdId,
           personId,
           base64: profile.avatarBase64,
           mimeType: profile.avatarMime,
         });
+        if (profile.linkedUserId === currentUserId) {
+          await supabase.from('profiles').update({
+            avatar_url: avatarPath,
+            updated_at: new Date().toISOString(),
+          }).eq('id', currentUserId);
+        }
       }
       await reloadSharedData(householdId, currentUserId);
       setEditingProfile(null);
@@ -864,21 +1224,21 @@ function CohoApp() {
     const ids: string[] = [];
     if (prefs.daily && prefs.push) {
       const { hour, minute } = parseClock(prefs.dailyTime);
-      ids.push(await Notifications.scheduleNotificationAsync({ content: { title: 'Your Chief of Home briefing', body: 'Appointments, chores, follow-ups, and what your family needs today.', sound: 'default' }, trigger: { type: Notifications.SchedulableTriggerInputTypes.DAILY, hour, minute } }));
+      ids.push(await Notifications.scheduleNotificationAsync({ content: { title: 'Your Chief of Home briefing', body: 'Appointments, chores, follow-ups, and what your family needs today.', sound: 'default', data: { screen: 'Recaps', deepLink: 'coho://recap/daily' } }, trigger: { type: Notifications.SchedulableTriggerInputTypes.DAILY, hour, minute } }));
     }
     if (prefs.weekAhead && prefs.push) {
       const { hour, minute } = parseClock(prefs.weekAheadTime);
-      ids.push(await Notifications.scheduleNotificationAsync({ content: { title: 'Your full week ahead', body: 'Open Coho for the family schedule, preparation list, and conflicts.', sound: 'default' }, trigger: { type: Notifications.SchedulableTriggerInputTypes.WEEKLY, weekday: weekdayNumber(prefs.weekAheadDay), hour, minute } }));
+      ids.push(await Notifications.scheduleNotificationAsync({ content: { title: 'Your full week ahead', body: 'Open Coho for the family schedule, preparation list, and conflicts.', sound: 'default', data: { screen: 'Recaps', deepLink: 'coho://recap/week-ahead' } }, trigger: { type: Notifications.SchedulableTriggerInputTypes.WEEKLY, weekday: weekdayNumber(prefs.weekAheadDay), hour, minute } }));
     }
     if (prefs.followUp && prefs.push) {
       const { hour, minute } = parseClock(prefs.followUpTime);
-      ids.push(await Notifications.scheduleNotificationAsync({ content: { title: 'Weekly follow-up', body: 'A few appointments and conversations may still need action.', sound: 'default' }, trigger: { type: Notifications.SchedulableTriggerInputTypes.WEEKLY, weekday: weekdayNumber(prefs.followUpDay), hour, minute } }));
+      ids.push(await Notifications.scheduleNotificationAsync({ content: { title: 'Weekly follow-up', body: 'A few appointments and conversations may still need action.', sound: 'default', data: { screen: 'Recaps', deepLink: 'coho://recap/follow-up' } }, trigger: { type: Notifications.SchedulableTriggerInputTypes.WEEKLY, weekday: weekdayNumber(prefs.followUpDay), hour, minute } }));
     }
     await AsyncStorage.setItem('kincue-chief-notification-ids', JSON.stringify(ids));
   }
 
   const title = tab === 'More' && moreView !== 'Menu' ? moreView : tab;
-  const openRecaps = () => { setMoreView('Recaps'); setTab('More'); };
+  const openRecaps = () => { setInitialRecapId(null); setMoreView('Recaps'); setTab('More'); };
   const openCohPrompt = (prompt: string) => {
     setChatMode('coh');
     setMessageDraft(prompt);
@@ -924,19 +1284,24 @@ function CohoApp() {
           {tab === 'Today' && <TodayScreen styles={styles} events={botEvents} chores={chores} onCalendar={() => setTab('Calendar')} onRecap={openRecaps} onOpenEvent={openCalendarEvent} onChores={() => setTab('Chores')} />}
           {tab === 'Calendar' && <CalendarScreen theme={theme} styles={styles} botEvents={botEvents} focusDate={calendarFocusDate} onOpenEvent={setSelectedEvent} onAction={showNotice} onManage={() => { setMoreView('Integrations'); setTab('More'); }} />}
           {tab === 'Chores' && <ChoresScreen styles={styles} chores={chores} memberNames={profiles.map((profile) => profile.name)} rewardMember={rewardMember} setRewardMember={setRewardMember} selectedRewards={selectedRewards} onConfigure={setEditingChore} onAdd={() => { setQuickAddType('Chore'); setQuickAddOpen(true); }} onSelectReward={(member: string, reward: string) => { const next = { ...selectedRewards, [member]: reward }; setSelectedRewards(next); AsyncStorage.setItem('coho-reward-goals', JSON.stringify(next)); showNotice(`${member} picked a new reward goal`); }} onToggle={toggleChore} />}
-          {tab === 'Chat' && <ChatScreen styles={styles} messages={messages} mode={chatMode} setMode={setChatMode} draft={messageDraft} setDraft={setMessageDraft} onSend={sendMessage} onAdd={() => setQuickAddOpen(true)} cohThinking={cohThinking} />}
+          {tab === 'Chat' && <ChatScreen styles={styles} messages={messages} mode={chatMode} setMode={setChatMode} draft={messageDraft} setDraft={setMessageDraft} onSend={sendMessage} onAdd={() => setQuickAddOpen(true)} onVoice={toggleVoiceRequest} voiceRecording={voiceRecorderState.isRecording} voiceSending={voiceSending} cohThinking={cohThinking} />}
           {tab === 'More' && moreView === 'Menu' && <MoreMenu styles={styles} setView={setMoreView} />}
           {tab === 'More' && moreView === 'Chief of Home' && <ChiefOfHomeScreen styles={styles} prefs={chiefPrefs} memberNames={profiles.map((profile) => profile.name)} setPrefs={saveChiefPreferences} onActivate={activateChiefOfHome} />}
           {tab === 'More' && moreView === 'Family' && <FamilyProfilesScreen styles={styles} profiles={profiles} onInvite={() => setFamilyHubOpen(true)} onEdit={setEditingProfile} onAdd={() => setEditingProfile({ id: `new-${Date.now()}`, name: '', dob: '', bio: '', role: 'Family member', color: '#DCE7FF', ink: '#2257F4' })} />}
           {tab === 'More' && moreView === 'Notes' && <NotesScreen styles={styles} householdId={householdId} userId={currentUserId} onAction={showNotice} />}
-          {tab === 'More' && moreView === 'Recaps' && <RecapsScreen styles={styles} onAction={showNotice} onListen={speakDailySync} onOpenEvent={openCalendarEvent} onCompleteFollowUp={completeFollowUpItem} events={botEvents} chores={chores} messages={messages} followUps={followUps} />}
+          {tab === 'More' && moreView === 'Recaps' && <RecapsScreen styles={styles} onRefresh={refreshDailySync} onListen={speakDailySync} onOpenEvent={openCalendarEvent} onCompleteFollowUp={completeFollowUpItem} events={botEvents} chores={chores} messages={messages} followUps={followUps} snapshots={briefingSnapshots} initialSnapshotId={initialRecapId} />}
+          {tab === 'More' && moreView === 'Automations' && <AutomationRulesScreen dark={dark} householdId={householdId} userId={currentUserId} onNotice={showNotice} />}
           {tab === 'More' && moreView === 'Integrations' && <IntegrationsScreen styles={styles} connected={connected} onConnect={handleIntegration} />}
-          {tab === 'More' && moreView === 'Calendar Sync' && <CalendarConnectionScreen dark={dark} householdId={householdId} userId={currentUserId} onNotice={showNotice} onConnected={() => setConnected((current) => ({ ...current, 'Apple Calendar': true }))} />}
-          {tab === 'More' && moreView === 'Family Inbox' && <FamilyInboxScreen dark={dark} householdId={householdId} householdName={householdName} userId={currentUserId} onNotice={showNotice} onAskCoh={openCohPrompt} />}
+          {tab === 'More' && moreView === 'Calendar Sync' && <CalendarConnectionScreen dark={dark} householdId={householdId} userId={currentUserId} onNotice={showNotice} onConnected={(source) => setConnected((current) => ({
+            ...current,
+            [source === 'google' ? 'Google Calendar' : source === 'outlook' ? 'Outlook' : 'Apple Calendar']: true,
+          }))} />}
+          {tab === 'More' && moreView === 'Family Inbox' && <FamilyInboxScreen dark={dark} householdId={householdId} householdName={householdName} userId={currentUserId} onNotice={showNotice} onAskCoh={openCohPrompt} onOpenAction={openActionTarget} initialItemId={initialInboxItemId} />}
           {tab === 'More' && moreView === 'Family Places' && <FamilyPlacesScreen dark={dark} householdId={householdId} userId={currentUserId} onNotice={showNotice} />}
           {tab === 'More' && moreView === 'Meals & Groceries' && <FoodHubScreen dark={dark} householdId={householdId} userId={currentUserId} onNotice={showNotice} onAskCoh={openCohPrompt} />}
           {tab === 'More' && moreView === 'Trips' && <TravelHubScreen dark={dark} householdId={householdId} userId={currentUserId} onNotice={showNotice} onAskCoh={openCohPrompt} />}
-          {tab === 'More' && moreView === 'Settings' && <SettingsScreen styles={styles} dark={dark} onTheme={toggleTheme} onNotifications={enableNotifications} onFamily={() => setMoreView('Family')} onAction={showNotice} profiles={profiles} />}
+          {tab === 'More' && moreView === 'Privacy' && <PrivacyDataScreen dark={dark} householdId={householdId} onNotice={showNotice} />}
+          {tab === 'More' && moreView === 'Settings' && <SettingsScreen styles={styles} dark={dark} onTheme={toggleTheme} onNotifications={enableNotifications} onFamily={() => setMoreView('Family')} onPrivacy={() => setMoreView('Privacy')} profiles={profiles} />}
         </View>
 
         <BottomTabs tab={tab} setTab={(next: Tab) => { setTab(next); if (next !== 'More') setMoreView('Menu'); }} theme={theme} styles={styles} />
@@ -976,6 +1341,15 @@ function CohoApp() {
       <Modal visible={familyHubOpen} animationType="slide" onRequestClose={() => setFamilyHubOpen(false)}><SafeAreaView style={styles.safeArea}><View style={styles.fullModalHeader}><View><Text style={styles.eyebrow}>HOUSEHOLD ACCESS</Text><Text style={styles.modalTitle}>Invite your family</Text></View><Pressable onPress={() => setFamilyHubOpen(false)} style={styles.iconButton}><Ionicons name="close" size={21} color={styles.iconColor.color} /></Pressable></View><FamilyHub /></SafeAreaView></Modal>
       <EventDetailModal event={selectedEvent} styles={styles} dark={dark} onClose={() => setSelectedEvent(null)} onFollowUp={markEventForFollowUp} />
       <ChoreRewardModal chore={editingChore} styles={styles} dark={dark} onClose={() => setEditingChore(null)} onSave={saveChoreReward} />
+      <SecondUserWelcomeModal
+        visible={secondUserWelcomeOpen}
+        householdName={householdName}
+        styles={styles}
+        dark={dark}
+        notificationsEnabled={connected['iOS Notifications'] === true}
+        onEnableNotifications={enableNotifications}
+        onContinue={finishSecondUserWelcome}
+      />
     </SafeAreaView>
   );
 }
@@ -1016,7 +1390,7 @@ function TodayScreen({ styles, events, chores, onCalendar, onRecap, onOpenEvent,
     <Pressable onPress={onRecap}><LinearGradient colors={['#2257F4', '#7047EE']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={styles.recapCard}>
       <View style={styles.recapIcon}><Ionicons name="sparkles" size={21} color="#fff" /></View><View style={styles.recapCopy}><Text style={styles.recapLabel}>COHO DAILY</Text><Text style={styles.recapTitle}>Your live family sync</Text><Text style={styles.recapText}>{events.length} shared event{events.length === 1 ? '' : 's'} and {openChores.length} open chore{openChores.length === 1 ? '' : 's'}.</Text></View><Ionicons name="chevron-forward" size={20} color="#fff" />
     </LinearGradient></Pressable>
-    <Text style={styles.sectionTitle}>Coming up</Text>{upcomingEvents.length === 0 ? <Text style={styles.muted}>No upcoming events yet.</Text> : upcomingEvents.map((event: BotEvent) => <Pressable key={event.id} onPress={() => onOpenEvent(event)} style={styles.upcomingRow}><View style={[styles.dateTile, { borderColor: '#2257F4' }]}><Text style={[styles.dateMonth, { color: '#2257F4' }]}>{event.dateISO ? new Date(`${event.dateISO}T12:00:00`).toLocaleDateString(undefined, { month: 'short' }).toUpperCase() : 'NEXT'}</Text><Text style={[styles.dateNumber, { color: '#2257F4' }]}>{event.dateISO ? Number(event.dateISO.slice(-2)) : '•'}</Text></View><View style={styles.flex}><Text style={styles.upcomingTime}>{event.time}</Text><Text style={styles.upcomingTitle}>{event.title}</Text></View><Ionicons name="chevron-forward" size={18} color="#2257F4" /></Pressable>)}
+    <Text style={styles.sectionTitle}>Coming up</Text>{upcomingEvents.length === 0 ? <Text style={styles.muted}>No upcoming events yet.</Text> : upcomingEvents.map((event: BotEvent) => <Pressable key={event.id} onPress={() => onOpenEvent(event)} style={styles.upcomingRow}><View style={[styles.dateTile, { borderColor: '#2257F4' }]}><Text style={[styles.dateMonth, { color: '#2257F4' }]}>{event.dateISO ? new Date(`${event.dateISO}T12:00:00`).toLocaleDateString(undefined, { month: 'short' }).toUpperCase() : 'NEXT'}</Text><Text style={[styles.dateNumber, { color: '#2257F4' }]}>{event.dateISO ? Number(event.dateISO.slice(-2)) : '•'}</Text></View><View style={styles.flex}><Text style={styles.upcomingTime}>{event.time}{event.provider && event.provider !== 'coho' ? ` · ${calendarSourceLabel(event.provider)}` : ''}</Text><Text style={styles.upcomingTitle}>{event.title}</Text></View><Ionicons name="chevron-forward" size={18} color="#2257F4" /></Pressable>)}
   </ScrollView>;
 }
 
@@ -1031,7 +1405,7 @@ function CalendarScreen({ styles, botEvents, focusDate, onOpenEvent, onAction, o
   const days = Array.from({ length: 7 }, (_, index) => addDays(weekStart, index));
   const visibleBotEvents = botEvents.filter((event: BotEvent) => !event.dateISO || event.dateISO === localDateKey(selected));
   const period = `${days[0].toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}–${days[6].toLocaleDateString(undefined, { month: days[0].getMonth() === days[6].getMonth() ? undefined : 'short', day: 'numeric' })}`;
-  return <ScrollView contentContainerStyle={styles.scrollContent}><View style={styles.calendarTop}><Pressable onPress={() => setSelected(addDays(selected, -7))} style={styles.smallButton}><Ionicons name="chevron-back" size={18} color={styles.iconColor.color} /></Pressable><Pressable onPress={() => setSelected(startOfDay(new Date()))}><Text style={styles.calendarPeriod}>{period}</Text><Text style={styles.calendarTodayLink}>Tap for today</Text></Pressable><Pressable onPress={() => setSelected(addDays(selected, 7))} style={styles.smallButton}><Ionicons name="chevron-forward" size={18} color={styles.iconColor.color} /></Pressable></View><View style={styles.weekRow}>{days.map((day) => { const active = sameDay(day, selected); return <Pressable key={day.toISOString()} onPress={() => setSelected(day)} style={[styles.dayBubble, active && styles.dayBubbleActive]}><Text style={[styles.dayLabel, active && styles.dayTextActive]}>{day.toLocaleDateString(undefined, { weekday: 'short' }).toUpperCase()}</Text><Text style={[styles.dayNumber, active && styles.dayTextActive]}>{day.getDate()}</Text></Pressable>; })}</View><Text style={styles.sectionTitle}>{selected.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' })}</Text>{visibleBotEvents.length === 0 && <View style={styles.emptyChat}><Ionicons name="calendar-clear-outline" size={28} color="#2257F4" /><Text style={styles.settingTitle}>Nothing scheduled</Text><Text style={styles.muted}>Ask Coh to add something or choose another day.</Text></View>}{visibleBotEvents.map((event: BotEvent) => <Pressable key={event.id} onPress={() => onOpenEvent(event)} style={styles.timelineRow}><View style={[styles.timelineLine, { backgroundColor: '#7047EE' }]} /><Text style={styles.timelineTime}>{event.time}</Text><View style={styles.flex}><Text style={styles.timelineTitle}>{event.title}</Text><Text style={styles.muted}>{event.person} · {event.place ?? event.day}{event.reminder ? ` · ${event.reminder} min reminder` : ''}</Text></View><Ionicons name="chevron-forward" size={18} color="#7047EE" /></Pressable>)}<Pressable onPress={onManage} style={styles.syncCard}><Ionicons name="sync" size={18} color="#2257F4" /><View style={styles.flex}><Text style={styles.syncTitle}>Calendar connections</Text><Text style={styles.muted}>Connect only the calendars your household chooses</Text></View><Text style={styles.link}>Manage</Text></Pressable></ScrollView>;
+  return <ScrollView contentContainerStyle={styles.scrollContent}><View style={styles.calendarTop}><Pressable onPress={() => setSelected(addDays(selected, -7))} style={styles.smallButton}><Ionicons name="chevron-back" size={18} color={styles.iconColor.color} /></Pressable><Pressable onPress={() => setSelected(startOfDay(new Date()))}><Text style={styles.calendarPeriod}>{period}</Text><Text style={styles.calendarTodayLink}>Tap for today</Text></Pressable><Pressable onPress={() => setSelected(addDays(selected, 7))} style={styles.smallButton}><Ionicons name="chevron-forward" size={18} color={styles.iconColor.color} /></Pressable></View><View style={styles.weekRow}>{days.map((day) => { const active = sameDay(day, selected); return <Pressable key={day.toISOString()} onPress={() => setSelected(day)} style={[styles.dayBubble, active && styles.dayBubbleActive]}><Text style={[styles.dayLabel, active && styles.dayTextActive]}>{day.toLocaleDateString(undefined, { weekday: 'short' }).toUpperCase()}</Text><Text style={[styles.dayNumber, active && styles.dayTextActive]}>{day.getDate()}</Text></Pressable>; })}</View><Text style={styles.sectionTitle}>{selected.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' })}</Text>{visibleBotEvents.length === 0 && <View style={styles.emptyChat}><Ionicons name="calendar-clear-outline" size={28} color="#2257F4" /><Text style={styles.settingTitle}>Nothing scheduled</Text><Text style={styles.muted}>Ask Coh to add something or choose another day.</Text></View>}{visibleBotEvents.map((event: BotEvent) => <Pressable key={event.id} onPress={() => onOpenEvent(event)} style={styles.timelineRow}><View style={[styles.timelineLine, { backgroundColor: calendarSourceColor(event.provider) }]} /><Text style={styles.timelineTime}>{event.time}</Text><View style={styles.flex}><View style={styles.eventSourceTitleRow}><Text style={styles.timelineTitle}>{event.title}</Text>{event.provider && event.provider !== 'coho' && <View style={[styles.eventSourcePill, { backgroundColor: `${calendarSourceColor(event.provider)}18` }]}><Text style={[styles.eventSourceText, { color: calendarSourceColor(event.provider) }]}>{calendarSourceLabel(event.provider)}</Text></View>}</View><Text style={styles.muted}>{event.person} · {event.place ?? event.day}{event.reminder ? ` · ${event.reminder} min reminder` : ''}{event.recurrenceRule ? ' · Repeats' : ''}</Text></View><Ionicons name="chevron-forward" size={18} color="#7047EE" /></Pressable>)}<Pressable onPress={onManage} style={styles.syncCard}><Ionicons name="sync" size={18} color="#2257F4" /><View style={styles.flex}><Text style={styles.syncTitle}>Calendar connections</Text><Text style={styles.muted}>Connect only the calendars your household chooses</Text></View><Text style={styles.link}>Manage</Text></Pressable></ScrollView>;
 }
 
 function ChoresScreen({ styles, chores, memberNames, onToggle, onConfigure, rewardMember, setRewardMember, selectedRewards, onSelectReward, onAdd }: any) {
@@ -1052,10 +1426,10 @@ function ChoresScreen({ styles, chores, memberNames, onToggle, onConfigure, rewa
   </ScrollView>;
 }
 
-function ChatScreen({ styles, messages, mode, setMode, draft, setDraft, onSend, onAdd, cohThinking }: any) {
+function ChatScreen({ styles, messages, mode, setMode, draft, setDraft, onSend, onAdd, onVoice, voiceRecording, voiceSending, cohThinking }: any) {
   const cohActive = mode === 'coh';
   const visibleMessages = messages.filter((message: ChatMessage) => messageChannel(message) === mode);
-  return <View style={styles.flex}><View style={styles.chatModeTabs}><Pressable onPress={() => setMode('family')} style={[styles.chatModeTab, mode === 'family' && styles.chatModeTabActive]}><Ionicons name="people" size={16} color={mode === 'family' ? '#fff' : styles.iconColor.color} /><Text style={[styles.chatModeText, mode === 'family' && styles.chatModeTextActive]}>Family chat</Text></Pressable><Pressable onPress={() => setMode('coh')} style={[styles.chatModeTab, mode === 'coh' && styles.chatModeCohActive]}><Ionicons name="sparkles" size={16} color={mode === 'coh' ? '#fff' : '#7047EE'} /><Text style={[styles.chatModeText, mode === 'coh' && styles.chatModeTextActive]}>Ask Coh</Text></Pressable></View><FlatList data={visibleMessages} keyExtractor={(item) => item.id} contentContainerStyle={styles.messageList} automaticallyAdjustKeyboardInsets keyboardDismissMode="interactive" keyboardShouldPersistTaps="handled" renderItem={({ item }) => <View style={[styles.messageWrap, item.mine && styles.messageMine]}>{!item.mine && <View style={[styles.avatar, item.bot ? styles.botAvatar : styles.chatAvatar]}>{item.bot ? <Ionicons name="sparkles" size={17} color="#fff" /> : <Text style={styles.avatarText}>{initials(item.author)}</Text>}</View>}<View style={styles.messageBody}><Text style={[styles.messageAuthor, item.mine && styles.messageAuthorMine, item.bot && styles.botAuthor]}>{item.author}</Text><View style={[styles.messageBubble, item.mine && styles.messageBubbleMine, item.bot && styles.botBubble]}><MentionText text={item.text} mine={item.mine} styles={styles} /></View></View></View>} ListHeaderComponent={cohActive ? <View style={styles.botHint}><Ionicons name="sparkles" size={15} color="#7047EE" /><Text style={styles.botHintText}>This is your private Chief of Home workspace. Coh’s questions won’t crowd the family conversation.</Text></View> : <View style={styles.chatHeader}><View style={styles.homeThreadIcon}><Ionicons name="home" size={20} color="#F5A623" /></View><View><Text style={styles.chatTitle}>Everyone</Text><Text style={styles.muted}>Family messages only</Text></View></View>} ListEmptyComponent={<View style={styles.emptyChat}><Ionicons name={cohActive ? 'sparkles-outline' : 'chatbubbles-outline'} size={28} color={cohActive ? '#7047EE' : styles.iconColor.color} /><Text style={styles.settingTitle}>{cohActive ? 'Ask Coh to organize something' : 'Start the family conversation'}</Text></View>} ListFooterComponent={cohActive && cohThinking ? <View style={styles.cohThinking}><Ionicons name="sparkles" size={15} color="#7047EE" /><Text style={styles.botAuthor}>Coh is thinking…</Text></View> : null} /><View style={[styles.composeRow, cohActive && styles.composeRowCoh]}><Pressable onPress={onAdd} style={[styles.composePlus, cohActive && styles.composeCohBadge]}>{cohActive ? <Ionicons name="sparkles" size={18} color="#fff" /> : <Ionicons name="add" size={22} color="#2257F4" />}</Pressable><TextInput value={draft} onChangeText={setDraft} placeholder={cohThinking ? 'Coh is thinking…' : cohActive ? 'Ask Coh anything about home…' : 'Message your family…'} placeholderTextColor="#8B93A5" editable={!cohThinking} style={[styles.composeInput, cohActive && styles.composeInputCoh]} returnKeyType="send" onSubmitEditing={onSend} /><Pressable disabled={cohThinking} onPress={onSend} style={[styles.sendButton, cohActive && styles.sendButtonCoh, cohThinking && { opacity: .55 }]}><Ionicons name={cohActive ? 'sparkles' : 'send'} size={17} color="#fff" /></Pressable></View></View>;
+  return <View style={styles.flex}><View style={styles.chatModeTabs}><Pressable onPress={() => setMode('family')} style={[styles.chatModeTab, mode === 'family' && styles.chatModeTabActive]}><Ionicons name="people" size={16} color={mode === 'family' ? '#fff' : styles.iconColor.color} /><Text style={[styles.chatModeText, mode === 'family' && styles.chatModeTextActive]}>Family chat</Text></Pressable><Pressable onPress={() => setMode('coh')} style={[styles.chatModeTab, mode === 'coh' && styles.chatModeCohActive]}><Ionicons name="sparkles" size={16} color={mode === 'coh' ? '#fff' : '#7047EE'} /><Text style={[styles.chatModeText, mode === 'coh' && styles.chatModeTextActive]}>Ask Coh</Text></Pressable></View><FlatList data={visibleMessages} keyExtractor={(item) => item.id} contentContainerStyle={styles.messageList} automaticallyAdjustKeyboardInsets keyboardDismissMode="interactive" keyboardShouldPersistTaps="handled" renderItem={({ item }) => <View style={[styles.messageWrap, item.mine && styles.messageMine]}>{!item.mine && <View style={[styles.avatar, item.bot ? styles.botAvatar : styles.chatAvatar]}>{item.bot ? <Ionicons name="sparkles" size={17} color="#fff" /> : <Text style={styles.avatarText}>{initials(item.author)}</Text>}</View>}<View style={styles.messageBody}><Text style={[styles.messageAuthor, item.mine && styles.messageAuthorMine, item.bot && styles.botAuthor]}>{item.author}</Text><View style={[styles.messageBubble, item.mine && styles.messageBubbleMine, item.bot && styles.botBubble]}><MentionText text={item.text} mine={item.mine} styles={styles} /></View></View></View>} ListHeaderComponent={cohActive ? <View style={styles.botHint}><Ionicons name="sparkles" size={15} color="#7047EE" /><Text style={styles.botHintText}>Private Coh workspace · type, speak, or share screenshots and PDFs into Coho.</Text></View> : <View style={styles.chatHeader}><View style={styles.homeThreadIcon}><Ionicons name="home" size={20} color="#F5A623" /></View><View><Text style={styles.chatTitle}>Everyone</Text><Text style={styles.muted}>Family messages only</Text></View></View>} ListEmptyComponent={<View style={styles.emptyChat}><Ionicons name={cohActive ? 'sparkles-outline' : 'chatbubbles-outline'} size={28} color={cohActive ? '#7047EE' : styles.iconColor.color} /><Text style={styles.settingTitle}>{cohActive ? 'Ask Coh to organize something' : 'Start the family conversation'}</Text></View>} ListFooterComponent={cohActive && (cohThinking || voiceRecording || voiceSending) ? <View style={styles.cohThinking}><Ionicons name={voiceRecording ? 'mic' : 'sparkles'} size={15} color={voiceRecording ? '#E94F64' : '#7047EE'} /><Text style={styles.botAuthor}>{voiceRecording ? 'Listening… tap the red microphone to send' : voiceSending ? 'Coh is transcribing…' : 'Coh is thinking…'}</Text></View> : null} /><View style={[styles.composeRow, cohActive && styles.composeRowCoh]}><Pressable accessibilityLabel={cohActive ? (voiceRecording ? 'Stop and send voice request' : 'Speak to Coh') : 'Add'} onPress={cohActive ? onVoice : onAdd} style={[styles.composePlus, cohActive && styles.composeCohBadge, voiceRecording && { backgroundColor: '#E94F64' }]}>{cohActive ? <Ionicons name={voiceRecording ? 'stop' : 'mic'} size={18} color="#fff" /> : <Ionicons name="add" size={22} color="#2257F4" />}</Pressable><TextInput value={draft} onChangeText={setDraft} placeholder={voiceRecording ? 'Listening…' : cohThinking ? 'Coh is thinking…' : cohActive ? 'Ask Coh anything about home…' : 'Message your family…'} placeholderTextColor="#8B93A5" editable={!cohThinking && !voiceRecording} style={[styles.composeInput, cohActive && styles.composeInputCoh]} returnKeyType="send" onSubmitEditing={onSend} /><Pressable disabled={cohThinking || voiceRecording} onPress={onSend} style={[styles.sendButton, cohActive && styles.sendButtonCoh, (cohThinking || voiceRecording) && { opacity: .55 }]}><Ionicons name={cohActive ? 'sparkles' : 'send'} size={17} color="#fff" /></Pressable></View></View>;
 }
 
 function messageChannel(message: ChatMessage): ChatChannel {
@@ -1089,6 +1463,20 @@ function MentionText({ text, mine, styles }: { text: string; mine: boolean; styl
 function relatedName(value: any, fallback: string) {
   const profile = Array.isArray(value) ? value[0] : value;
   return profile?.display_name || fallback;
+}
+
+function calendarSourceLabel(provider?: string) {
+  if (provider === 'google') return 'Google';
+  if (provider === 'outlook') return 'Outlook';
+  if (provider === 'apple') return 'Apple';
+  return 'Coho';
+}
+
+function calendarSourceColor(provider?: string) {
+  if (provider === 'google') return '#4285F4';
+  if (provider === 'outlook') return '#0078D4';
+  if (provider === 'apple') return '#5A667A';
+  return '#7047EE';
 }
 
 function cloudMessage(row: any, currentUserId: string): ChatMessage {
@@ -1138,6 +1526,9 @@ function cloudEvent(row: any): BotEvent {
     place: row.location || undefined,
     reminder: typeof metadata.reminder === 'number' ? metadata.reminder : undefined,
     directions: typeof metadata.directions === 'boolean' ? metadata.directions : undefined,
+    provider: row.provider || 'coho',
+    sourceCalendarId: row.source_calendar_id || undefined,
+    recurrenceRule: row.recurrence_rule || undefined,
   };
 }
 
@@ -1353,6 +1744,7 @@ function MoreMenu({ styles, setView }: any) {
     ['Calendar Sync', 'calendar-outline', '#2257F4', 'Connect selected calendars on this iPhone'],
     ['Notes', 'document-text-outline', '#7C4DFF', 'Lists, instructions, and family details'],
     ['Recaps', 'sparkles-outline', '#2257F4', 'Daily summaries by push and email'],
+    ['Automations', 'flash-outline', '#7047EE', 'Real cloud rules, retries, and household follow-through'],
     ['Integrations', 'extension-puzzle-outline', '#19A47B', 'Skylight, calendars, email, and more'],
     ['Settings', 'settings-outline', '#FF7A2E', 'Household, privacy, and preferences'],
   ];
@@ -1437,13 +1829,57 @@ function NotesScreen({ styles, householdId, userId, onAction }: { styles: any; h
   </>;
 }
 
-function RecapsScreen({ styles, onAction, onListen, onOpenEvent, onCompleteFollowUp, events, chores, messages, followUps }: any) {
+function RecapsScreen({ styles, onRefresh, onListen, onOpenEvent, onCompleteFollowUp, events, chores, messages, followUps, snapshots, initialSnapshotId }: any) {
+  const [selectedSnapshotId, setSelectedSnapshotId] = useState<string | null>(initialSnapshotId ?? snapshots[0]?.id ?? null);
+  useEffect(() => {
+    if (initialSnapshotId && snapshots.some((snapshot: BriefingSnapshot) => snapshot.id === initialSnapshotId)) {
+      setSelectedSnapshotId(initialSnapshotId);
+      return;
+    }
+    if (!selectedSnapshotId && snapshots[0]?.id) setSelectedSnapshotId(snapshots[0].id);
+  }, [snapshots, selectedSnapshotId, initialSnapshotId]);
   const openChores = chores.filter((item: any) => !item.done).length;
   const recentMessages = messages.filter((item: ChatMessage) => !item.bot).slice(-5).length;
   const syncTime = new Date().toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
   const today = localDateKey(new Date());
   const weekEvents = events.filter((event: BotEvent) => !event.dateISO || event.dateISO >= today).slice(0, 14);
-  return <ScrollView contentContainerStyle={styles.scrollContent}><LinearGradient colors={['#2257F4', '#7047EE']} style={styles.recapHero}><Ionicons name="sparkles" size={24} color="#fff" /><Text style={styles.recapHeroLabel}>LIVE DAILY SYNC · {syncTime.toUpperCase()}</Text><Text style={styles.recapHeroTitle}>Here’s what your home needs now.</Text><Text style={styles.recapHeroText}>{events.length} family event{events.length === 1 ? '' : 's'}, {openChores} open chore{openChores === 1 ? '' : 's'}, {followUps.length} follow-up{followUps.length === 1 ? '' : 's'}, and {recentMessages} recent family message{recentMessages === 1 ? '' : 's'} are in your current briefing.</Text><View style={styles.recapActionRow}><Pressable onPress={() => onAction('Daily sync refreshed with the latest family activity')} style={styles.recapHeroButton}><Ionicons name="refresh" size={15} color="#2257F4" /><Text>Refresh now</Text></Pressable><Pressable onPress={onListen} style={styles.recapHeroButton}><Ionicons name="volume-high" size={15} color="#2257F4" /><Text>Listen</Text></Pressable></View></LinearGradient><Text style={styles.sectionTitle}>Week ahead</Text>{weekEvents.length === 0 ? <View style={styles.emptyChat}><Ionicons name="calendar-clear-outline" size={28} color="#2257F4" /><Text style={styles.settingTitle}>No upcoming events</Text><Text style={styles.muted}>When Coh or a family member adds one, it will appear here.</Text></View> : weekEvents.map((event: BotEvent) => <Pressable key={event.id} onPress={() => onOpenEvent(event)} style={styles.highlightRow}><Text style={styles.highlightTime}>{event.dateISO ? new Date(`${event.dateISO}T12:00:00`).toLocaleDateString(undefined, { weekday: 'short' }).toUpperCase() : 'NEXT'}</Text><View style={styles.flex}><Text style={styles.highlightText}>{event.title}</Text><Text style={styles.muted}>{event.time} · {event.person}{event.place ? ` · ${event.place}` : ''}</Text></View><Ionicons name="chevron-forward" size={17} color="#7047EE" /></Pressable>)}<Text style={styles.sectionTitle}>Needs follow-up</Text>{followUps.length === 0 ? <View style={styles.emptyChat}><Ionicons name="refresh-circle-outline" size={28} color="#19A47B" /><Text style={styles.settingTitle}>Nothing needs follow-up</Text><Text style={styles.muted}>Open a shared appointment and choose “Add to follow-up” when it needs another step.</Text></View> : followUps.map((item: SharedFollowUp) => { const event = Array.isArray(item.event) ? item.event[0] : item.event; return <View key={item.id} style={styles.highlightRow}><Text style={styles.highlightTime}>{item.due_at ? new Date(item.due_at).toLocaleDateString(undefined, { weekday: 'short' }).toUpperCase() : 'OPEN'}</Text><View style={styles.flex}><Text style={styles.highlightText}>{event?.title || 'Appointment follow-up'}</Text><Text style={styles.muted}>{item.note || 'Check the outcome and capture the next step'}{event?.location ? ` · ${event.location}` : ''}</Text></View><Pressable accessibilityLabel={`Complete follow-up for ${event?.title || 'appointment'}`} onPress={() => onCompleteFollowUp(item.id)} style={styles.checkCircle}><Ionicons name="checkmark" size={16} color="#19A47B" /></Pressable></View>; })}</ScrollView>;
+  const selected = snapshots.find((snapshot: BriefingSnapshot) => snapshot.id === selectedSnapshotId) ?? null;
+
+  return <ScrollView contentContainerStyle={styles.scrollContent}>
+    <LinearGradient colors={['#2257F4', '#7047EE']} style={styles.recapHero}>
+      <Ionicons name="sparkles" size={24} color="#fff" />
+      <Text style={styles.recapHeroLabel}>LIVE DAILY SYNC · {syncTime.toUpperCase()}</Text>
+      <Text style={styles.recapHeroTitle}>Here’s what your home needs now.</Text>
+      <Text style={styles.recapHeroText}>{events.length} family event{events.length === 1 ? '' : 's'}, {openChores} open chore{openChores === 1 ? '' : 's'}, {followUps.length} follow-up{followUps.length === 1 ? '' : 's'}, and {recentMessages} recent family message{recentMessages === 1 ? '' : 's'} are in your current briefing.</Text>
+      <View style={styles.recapActionRow}>
+        <Pressable onPress={() => void onRefresh()} style={styles.recapHeroButton}><Ionicons name="refresh" size={15} color="#2257F4" /><Text>Refresh now</Text></Pressable>
+        <Pressable onPress={() => onListen()} style={styles.recapHeroButton}><Ionicons name="volume-high" size={15} color="#2257F4" /><Text>Listen</Text></Pressable>
+      </View>
+    </LinearGradient>
+
+    <Text style={styles.sectionTitle}>Saved daily & weekly syncs</Text>
+    {snapshots.length === 0 ? <View style={styles.emptyChat}><Ionicons name="albums-outline" size={28} color="#7047EE" /><Text style={styles.settingTitle}>Your first saved sync is coming</Text><Text style={styles.muted}>Scheduled briefings are saved here, so you can open them again at any time.</Text></View> : snapshots.slice(0, 12).map((snapshot: BriefingSnapshot) => <Pressable key={snapshot.id} onPress={() => setSelectedSnapshotId(selectedSnapshotId === snapshot.id ? null : snapshot.id)} style={[styles.recapSnapshot, selectedSnapshotId === snapshot.id && styles.recapSnapshotActive]}>
+      <View style={styles.recapSnapshotIcon}><Ionicons name={snapshot.briefing_type === 'daily' ? 'sunny' : snapshot.briefing_type === 'week_ahead' ? 'calendar' : 'refresh-circle'} size={18} color="#7047EE" /></View>
+      <View style={styles.flex}><Text style={styles.highlightText}>{snapshot.title}</Text><Text style={styles.muted}>{new Date(`${snapshot.local_date}T12:00:00`).toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric' })}</Text></View>
+      <Ionicons name={selectedSnapshotId === snapshot.id ? 'chevron-up' : 'chevron-down'} size={17} color="#7047EE" />
+    </Pressable>)}
+    {selected && <View style={styles.recapSnapshotDetail}>
+      <Text style={styles.settingTitle}>{selected.summary}</Text>
+      <Pressable onPress={() => onListen(selected.summary)} style={styles.listenSnapshot}><Ionicons name="volume-high" size={15} color="#7047EE" /><Text style={styles.link}>Listen to this sync</Text></Pressable>
+      {(selected.content.events ?? []).map((event: any) => <Pressable key={event.id} onPress={() => onOpenEvent(cloudEvent(event))} style={styles.highlightRow}><Text style={styles.highlightTime}>{new Date(event.starts_at).toLocaleDateString(undefined, { weekday: 'short' }).toUpperCase()}</Text><View style={styles.flex}><Text style={styles.highlightText}>{event.title}</Text><Text style={styles.muted}>{new Date(event.starts_at).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}{event.location ? ` · ${event.location}` : ''}</Text></View><Ionicons name="chevron-forward" size={17} color="#7047EE" /></Pressable>)}
+      {(selected.content.chores ?? []).map((chore: any) => <View key={chore.id} style={styles.highlightRow}><Text style={styles.highlightTime}>TODO</Text><View style={styles.flex}><Text style={styles.highlightText}>{chore.title}</Text><Text style={styles.muted}>{chore.due_at ? `Due ${new Date(chore.due_at).toLocaleString()}` : 'Open family chore'}</Text></View></View>)}
+      {(selected.content.actions ?? []).map((action: any) => <View key={action.id} style={styles.highlightRow}><Text style={styles.highlightTime}>LOOP</Text><View style={styles.flex}><Text style={styles.highlightText}>{action.title}</Text><Text style={styles.muted}>{String(action.status).replace('_', ' ')}</Text></View></View>)}
+    </View>}
+
+    <Text style={styles.sectionTitle}>Week ahead</Text>
+    {weekEvents.length === 0 ? <View style={styles.emptyChat}><Ionicons name="calendar-clear-outline" size={28} color="#2257F4" /><Text style={styles.settingTitle}>No upcoming events</Text><Text style={styles.muted}>When Coh or a family member adds one, it will appear here.</Text></View> : weekEvents.map((event: BotEvent) => <Pressable key={event.id} onPress={() => onOpenEvent(event)} style={styles.highlightRow}><Text style={styles.highlightTime}>{event.dateISO ? new Date(`${event.dateISO}T12:00:00`).toLocaleDateString(undefined, { weekday: 'short' }).toUpperCase() : 'NEXT'}</Text><View style={styles.flex}><Text style={styles.highlightText}>{event.title}</Text><Text style={styles.muted}>{event.time} · {event.person}{event.place ? ` · ${event.place}` : ''}</Text></View><Ionicons name="chevron-forward" size={17} color="#7047EE" /></Pressable>)}
+
+    <Text style={styles.sectionTitle}>Needs follow-up</Text>
+    {followUps.length === 0 ? <View style={styles.emptyChat}><Ionicons name="refresh-circle-outline" size={28} color="#19A47B" /><Text style={styles.settingTitle}>Nothing needs follow-up</Text><Text style={styles.muted}>Open a shared appointment and choose “Add to follow-up” when it needs another step.</Text></View> : followUps.map((item: SharedFollowUp) => {
+      const event = Array.isArray(item.event) ? item.event[0] : item.event;
+      return <View key={item.id} style={styles.highlightRow}><Text style={styles.highlightTime}>{item.due_at ? new Date(item.due_at).toLocaleDateString(undefined, { weekday: 'short' }).toUpperCase() : 'OPEN'}</Text><View style={styles.flex}><Text style={styles.highlightText}>{event?.title || 'Appointment follow-up'}</Text><Text style={styles.muted}>{item.note || 'Check the outcome and capture the next step'}{event?.location ? ` · ${event.location}` : ''}</Text></View><Pressable accessibilityLabel={`Complete follow-up for ${event?.title || 'appointment'}`} onPress={() => onCompleteFollowUp(item.id)} style={styles.checkCircle}><Ionicons name="checkmark" size={16} color="#19A47B" /></Pressable></View>;
+    })}
+  </ScrollView>;
 }
 
 function IntegrationsScreen({ styles, connected, onConnect }: any) {
@@ -1461,8 +1897,8 @@ function IntegrationsScreen({ styles, connected, onConnect }: any) {
   return <ScrollView contentContainerStyle={styles.scrollContent}><LinearGradient colors={['#24116D', '#6648EF']} style={styles.automationCard}><Ionicons name="flash" size={23} color="#fff" /><View style={styles.flex}><Text style={styles.automationLabel}>REVIEW FIRST</Text><Text style={styles.automationTitle}>Coh suggests events from email. A family member approves before anything reaches the calendar.</Text></View></LinearGradient>{items.map(({ name, icon, color, detail }) => <View key={name} style={styles.integrationRow}><View style={[styles.integrationIcon, { backgroundColor: `${color}18` }]}><Ionicons name={icon as any} size={23} color={color} /></View><View style={styles.flex}><Text style={styles.integrationTitle}>{name}</Text><Text style={styles.muted}>{detail}</Text></View><Pressable onPress={() => onConnect(name)} style={[styles.connectButton, connected[name] && styles.connectedButton]}><Text style={[styles.connectText, connected[name] && styles.connectedText]}>{connected[name] ? 'Connected' : name === 'iOS Notifications' ? 'Enable' : 'Set up'}</Text></Pressable></View>)}</ScrollView>;
 }
 
-function SettingsScreen({ styles, dark, onTheme, onNotifications, onFamily, onAction, profiles }: any) {
-  return <ScrollView contentContainerStyle={styles.scrollContent}><Text style={styles.sectionTitle}>Household</Text><Pressable onPress={onFamily} style={styles.settingRow}><Ionicons name="people-outline" size={21} color="#2257F4" /><View style={styles.flex}><Text style={styles.settingTitle}>Family profiles</Text><Text style={styles.muted}>{profiles.length} people · names, photos, DOB, roles, and bios</Text></View><Ionicons name="chevron-forward" size={18} color={styles.iconColor.color} /></Pressable><Text style={styles.sectionTitle}>Preferences</Text><View style={styles.settingRow}><Ionicons name="moon-outline" size={21} color="#7C4DFF" /><View style={styles.flex}><Text style={styles.settingTitle}>Dark mode</Text><Text style={styles.muted}>Use the darker Coho theme</Text></View><Switch value={dark} onValueChange={onTheme} trackColor={{ true: '#6687FF' }} /></View><Pressable onPress={onNotifications} style={styles.settingRow}><Ionicons name="notifications-outline" size={21} color="#FF7A2E" /><View style={styles.flex}><Text style={styles.settingTitle}>Smart notifications</Text><Text style={styles.muted}>Enable reminders and daily recaps</Text></View><Ionicons name="chevron-forward" size={18} color={styles.iconColor.color} /></Pressable><Pressable onPress={() => onAction('Privacy controls opened')} style={styles.settingRow}><Ionicons name="shield-checkmark-outline" size={21} color="#19A47B" /><View style={styles.flex}><Text style={styles.settingTitle}>Privacy and family data</Text><Text style={styles.muted}>Permissions, exports, and deletion</Text></View><Ionicons name="chevron-forward" size={18} color={styles.iconColor.color} /></Pressable></ScrollView>;
+function SettingsScreen({ styles, dark, onTheme, onNotifications, onFamily, onPrivacy, profiles }: any) {
+  return <ScrollView contentContainerStyle={styles.scrollContent}><Text style={styles.sectionTitle}>Household</Text><Pressable onPress={onFamily} style={styles.settingRow}><Ionicons name="people-outline" size={21} color="#2257F4" /><View style={styles.flex}><Text style={styles.settingTitle}>Family profiles</Text><Text style={styles.muted}>{profiles.length} people · names, photos, DOB, roles, and bios</Text></View><Ionicons name="chevron-forward" size={18} color={styles.iconColor.color} /></Pressable><Text style={styles.sectionTitle}>Preferences</Text><View style={styles.settingRow}><Ionicons name="moon-outline" size={21} color="#7C4DFF" /><View style={styles.flex}><Text style={styles.settingTitle}>Dark mode</Text><Text style={styles.muted}>Use the darker Coho theme</Text></View><Switch value={dark} onValueChange={onTheme} trackColor={{ true: '#6687FF' }} /></View><Pressable onPress={onNotifications} style={styles.settingRow}><Ionicons name="notifications-outline" size={21} color="#FF7A2E" /><View style={styles.flex}><Text style={styles.settingTitle}>Smart notifications</Text><Text style={styles.muted}>Enable reminders and daily recaps</Text></View><Ionicons name="chevron-forward" size={18} color={styles.iconColor.color} /></Pressable><Pressable onPress={onPrivacy} style={styles.settingRow}><Ionicons name="shield-checkmark-outline" size={21} color="#19A47B" /><View style={styles.flex}><Text style={styles.settingTitle}>Privacy and family data</Text><Text style={styles.muted}>Secure exports and in-app account deletion</Text></View><Ionicons name="chevron-forward" size={18} color={styles.iconColor.color} /></Pressable></ScrollView>;
 }
 
 function BottomTabs({ tab, setTab, styles }: any) {
@@ -1477,7 +1913,61 @@ function EventDetailModal({ event, styles, dark, onClose, onFollowUp }: { event:
     const query = encodeURIComponent(event.place);
     void Linking.openURL(Platform.OS === 'ios' ? `http://maps.apple.com/?q=${query}` : `https://www.google.com/maps/search/?api=1&query=${query}`);
   };
-  return <Modal visible transparent animationType="slide" onRequestClose={onClose}><View style={styles.modalBackdrop}><Pressable style={styles.modalDismiss} onPress={onClose} /><View style={styles.modalSheet}><View style={styles.modalHandle} /><View style={styles.modalHead}><View style={styles.flex}><Text style={styles.eyebrow}>FAMILY EVENT</Text><Text style={styles.modalTitle}>{event.title}</Text></View><Pressable onPress={onClose} style={styles.iconButton}><Ionicons name="close" size={21} color={styles.iconColor.color} /></Pressable></View><View style={styles.eventDetailRow}><Ionicons name="calendar-outline" size={20} color="#2257F4" /><View><Text style={styles.settingTitle}>{event.day}</Text><Text style={styles.muted}>{event.time}</Text></View></View><View style={styles.eventDetailRow}><Ionicons name="person-outline" size={20} color="#7047EE" /><Text style={styles.settingTitle}>{event.person}</Text></View>{event.place && <Pressable accessibilityRole="button" accessibilityLabel={`Open directions to ${event.place}`} onPress={openDirections} style={styles.eventDetailRow}><Ionicons name="location-outline" size={20} color="#19A47B" /><View style={styles.flex}><Text style={styles.settingTitle}>{event.place}</Text><Text style={styles.link}>Open directions</Text></View><Ionicons name="open-outline" size={18} color="#2257F4" /></Pressable>}{event.reminder && <View style={styles.eventDetailRow}><Ionicons name="notifications-outline" size={20} color="#FF7A2E" /><Text style={styles.settingTitle}>{event.reminder}-minute reminder</Text></View>}<Pressable onPress={() => onFollowUp(event)} style={styles.outlineAction}><Ionicons name="refresh-circle-outline" size={19} color="#19A47B" /><Text style={[styles.outlineActionText, { color: '#168866' }]}>Add to weekly follow-up</Text></Pressable><Pressable onPress={onClose} style={styles.saveButton}><Text style={styles.saveButtonText}>Done</Text></Pressable></View><StatusBar style={dark ? 'light' : 'dark'} /></View></Modal>;
+  return <Modal visible transparent animationType="slide" onRequestClose={onClose}><View style={styles.modalBackdrop}><Pressable style={styles.modalDismiss} onPress={onClose} /><View style={styles.modalSheet}><View style={styles.modalHandle} /><View style={styles.modalHead}><View style={styles.flex}><Text style={styles.eyebrow}>FAMILY EVENT</Text><Text style={styles.modalTitle}>{event.title}</Text>{event.provider && <Text style={[styles.eventDetailSource, { color: calendarSourceColor(event.provider) }]}>{calendarSourceLabel(event.provider)}{event.sourceCalendarId ? ' · Connected calendar' : ''}{event.recurrenceRule ? ' · Recurring' : ''}</Text>}</View><Pressable onPress={onClose} style={styles.iconButton}><Ionicons name="close" size={21} color={styles.iconColor.color} /></Pressable></View><View style={styles.eventDetailRow}><Ionicons name="calendar-outline" size={20} color="#2257F4" /><View><Text style={styles.settingTitle}>{event.day}</Text><Text style={styles.muted}>{event.time}</Text></View></View><View style={styles.eventDetailRow}><Ionicons name="person-outline" size={20} color="#7047EE" /><Text style={styles.settingTitle}>{event.person}</Text></View>{event.place && <Pressable accessibilityRole="button" accessibilityLabel={`Open directions to ${event.place}`} onPress={openDirections} style={styles.eventDetailRow}><Ionicons name="location-outline" size={20} color="#19A47B" /><View style={styles.flex}><Text style={styles.settingTitle}>{event.place}</Text><Text style={styles.link}>Open directions</Text></View><Ionicons name="open-outline" size={18} color="#2257F4" /></Pressable>}{event.reminder && <View style={styles.eventDetailRow}><Ionicons name="notifications-outline" size={20} color="#FF7A2E" /><Text style={styles.settingTitle}>{event.reminder}-minute reminder</Text></View>}<Pressable onPress={() => onFollowUp(event)} style={styles.outlineAction}><Ionicons name="refresh-circle-outline" size={19} color="#19A47B" /><Text style={[styles.outlineActionText, { color: '#168866' }]}>Add to weekly follow-up</Text></Pressable><Pressable onPress={onClose} style={styles.saveButton}><Text style={styles.saveButtonText}>Done</Text></Pressable></View><StatusBar style={dark ? 'light' : 'dark'} /></View></Modal>;
+}
+
+function SecondUserWelcomeModal({
+  visible,
+  householdName,
+  styles,
+  dark,
+  notificationsEnabled,
+  onEnableNotifications,
+  onContinue,
+}: {
+  visible: boolean;
+  householdName: string;
+  styles: any;
+  dark: boolean;
+  notificationsEnabled: boolean;
+  onEnableNotifications: () => Promise<void>;
+  onContinue: (destination: 'family' | 'coh' | 'today') => Promise<void>;
+}) {
+  return (
+    <Modal visible={visible} animationType="slide" presentationStyle="pageSheet">
+      <SafeAreaView style={styles.welcomePage}>
+        <ScrollView contentContainerStyle={styles.welcomeContent}>
+          <LinearGradient colors={['#24116D', '#7047EE']} style={styles.welcomeHero}>
+            <View style={styles.welcomeMark}><Ionicons name="home" size={28} color="#7047EE" /></View>
+            <Text style={styles.recapHeroLabel}>YOU’RE IN</Text>
+            <Text style={styles.welcomeTitle}>Welcome to {householdName}.</Text>
+            <Text style={styles.welcomeText}>Everything here is live. Updates from another family member appear automatically—no refreshing, forwarding, or setup help required.</Text>
+          </LinearGradient>
+          {[
+            ['chatbubbles-outline', '#2257F4', 'Family chat stays human', 'Messages with the family live in Family chat. Coh has a separate private workspace, so assistant replies never flood the conversation.'],
+            ['checkmark-circle-outline', '#19A47B', 'Assignments come to you', 'Open an alert to the exact event, chore, follow-up, message, or Family Inbox item. Accept and complete work from the same screen.'],
+            ['sparkles-outline', '#7047EE', 'Coh works for you too', 'Ask questions, share screenshots or PDFs, speak a request, correct details, and approve actions without depending on the household owner.'],
+          ].map(([icon, color, title, detail]) => (
+            <View key={title} style={styles.welcomeRow}>
+              <View style={[styles.integrationIcon, { backgroundColor: `${color}18` }]}><Ionicons name={icon as any} size={22} color={color} /></View>
+              <View style={styles.flex}><Text style={styles.settingTitle}>{title}</Text><Text style={styles.muted}>{detail}</Text></View>
+            </View>
+          ))}
+          <View style={styles.welcomeAlertCard}>
+            <Ionicons name={notificationsEnabled ? 'checkmark-circle' : 'notifications'} size={22} color={notificationsEnabled ? '#19A47B' : '#FF7A2E'} />
+            <View style={styles.flex}><Text style={styles.settingTitle}>{notificationsEnabled ? 'Alerts are ready' : 'Turn on family alerts'}</Text><Text style={styles.muted}>Assignment, reminder, completion, Family Inbox, daily sync, and week-ahead alerts open the correct item.</Text></View>
+            {!notificationsEnabled && <Pressable onPress={() => void onEnableNotifications()} style={styles.welcomeEnableButton}><Text style={styles.welcomeEnableText}>Enable</Text></Pressable>}
+          </View>
+          <Pressable onPress={() => void onContinue('family')} style={styles.saveButton}><Ionicons name="chatbubbles" size={18} color="#fff" /><Text style={styles.saveButtonText}>Open family chat</Text></Pressable>
+          <View style={styles.welcomeActions}>
+            <Pressable onPress={() => void onContinue('coh')} style={styles.secondaryWelcomeButton}><Ionicons name="sparkles" size={17} color="#7047EE" /><Text style={styles.secondaryWelcomeText}>Try Coh privately</Text></Pressable>
+            <Pressable onPress={() => void onContinue('today')} style={styles.secondaryWelcomeButton}><Text style={styles.secondaryWelcomeText}>Go to Today</Text></Pressable>
+          </View>
+        </ScrollView>
+        <StatusBar style={dark ? 'light' : 'dark'} />
+      </SafeAreaView>
+    </Modal>
+  );
 }
 
 function ChoreRewardModal({ chore, styles, dark, onClose, onSave }: { chore: Chore | null; styles: any; dark: boolean; onClose: () => void; onSave: (chore: Chore) => void }) {
@@ -1503,7 +1993,7 @@ function ShareToCohModal({ visible, styles, dark, value, onChange, hasImage, err
           <Pressable accessibilityLabel="Cancel sharing" onPress={onCancel} style={styles.iconButton}><Ionicons name="close" size={21} color={styles.iconColor.color} /></Pressable>
         </View>
         <View style={styles.privacyCard}><Ionicons name="shield-checkmark" size={20} color="#19A47B" /><Text style={styles.privacyText}>Coh receives only what you selected—not the conversation. The shared content is discarded if you cancel.</Text></View>
-        {hasImage && <View style={styles.sharedAttachment}><Ionicons name="image-outline" size={20} color="#7047EE" /><View style={styles.flex}><Text style={styles.settingTitle}>Screenshot attached</Text><Text style={styles.muted}>Image reading is not connected yet. Add the event details below.</Text></View></View>}
+        {hasImage && <View style={styles.sharedAttachment}><Ionicons name="image-outline" size={20} color="#7047EE" /><View style={styles.flex}><Text style={styles.settingTitle}>Attachment ready for Coh</Text><Text style={styles.muted}>Coh can read screenshots, PDFs, text, calendar files, and supported audio after you approve this share.</Text></View></View>}
         <Text style={styles.fieldLabel}>REVIEW OR EDIT BEFORE SENDING</Text>
         <TextInput value={value} onChangeText={onChange} multiline placeholder={hasImage ? 'Example: Haircut for Chad Wednesday at 9:30 AM' : 'Selected text or link'} placeholderTextColor="#8B93A5" style={[styles.modalInput, styles.sharePreviewInput]} />
         {error && <Text style={styles.shareError}>The shared item could not be read. Nothing has been saved.</Text>}
@@ -1533,13 +2023,13 @@ function createStyles(t: Theme) {
     upcomingRow: { minHeight: 63, borderRadius: 17, borderWidth: 1, borderColor: t.line, backgroundColor: t.surface, padding: 10, flexDirection: 'row', alignItems: 'center', gap: 11 }, dateTile: { width: 43, height: 44, borderRadius: 11, borderWidth: 1, alignItems: 'center', justifyContent: 'center' }, dateMonth: { fontSize: 7, fontWeight: '800' }, dateNumber: { fontSize: 18, fontWeight: '800', lineHeight: 19 }, upcomingTime: { color: t.muted, fontSize: 8, fontWeight: '700' }, upcomingTitle: { color: t.text, fontSize: 11, fontWeight: '700', marginTop: 3 },
     tabBar: { minHeight: 68, paddingTop: 7, paddingBottom: Platform.OS === 'ios' ? 5 : 8, paddingHorizontal: 7, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: t.line, backgroundColor: t.surfaceStrong, flexDirection: 'row', justifyContent: 'space-around' }, tabItem: { flex: 1, alignItems: 'center', gap: 3 }, tabIconWrap: { width: 38, height: 32, borderRadius: 13, alignItems: 'center', justifyContent: 'center' }, tabIconActive: { backgroundColor: t.primary }, tabLabel: { color: t.muted, fontSize: 8, fontWeight: '700' }, tabLabelActive: { color: t.primary },
     toast: { position: 'absolute', left: 18, right: 18, bottom: 78, minHeight: 50, borderRadius: 16, paddingHorizontal: 14, backgroundColor: t.surfaceStrong, borderWidth: 1, borderColor: t.line, flexDirection: 'row', alignItems: 'center', gap: 8, shadowColor: '#000', shadowOpacity: .16, shadowRadius: 16, shadowOffset: { width: 0, height: 7 } }, toastText: { color: t.text, fontSize: 11, fontWeight: '700', flex: 1 },
-    calendarTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 14 }, smallButton: { width: 38, height: 38, borderRadius: 12, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, alignItems: 'center', justifyContent: 'center' }, calendarPeriod: { color: t.text, fontWeight: '800', fontSize: 15, textAlign: 'center' }, calendarTodayLink: { color: t.primary, fontSize: 8, fontWeight: '800', textAlign: 'center', marginTop: 2 }, weekRow: { flexDirection: 'row', justifyContent: 'space-between', backgroundColor: t.surface, borderRadius: 18, borderWidth: 1, borderColor: t.line, padding: 7 }, dayBubble: { width: 40, height: 58, borderRadius: 13, alignItems: 'center', justifyContent: 'center' }, dayBubbleActive: { backgroundColor: t.primary }, dayLabel: { color: t.muted, fontSize: 7, fontWeight: '800' }, dayNumber: { color: t.text, fontSize: 17, fontWeight: '800', marginTop: 3 }, dayTextActive: { color: '#fff' }, timelineRow: { minHeight: 76, borderRadius: 18, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, flexDirection: 'row', alignItems: 'center', padding: 12, gap: 10 }, timelineLine: { width: 4, height: 42, borderRadius: 3 }, timelineTime: { color: t.muted, fontSize: 10, width: 50, fontWeight: '700' }, timelineTitle: { color: t.text, fontSize: 13, fontWeight: '800' }, syncCard: { minHeight: 67, borderRadius: 18, padding: 13, flexDirection: 'row', gap: 10, alignItems: 'center', backgroundColor: `${t.primary}0C`, borderWidth: 1, borderColor: `${t.primary}24` }, syncTitle: { color: t.text, fontSize: 11, fontWeight: '800' },
+    calendarTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 14 }, smallButton: { width: 38, height: 38, borderRadius: 12, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, alignItems: 'center', justifyContent: 'center' }, calendarPeriod: { color: t.text, fontWeight: '800', fontSize: 15, textAlign: 'center' }, calendarTodayLink: { color: t.primary, fontSize: 8, fontWeight: '800', textAlign: 'center', marginTop: 2 }, weekRow: { flexDirection: 'row', justifyContent: 'space-between', backgroundColor: t.surface, borderRadius: 18, borderWidth: 1, borderColor: t.line, padding: 7 }, dayBubble: { width: 40, height: 58, borderRadius: 13, alignItems: 'center', justifyContent: 'center' }, dayBubbleActive: { backgroundColor: t.primary }, dayLabel: { color: t.muted, fontSize: 7, fontWeight: '800' }, dayNumber: { color: t.text, fontSize: 17, fontWeight: '800', marginTop: 3 }, dayTextActive: { color: '#fff' }, timelineRow: { minHeight: 76, borderRadius: 18, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, flexDirection: 'row', alignItems: 'center', padding: 12, gap: 10 }, timelineLine: { width: 4, height: 42, borderRadius: 3 }, timelineTime: { color: t.muted, fontSize: 10, width: 50, fontWeight: '700' }, timelineTitle: { color: t.text, fontSize: 13, fontWeight: '800' }, eventSourceTitleRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 6 }, eventSourcePill: { borderRadius: 99, paddingHorizontal: 7, paddingVertical: 3 }, eventSourceText: { fontSize: 7, fontWeight: '900', letterSpacing: .3 }, eventDetailSource: { fontSize: 9, fontWeight: '800', marginTop: 4 }, syncCard: { minHeight: 67, borderRadius: 18, padding: 13, flexDirection: 'row', gap: 10, alignItems: 'center', backgroundColor: `${t.primary}0C`, borderWidth: 1, borderColor: `${t.primary}24` }, syncTitle: { color: t.text, fontSize: 11, fontWeight: '800' },
     progressCard: { minHeight: 130, borderRadius: 23, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, padding: 20, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }, progressLabel: { color: t.primary, fontSize: 8, fontWeight: '800', letterSpacing: 1 }, progressValue: { color: t.text, fontSize: 28, fontWeight: '800', letterSpacing: -1, marginTop: 5 }, progressRing: { width: 74, height: 74, borderRadius: 37, borderWidth: 8, borderColor: '#19A47B', alignItems: 'center', justifyContent: 'center' }, progressPercent: { color: t.text, fontSize: 16, fontWeight: '800' }, memberRewardTabs: { flexDirection: 'row', padding: 4, borderRadius: 16, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line }, memberRewardTab: { flex: 1, minHeight: 48, borderRadius: 12, alignItems: 'center', justifyContent: 'center' }, memberRewardTabActive: { backgroundColor: t.primary }, memberRewardName: { color: t.text, fontSize: 10, fontWeight: '800' }, memberRewardNameActive: { color: '#fff' }, memberRewardPoints: { color: t.muted, fontSize: 8, marginTop: 2, fontWeight: '700' }, rewardHero: { minHeight: 118, borderRadius: 21, padding: 16, flexDirection: 'row', gap: 13, alignItems: 'center', backgroundColor: t.surface, borderWidth: 1, borderColor: t.line }, rewardIcon: { width: 52, height: 52, borderRadius: 17, alignItems: 'center', justifyContent: 'center' }, rewardHeroTitle: { color: t.text, fontSize: 14, lineHeight: 19, fontWeight: '800', marginTop: 4 }, rewardProgressTrack: { height: 7, borderRadius: 4, backgroundColor: t.line, overflow: 'hidden', marginTop: 10 }, rewardProgressFill: { height: 7, borderRadius: 4 }, rewardProgressText: { color: t.muted, fontSize: 8, fontWeight: '700', marginTop: 5 }, rewardPrompt: { color: t.text, fontSize: 12, fontWeight: '800', marginTop: 2 }, rewardChoices: { gap: 10, paddingRight: 18 }, rewardChoice: { width: 145, minHeight: 130, borderRadius: 18, padding: 14, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line }, rewardChoiceTitle: { color: t.text, fontSize: 12, fontWeight: '800', marginTop: 11, marginBottom: 3 }, rewardCost: { fontSize: 9, fontWeight: '800', marginTop: 10 }, rewardSelected: { position: 'absolute', right: 10, top: 10 }, choreRow: { minHeight: 70, borderRadius: 17, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, padding: 12, flexDirection: 'row', alignItems: 'center', gap: 10 }, checkCircle: { width: 27, height: 27, borderRadius: 14, borderWidth: 2, borderColor: t.line, alignItems: 'center', justifyContent: 'center' }, choreTitle: { color: t.text, fontSize: 13, fontWeight: '800' }, struck: { textDecorationLine: 'line-through', color: t.muted }, pointPill: { minHeight: 27, borderRadius: 14, paddingHorizontal: 8, flexDirection: 'row', gap: 4, alignItems: 'center', backgroundColor: '#7047EE14' }, pointPillText: { color: '#7047EE', fontSize: 9, fontWeight: '900' }, ownerDot: { width: 9, height: 9, borderRadius: 5 }, outlineAction: { minHeight: 48, borderRadius: 15, borderWidth: 1, borderStyle: 'dashed', borderColor: t.primary, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7 }, outlineActionText: { color: t.primary, fontSize: 11, fontWeight: '800' },
     messageList: { padding: 18, paddingBottom: 24, gap: 16 }, chatHeader: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 12, paddingBottom: 14, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: t.line }, homeThreadIcon: { width: 42, height: 42, borderRadius: 14, backgroundColor: `${t.primary}14`, alignItems: 'center', justifyContent: 'center' }, chatTitle: { color: t.text, fontSize: 14, fontWeight: '800' }, botHint: { minHeight: 48, borderRadius: 15, paddingHorizontal: 12, marginBottom: 5, flexDirection: 'row', gap: 8, alignItems: 'center', backgroundColor: '#7047EE12', borderWidth: 1, borderColor: '#7047EE30' }, botHintText: { color: t.text, fontSize: 10, lineHeight: 14, flex: 1, fontWeight: '700' }, messageWrap: { maxWidth: '88%', flexDirection: 'row', gap: 8, alignSelf: 'flex-start' }, messageBody: { flexShrink: 1 }, messageMine: { alignSelf: 'flex-end' }, chatAvatar: { width: 32, height: 32, backgroundColor: '#FFE1CF' }, botAvatar: { width: 32, height: 32, backgroundColor: '#7047EE' }, messageAuthor: { color: t.muted, fontSize: 8, marginBottom: 4 }, botAuthor: { color: '#7047EE', fontWeight: '800' }, messageAuthorMine: { textAlign: 'right' }, messageBubble: { backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, borderRadius: 5, borderTopRightRadius: 16, borderBottomLeftRadius: 16, borderBottomRightRadius: 16, padding: 12 }, botBubble: { borderColor: '#7047EE55', backgroundColor: t.dark ? '#251F46' : '#F5F0FF' }, messageBubbleMine: { backgroundColor: t.primary, borderColor: t.primary, borderTopLeftRadius: 16, borderTopRightRadius: 5 }, messageText: { color: t.text, fontSize: 12, lineHeight: 17 }, messageTextMine: { color: '#fff' }, cohMention: { color: '#FFD84D', fontWeight: '900', textShadowColor: '#FFD84D99', textShadowRadius: 8 }, composeRow: { minHeight: 61, paddingHorizontal: 12, paddingVertical: 8, gap: 8, flexDirection: 'row', alignItems: 'center', borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: t.line, backgroundColor: t.surfaceStrong }, composeRowCoh: { borderTopColor: '#A777FF', backgroundColor: t.dark ? '#211A42' : '#F7F0FF', shadowColor: '#7047EE', shadowOpacity: .42, shadowRadius: 16, shadowOffset: { width: 0, height: -3 } }, composePlus: { width: 36, height: 36, borderRadius: 12, backgroundColor: `${t.primary}13`, alignItems: 'center', justifyContent: 'center' }, composeCohBadge: { backgroundColor: '#7047EE', shadowColor: '#A777FF', shadowOpacity: .9, shadowRadius: 10 }, composeInput: { flex: 1, minHeight: 40, maxHeight: 90, borderRadius: 13, borderWidth: 1, borderColor: t.line, backgroundColor: t.surface, color: t.text, paddingHorizontal: 12, fontSize: 12 }, composeInputCoh: { borderColor: '#A777FF', borderWidth: 2, color: t.dark ? '#E8DDFF' : '#4B168D', fontWeight: '800', shadowColor: '#7047EE', shadowOpacity: .5, shadowRadius: 9 }, sendButton: { width: 37, height: 37, borderRadius: 12, backgroundColor: t.primary, alignItems: 'center', justifyContent: 'center' }, sendButtonCoh: { backgroundColor: '#7047EE', shadowColor: '#A777FF', shadowOpacity: .9, shadowRadius: 10 },
     moreIntro: { color: t.muted, fontSize: 12, lineHeight: 18, marginBottom: 4 }, moreGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 11 }, moreCard: { width: '48.5%', minHeight: 180, borderRadius: 22, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, padding: 16 }, moreIcon: { width: 45, height: 45, borderRadius: 15, alignItems: 'center', justifyContent: 'center' }, moreTitle: { color: t.text, fontSize: 15, fontWeight: '800', marginTop: 17 }, moreDetail: { color: t.muted, fontSize: 9, lineHeight: 14, marginTop: 5, paddingRight: 10 }, moreChevron: { position: 'absolute', right: 14, bottom: 14 },
     familyHero: { minHeight: 116, borderRadius: 22, padding: 18, flexDirection: 'row', alignItems: 'center', backgroundColor: t.surface, borderWidth: 1, borderColor: t.line }, familyHeroTitle: { color: t.text, fontSize: 22, fontWeight: '900', marginTop: 5, marginBottom: 4 }, addProfileButton: { width: 46, height: 46, borderRadius: 15, backgroundColor: t.primary, alignItems: 'center', justifyContent: 'center', marginLeft: 'auto' }, profileRow: { minHeight: 88, borderRadius: 19, padding: 12, flexDirection: 'row', alignItems: 'center', gap: 11, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line }, profileAvatar: { width: 42, height: 42, borderRadius: 15, overflow: 'hidden', alignItems: 'center', justifyContent: 'center' }, profileAvatarLarge: { width: 58, height: 58, borderRadius: 19 }, profileAvatarImage: { width: '100%', height: '100%' }, profileName: { color: t.text, fontSize: 14, fontWeight: '900' }, profileBio: { color: t.muted, fontSize: 9, lineHeight: 13, marginTop: 4 }, profileSheet: { maxHeight: '88%', backgroundColor: t.surfaceStrong, borderTopLeftRadius: 28, borderTopRightRadius: 28 }, profileSheetContent: { paddingHorizontal: 19, paddingTop: 9, paddingBottom: 34 }, photoEditor: { minHeight: 76, borderRadius: 18, padding: 10, flexDirection: 'row', alignItems: 'center', gap: 12, marginTop: 16, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line }, profilePrivacy: { color: t.muted, fontSize: 9, lineHeight: 14, marginTop: 14 },
     searchInput: { height: 45, borderRadius: 15, borderWidth: 1, borderColor: t.line, backgroundColor: t.surface, color: t.text, paddingHorizontal: 14 }, notesGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 }, noteCard: { width: '48.5%', minHeight: 140, borderRadius: 19, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, padding: 15 }, noteEmoji: { fontSize: 24 }, noteTitle: { color: t.text, fontSize: 12, fontWeight: '800', marginTop: 18, marginBottom: 4 }, noteChevron: { position: 'absolute', right: 12, bottom: 12 },
-    recapHero: { minHeight: 260, borderRadius: 24, padding: 23, justifyContent: 'center' }, recapHeroLabel: { color: '#FFFFFFB5', fontSize: 8, fontWeight: '800', letterSpacing: 1, marginTop: 13 }, recapHeroTitle: { color: '#fff', fontSize: 28, lineHeight: 31, fontWeight: '800', letterSpacing: -1, marginTop: 8 }, recapHeroText: { color: '#FFFFFFC0', fontSize: 11, lineHeight: 16, marginTop: 8 }, recapActionRow: { flexDirection: 'row', gap: 8, marginTop: 18 }, recapHeroButton: { alignSelf: 'flex-start', minHeight: 38, borderRadius: 12, backgroundColor: '#fff', flexDirection: 'row', gap: 7, alignItems: 'center', paddingHorizontal: 13 }, highlightRow: { minHeight: 61, flexDirection: 'row', gap: 11, alignItems: 'center', borderRadius: 16, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, padding: 12 }, highlightTime: { color: t.primary, fontSize: 11, fontWeight: '800', width: 38 }, highlightText: { color: t.text, fontSize: 11, fontWeight: '700', flex: 1 },
+    recapHero: { minHeight: 260, borderRadius: 24, padding: 23, justifyContent: 'center' }, recapHeroLabel: { color: '#FFFFFFB5', fontSize: 8, fontWeight: '800', letterSpacing: 1, marginTop: 13 }, recapHeroTitle: { color: '#fff', fontSize: 28, lineHeight: 31, fontWeight: '800', letterSpacing: -1, marginTop: 8 }, recapHeroText: { color: '#FFFFFFC0', fontSize: 11, lineHeight: 16, marginTop: 8 }, recapActionRow: { flexDirection: 'row', gap: 8, marginTop: 18 }, recapHeroButton: { alignSelf: 'flex-start', minHeight: 38, borderRadius: 12, backgroundColor: '#fff', flexDirection: 'row', gap: 7, alignItems: 'center', paddingHorizontal: 13 }, recapSnapshot: { minHeight: 66, borderRadius: 17, padding: 11, flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line }, recapSnapshotActive: { borderColor: '#7047EE88', backgroundColor: t.dark ? '#251F46' : '#F5F0FF' }, recapSnapshotIcon: { width: 38, height: 38, borderRadius: 13, alignItems: 'center', justifyContent: 'center', backgroundColor: '#7047EE14' }, recapSnapshotDetail: { borderRadius: 19, padding: 13, gap: 8, backgroundColor: t.surface, borderWidth: 1, borderColor: '#7047EE55' }, listenSnapshot: { alignSelf: 'flex-start', minHeight: 36, borderRadius: 11, paddingHorizontal: 10, flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: '#7047EE12' }, highlightRow: { minHeight: 61, flexDirection: 'row', gap: 11, alignItems: 'center', borderRadius: 16, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, padding: 12 }, highlightTime: { color: t.primary, fontSize: 11, fontWeight: '800', width: 38 }, highlightText: { color: t.text, fontSize: 11, fontWeight: '700', flex: 1 },
     automationCard: { minHeight: 90, borderRadius: 20, padding: 16, flexDirection: 'row', gap: 12, alignItems: 'center' }, automationLabel: { color: '#FFFFFFA8', fontSize: 7, fontWeight: '800', letterSpacing: 1 }, automationTitle: { color: '#fff', fontSize: 12, fontWeight: '800', lineHeight: 17, marginTop: 3 }, integrationRow: { minHeight: 78, borderRadius: 18, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, padding: 12, flexDirection: 'row', alignItems: 'center', gap: 10 }, integrationIcon: { width: 43, height: 43, borderRadius: 14, alignItems: 'center', justifyContent: 'center' }, integrationTitle: { color: t.text, fontSize: 12, fontWeight: '800' }, connectButton: { minHeight: 31, borderRadius: 10, borderWidth: 1, borderColor: t.primary, paddingHorizontal: 9, alignItems: 'center', justifyContent: 'center' }, connectedButton: { borderColor: '#19A47B', backgroundColor: '#19A47B12' }, connectText: { color: t.primary, fontSize: 8, fontWeight: '800' }, connectedText: { color: '#19A47B' },
     chiefHero: { minHeight: 210, borderRadius: 24, padding: 22, justifyContent: 'center' }, chiefBadge: { width: 48, height: 48, borderRadius: 16, backgroundColor: '#fff', alignItems: 'center', justifyContent: 'center', marginBottom: 14 }, chiefHeroTitle: { color: '#fff', fontSize: 28, lineHeight: 32, fontWeight: '800', letterSpacing: -1, marginTop: 5 }, chiefSettingCard: { borderRadius: 19, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, padding: 13, gap: 12 }, settingRowTop: { flexDirection: 'row', alignItems: 'center', gap: 10 }, chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 }, choiceChip: { minHeight: 34, borderRadius: 11, borderWidth: 1, borderColor: t.line, paddingHorizontal: 11, alignItems: 'center', justifyContent: 'center', backgroundColor: t.surfaceStrong }, choiceChipActive: { backgroundColor: t.primary, borderColor: t.primary }, choiceChipText: { color: t.text, fontSize: 9, fontWeight: '800' }, choiceChipTextActive: { color: '#fff' }, preferenceGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 9 }, preferenceTile: { width: '48.5%', minHeight: 58, borderRadius: 15, padding: 11, flexDirection: 'row', gap: 8, alignItems: 'center', backgroundColor: t.surface, borderWidth: 1, borderColor: t.line }, preferenceTileActive: { borderColor: '#19A47B55', backgroundColor: '#19A47B0D' }, preferenceText: { color: t.text, fontSize: 10, fontWeight: '700', flex: 1 }, memberChip: { minHeight: 36, borderRadius: 18, borderWidth: 1, borderColor: t.line, paddingHorizontal: 14, alignItems: 'center', justifyContent: 'center', backgroundColor: t.surface }, memberChipActive: { backgroundColor: t.primary, borderColor: t.primary }, followUpCard: { minHeight: 72, borderRadius: 18, padding: 12, flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line },
     personSetting: { minHeight: 65, borderRadius: 17, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, padding: 11, flexDirection: 'row', alignItems: 'center', gap: 10 }, settingRow: { minHeight: 70, borderRadius: 17, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, padding: 13, flexDirection: 'row', alignItems: 'center', gap: 11 }, settingTitle: { color: t.text, fontSize: 12, fontWeight: '800' },
@@ -1549,10 +2039,23 @@ function createStyles(t: Theme) {
     chatModeTabs: { flexDirection: 'row', gap: 8, paddingHorizontal: 14, paddingVertical: 9, backgroundColor: t.surfaceStrong, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: t.line }, chatModeTab: { flex: 1, minHeight: 39, borderRadius: 13, flexDirection: 'row', gap: 7, alignItems: 'center', justifyContent: 'center', backgroundColor: t.surface, borderWidth: 1, borderColor: t.line }, chatModeTabActive: { backgroundColor: t.primary, borderColor: t.primary }, chatModeCohActive: { backgroundColor: '#7047EE', borderColor: '#7047EE' }, chatModeText: { color: t.text, fontSize: 10, fontWeight: '800' }, chatModeTextActive: { color: '#fff' }, emptyChat: { minHeight: 180, alignItems: 'center', justifyContent: 'center', gap: 10, opacity: .82 },
     choreRewardText: { fontSize: 9, fontWeight: '800', marginTop: 4 }, rewardModalGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 }, rewardModalChoice: { width: '48.5%', minHeight: 58, borderRadius: 15, padding: 11, flexDirection: 'row', gap: 8, alignItems: 'center', backgroundColor: t.surface, borderWidth: 1, borderColor: t.line }, rewardValueRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 }, eventDetailRow: { minHeight: 62, borderRadius: 16, marginTop: 10, padding: 12, flexDirection: 'row', alignItems: 'center', gap: 11, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line },
     fullModalHeader: { minHeight: 72, paddingHorizontal: 18, paddingVertical: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', backgroundColor: t.surfaceStrong, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: t.line }, inviteFamilyCard: { minHeight: 82, borderRadius: 19, padding: 13, flexDirection: 'row', alignItems: 'center', gap: 11, backgroundColor: '#7047EE12', borderWidth: 1, borderColor: '#7047EE35' }, inviteFamilyIcon: { width: 45, height: 45, borderRadius: 15, backgroundColor: '#7047EE', alignItems: 'center', justifyContent: 'center' },
+    welcomePage: { flex: 1, backgroundColor: t.canvas },
+    welcomeContent: { padding: 18, paddingBottom: 36, gap: 12 },
+    welcomeHero: { minHeight: 260, borderRadius: 26, padding: 23, justifyContent: 'center', shadowColor: '#24116D', shadowOpacity: .24, shadowRadius: 18, shadowOffset: { width: 0, height: 9 } },
+    welcomeMark: { width: 54, height: 54, borderRadius: 18, backgroundColor: '#fff', alignItems: 'center', justifyContent: 'center' },
+    welcomeTitle: { color: '#fff', fontSize: 29, lineHeight: 33, fontWeight: '900', letterSpacing: -1, marginTop: 8 },
+    welcomeText: { color: '#FFFFFFCC', fontSize: 12, lineHeight: 18, marginTop: 9 },
+    welcomeRow: { minHeight: 94, borderRadius: 20, padding: 14, flexDirection: 'row', alignItems: 'center', gap: 12, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line },
+    welcomeAlertCard: { minHeight: 84, borderRadius: 20, padding: 14, flexDirection: 'row', alignItems: 'center', gap: 11, backgroundColor: t.surfaceStrong, borderWidth: 1, borderColor: '#FF7A2E42' },
+    welcomeEnableButton: { minHeight: 34, borderRadius: 11, backgroundColor: '#FF7A2E', paddingHorizontal: 11, alignItems: 'center', justifyContent: 'center' },
+    welcomeEnableText: { color: '#fff', fontSize: 9, fontWeight: '900' },
+    welcomeActions: { flexDirection: 'row', gap: 9 },
+    secondaryWelcomeButton: { flex: 1, minHeight: 48, borderRadius: 15, flexDirection: 'row', gap: 7, alignItems: 'center', justifyContent: 'center', backgroundColor: t.surface, borderWidth: 1, borderColor: t.line },
+    secondaryWelcomeText: { color: t.text, fontSize: 10, fontWeight: '900' },
   });
 }
 
 
 export default function App() {
-  return <ShareIntentProvider><AuthGate><CohoApp /></AuthGate></ShareIntentProvider>;
+  return <AppErrorBoundary><ShareIntentProvider><AuthGate><CohoApp /></AuthGate></ShareIntentProvider></AppErrorBoundary>;
 }

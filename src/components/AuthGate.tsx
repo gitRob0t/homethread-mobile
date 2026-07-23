@@ -113,9 +113,9 @@ function pendingInviteKey(kind: InviteLink['kind']) {
 }
 
 function invitationFromUrl(url: string): InviteLink | null {
-  const household = url.match(/^homethread:\/\/invite\/([a-f0-9]+)(?:[/?#]|$)/i);
+  const household = url.match(/^(?:coho|homethread):\/\/invite\/([a-f0-9]+)(?:[/?#]|$)/i);
   if (household?.[1]) return { kind: 'household', token: household[1] };
-  const trip = url.match(/^homethread:\/\/trip-invite\/([a-f0-9]+)(?:[/?#]|$)/i);
+  const trip = url.match(/^(?:coho|homethread):\/\/trip-invite\/([a-f0-9]+)(?:[/?#]|$)/i);
   if (trip?.[1]) return { kind: 'trip', token: trip[1] };
   return null;
 }
