@@ -1,4 +1,5 @@
 import { supabase } from '../lib/supabase';
+import { invokeEdgeFunction } from './edgeFunctions';
 
 export type HouseholdPerson = {
   id: string;
@@ -47,14 +48,13 @@ export async function sendHouseholdInvitation(input: {
   role: 'admin' | 'member' | 'child';
   name?: string;
 }) {
-  const { data, error } = await supabase.functions.invoke<{
+  const data = await invokeEdgeFunction<{
     invitationId: string;
     invitationToken: string;
     inviteUrl: string;
     emailSent: boolean;
     deliveryError?: string | null;
   }>('send-household-invite', { body: input });
-  if (error) throw error;
   if (!data?.inviteUrl) throw new Error('The secure invitation link was not returned.');
   return data;
 }

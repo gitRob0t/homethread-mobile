@@ -1,4 +1,5 @@
 import { supabase } from '../lib/supabase';
+import { invokeEdgeFunction } from './edgeFunctions';
 
 export type AutomationTrigger =
   | 'schedule'
@@ -163,15 +164,13 @@ export async function deleteAutomationRule(ruleId: string) {
 }
 
 export async function runAutomationNow(ruleId: string) {
-  const { data, error } = await supabase.functions.invoke<{
+  return invokeEdgeFunction<{
     executed: number;
     skipped: number;
     failed: number;
   }>('run-automations', {
     body: { ruleId, force: true },
   });
-  if (error) throw error;
-  return data;
 }
 
 export function subscribeToAutomations(householdId: string, onChange: () => void) {

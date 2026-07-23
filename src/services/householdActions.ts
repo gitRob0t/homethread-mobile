@@ -1,4 +1,5 @@
 import { supabase } from '../lib/supabase';
+import { invokeEdgeFunction } from './edgeFunctions';
 
 export type HouseholdActionKind =
   | 'event'
@@ -153,13 +154,12 @@ export async function getInboxExtraction(itemId: string) {
 }
 
 export async function extractInboxItem(itemId: string, force = false) {
-  const { data, error } = await supabase.functions.invoke<{
+  const data = await invokeEdgeFunction<{
     extraction: InboxExtraction;
     actions: HouseholdAction[];
   }>('coh-extract', {
     body: { inboundItemId: itemId, force },
   });
-  if (error) throw error;
   if (!data?.extraction) throw new Error('Coh did not return an inbox extraction.');
   return data;
 }

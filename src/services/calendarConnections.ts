@@ -1,4 +1,5 @@
 import { supabase } from '../lib/supabase';
+import { invokeEdgeFunction } from './edgeFunctions';
 
 export type CalendarProvider = 'google' | 'outlook';
 export type ProviderCalendar = {
@@ -45,7 +46,7 @@ export async function startCalendarConnection(
   householdId: string,
   provider: CalendarProvider,
 ) {
-  const { data, error } = await supabase.functions.invoke<{ authorizationUrl: string }>(
+  const data = await invokeEdgeFunction<{ authorizationUrl: string }>(
     'calendar-oauth',
     {
       body: {
@@ -56,7 +57,6 @@ export async function startCalendarConnection(
       },
     },
   );
-  if (error) throw error;
   if (!data?.authorizationUrl) throw new Error('The provider authorization page was not returned.');
   return data.authorizationUrl;
 }
@@ -67,19 +67,13 @@ export async function saveCalendarConnectionSettings(input: {
   defaultWriteCalendarId: string | null;
   syncEnabled: boolean;
 }) {
-  const { data, error } = await supabase.functions.invoke('calendar-oauth', {
+  return invokeEdgeFunction('calendar-oauth', {
     body: { action: 'settings', ...input },
   });
-  if (error) throw error;
-  return data;
 }
 
 export async function syncCalendarConnection(connectionId: string) {
-  const { data, error } = await supabase.functions.invoke('calendar-sync', {
-    body: { connectionId },
-  });
-  if (error) throw error;
-  return data as {
+  return invokeEdgeFunction<{
     results?: Array<{
       ok: boolean;
       imported?: number;
@@ -88,15 +82,15 @@ export async function syncCalendarConnection(connectionId: string) {
       conflicts?: number;
       error?: string;
     }>;
-  };
+  }>('calendar-sync', {
+    body: { connectionId },
+  });
 }
 
 export async function disconnectCalendarConnection(connectionId: string) {
-  const { data, error } = await supabase.functions.invoke('calendar-oauth', {
+  return invokeEdgeFunction('calendar-oauth', {
     body: { action: 'disconnect', connectionId },
   });
-  if (error) throw error;
-  return data;
 }
 
 export async function listCalendarConflicts(householdId: string) {
@@ -114,7 +108,7 @@ export async function resolveCalendarConflict(
   conflictId: string,
   resolution: 'keep_local' | 'keep_provider',
 ) {
-  const { data, error } = await supabase.functions.invoke<{
+  const data = await invokeEdgeFunction<{
     ok: boolean;
     eventId: string;
     status: 'kept_local' | 'kept_provider';
@@ -125,7 +119,6 @@ export async function resolveCalendarConflict(
       resolution,
     },
   });
-  if (error) throw error;
   if (!data?.ok) throw new Error('The calendar conflict could not be resolved.');
   return data;
 }

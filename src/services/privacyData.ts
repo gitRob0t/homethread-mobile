@@ -1,5 +1,6 @@
 import { supabase } from '../lib/supabase';
 import { clearLocationTrackingForSignOut } from './familyLocation';
+import { invokeEdgeFunction } from './edgeFunctions';
 
 export type PrivacyRequest = {
   id: string;
@@ -29,22 +30,20 @@ export async function listPrivacyRequests() {
 }
 
 export async function createHouseholdExport(householdId: string) {
-  const { data, error } = await supabase.functions.invoke<{
+  const data = await invokeEdgeFunction<{
     requestId: string;
     downloadUrl: string;
     expiresAt: string;
   }>('privacy-data', { body: { action: 'export', householdId } });
-  if (error) throw error;
   if (!data?.downloadUrl) throw new Error('The export download was not created.');
   return data;
 }
 
 export async function deleteCohoAccount(email: string, confirmation: string) {
-  const { data, error } = await supabase.functions.invoke<{ deleted: boolean }>(
+  const data = await invokeEdgeFunction<{ deleted: boolean }>(
     'privacy-data',
     { body: { action: 'delete_account', email, confirmation } },
   );
-  if (error) throw error;
   if (!data?.deleted) throw new Error('The account was not deleted.');
   await clearLocationTrackingForSignOut().catch(() => undefined);
   await supabase.auth.signOut({ scope: 'local' }).catch(() => undefined);

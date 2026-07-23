@@ -1,4 +1,5 @@
 import { supabase } from '../lib/supabase';
+import { invokeEdgeFunction } from './edgeFunctions';
 
 export type GroceryItem = {
   id: string;
@@ -116,7 +117,7 @@ export async function removeGroceryItem(itemId: string) {
 }
 
 export async function createInstacartShoppingLink(householdId: string) {
-  const { data, error } = await supabase.functions.invoke<{
+  const data = await invokeEdgeFunction<{
     url?: string;
     itemCount?: number;
     error?: string;
@@ -124,11 +125,6 @@ export async function createInstacartShoppingLink(householdId: string) {
   }>('instacart-shopping-list', {
     body: { householdId },
   });
-  if (error) {
-    const context = (error as { context?: { json?: () => Promise<{ error?: string }> } }).context;
-    const payload = await context?.json?.().catch(() => undefined);
-    throw new Error(payload?.error || error.message || 'The Instacart shopping link could not be created.');
-  }
   if (!data?.url) throw new Error(data?.error || 'Instacart did not return a shopping link.');
   return { url: data.url, itemCount: data.itemCount ?? 0 };
 }

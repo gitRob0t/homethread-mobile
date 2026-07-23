@@ -68,7 +68,9 @@ bash scripts/deploy-supabase.sh
 ```
 
 The script links the project named by `SUPABASE_PROJECT_REF`, applies every
-pending migration, and deploys all Edge Functions with the correct gateway mode.
+pending migration, pins Coh to the supported `gpt-5.6-sol` API model unless
+`OPENAI_MODEL` is deliberately overridden, and deploys all Edge Functions with
+the correct gateway mode.
 Webhook, OAuth callback, and scheduler endpoints bypass Supabase's JWT gateway
 only because each function verifies its own signature, session, service token,
 or cron secret.

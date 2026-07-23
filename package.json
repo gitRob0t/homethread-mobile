@@ -40,6 +40,7 @@
     "typecheck": "tsc --noEmit",
     "doctor": "npx expo-doctor",
     "eval:coh": "node scripts/coh-evals.mjs",
+    "eval:backend": "node scripts/backend-contracts.mjs",
     "release:check": "bash scripts/release-check.sh",
     "deploy:supabase": "bash scripts/deploy-supabase.sh"
   }

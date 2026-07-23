@@ -271,7 +271,7 @@ Deno.serve(async (request) => {
         .in('status', ['draft', 'needs_details', 'pending_approval', 'failed']);
     }
 
-    const model = Deno.env.get('OPENAI_MODEL') || 'gpt-5.6-terra';
+    const model = Deno.env.get('OPENAI_MODEL') || 'gpt-5.6-sol';
     const { data: extraction, error: extractionError } = await admin
       .from('inbox_extractions')
       .insert({

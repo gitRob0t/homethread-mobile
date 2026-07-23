@@ -143,11 +143,45 @@ Deno.serve(async (request) => {
     });
   } catch (error) {
     console.error('Household invitation error', error);
-    return json({
-      error: error instanceof Error ? error.message : 'The invitation could not be created.',
-    }, 400);
+    const failure = invitationFailure(error);
+    return json({ error: failure.message, code: failure.code }, failure.status);
   }
 });
+
+function invitationFailure(error: unknown) {
+  const message = error instanceof Error
+    ? error.message
+    : typeof error === 'object' && error && 'message' in error
+      ? String(error.message)
+      : '';
+  const normalized = message.toLowerCase();
+  if (normalized.includes('gen_random_bytes') || normalized.includes('function digest')) {
+    return {
+      status: 503,
+      code: 'backend_update_required',
+      message: 'Coho’s secure invitation service needs the latest database update.',
+    };
+  }
+  if (normalized.includes('only household administrators')) {
+    return {
+      status: 403,
+      code: 'household_admin_required',
+      message: 'Only a household administrator can invite family members.',
+    };
+  }
+  if (normalized.includes('valid email') || normalized.includes('email address is required')) {
+    return {
+      status: 400,
+      code: 'invalid_email',
+      message: 'Enter a valid email address.',
+    };
+  }
+  return {
+    status: 500,
+    code: 'invitation_create_failed',
+    message: 'The secure invitation could not be created. Please retry.',
+  };
+}
 
 async function sha256(value: string) {
   const bytes = new TextEncoder().encode(value);

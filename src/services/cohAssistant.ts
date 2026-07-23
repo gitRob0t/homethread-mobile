@@ -1,4 +1,5 @@
 import { supabase } from '../lib/supabase';
+import { invokeEdgeFunction } from './edgeFunctions';
 import { recordAppEvent } from './telemetry';
 
 export type CohDraft = {
@@ -68,11 +69,10 @@ export async function askCoh(input: {
   history: CohHistoryItem[];
   attachments?: CohAttachment[];
 }): Promise<CohResponse> {
-  const { data, error } = await supabase.functions.invoke<CohResponse>('coh-assistant', {
-    body: input,
-  });
-
-  if (error) {
+  let data: CohResponse;
+  try {
+    data = await invokeEdgeFunction<CohResponse>('coh-assistant', { body: input });
+  } catch (error) {
     void recordAppEvent('coh_client_request_failed', {
       householdId: input.householdId,
       severity: 'error',

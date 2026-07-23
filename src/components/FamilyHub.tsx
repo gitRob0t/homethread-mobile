@@ -22,7 +22,10 @@ type Role = 'admin' | 'member' | 'child';
 type Member = {
   user_id: string;
   role: string;
-  profiles: { display_name: string; avatar_url: string | null }[];
+  profiles:
+    | { display_name: string; avatar_url: string | null }
+    | { display_name: string; avatar_url: string | null }[]
+    | null;
   onboarding: {
     profile_completed: boolean;
     notifications_completed: boolean;
@@ -118,13 +121,14 @@ export default function FamilyHub() {
       <Text style={styles.sectionTitle}>Family members</Text>
       {busy && members.length === 0 ? <ActivityIndicator color="#2257F4" /> : members.map((member) => {
         const readiness = memberReadiness(member);
+        const profile = Array.isArray(member.profiles) ? member.profiles[0] : member.profiles;
         return (
           <View key={member.user_id} style={styles.row}>
             <View style={styles.avatar}>
-              <Text style={styles.avatarText}>{initials(member.profiles[0]?.display_name ?? 'Family')}</Text>
+              <Text style={styles.avatarText}>{initials(profile?.display_name ?? 'Family')}</Text>
             </View>
             <View style={styles.flex}>
-              <Text style={styles.name}>{member.profiles[0]?.display_name ?? 'Family member'}</Text>
+              <Text style={styles.name}>{profile?.display_name ?? 'Family member'}</Text>
               <Text style={styles.meta}>{roleLabel(member.role)} · {readiness.detail}</Text>
             </View>
             <View style={[styles.activePill, { backgroundColor: readiness.background }]}>

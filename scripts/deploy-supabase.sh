@@ -2,10 +2,15 @@
 set -euo pipefail
 
 PROJECT_REF="${SUPABASE_PROJECT_REF:?Set SUPABASE_PROJECT_REF to the target Supabase project ref}"
+OPENAI_MODEL_VALUE="${OPENAI_MODEL:-gpt-5.6-sol}"
 SUPABASE=(npx --yes supabase@2.109.1)
 
 echo "Linking Supabase project ${PROJECT_REF}..."
 "${SUPABASE[@]}" link --project-ref "${PROJECT_REF}"
+
+echo "Setting the supported Coh model (${OPENAI_MODEL_VALUE})..."
+"${SUPABASE[@]}" secrets set "OPENAI_MODEL=${OPENAI_MODEL_VALUE}" \
+  --project-ref "${PROJECT_REF}"
 
 echo "Applying pending database migrations..."
 "${SUPABASE[@]}" db push

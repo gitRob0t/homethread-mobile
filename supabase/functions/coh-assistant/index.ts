@@ -429,7 +429,7 @@ ${JSON.stringify(householdContext)}`;
       })),
       { role: 'user', content: userContent },
     ];
-    const model = Deno.env.get('OPENAI_MODEL') || 'gpt-5.6-terra';
+    const model = Deno.env.get('OPENAI_MODEL') || 'gpt-5.6-sol';
     const openAIResponse = await fetchWithRetry('https://api.openai.com/v1/responses', {
       method: 'POST',
       headers: { Authorization: `Bearer ${openAIKey}`, 'Content-Type': 'application/json' },
