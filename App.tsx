@@ -37,12 +37,19 @@ import {
 import { writeApprovedEventToDevice } from './src/services/deviceCalendar';
 import { supabase } from './src/lib/supabase';
 import {
+  deleteHouseholdPerson,
   listHouseholdPeople,
   listHouseholds,
+  removeHouseholdMember,
   saveHouseholdPerson,
   type HouseholdPerson,
   uploadHouseholdPersonAvatar,
 } from './src/services/households';
+import {
+  loadMoreMenuPreferences,
+  saveMoreMenuPreferences,
+  type MoreMenuPreferences,
+} from './src/services/uiPreferences';
 import { addGroceryItems, upsertMealPlans } from './src/services/householdOperations';
 import { registerPushDevice, syncBriefingPreferences } from './src/services/pushNotifications';
 import {
@@ -164,6 +171,7 @@ type RewardGoal = { id: string; title: string; detail: string; cost: number; ico
 type FamilyProfile = {
   id: string;
   linkedUserId?: string | null;
+  membershipRole?: 'owner' | 'admin' | 'member' | 'child' | null;
   name: string;
   dob: string;
   bio: string;
@@ -174,6 +182,62 @@ type FamilyProfile = {
   color: string;
   ink: string;
 };
+
+type MoreMenuItem = {
+  title: Exclude<MoreView, 'Menu' | 'Privacy'>;
+  icon: string;
+  color: string;
+  detail: string;
+};
+
+const moreMenuItems: MoreMenuItem[] = [
+  { title: 'Chief of Home', icon: 'home-outline', color: '#7047EE', detail: 'Personal briefings, week ahead, and follow-ups' },
+  { title: 'Family', icon: 'people-outline', color: '#2257F4', detail: 'Members, roles, and family invitations' },
+  { title: 'Family Inbox', icon: 'mail-unread-outline', color: '#FF7A2E', detail: 'One private address for school, appointments, and activities' },
+  { title: 'Meals & Groceries', icon: 'restaurant-outline', color: '#D7550D', detail: 'Meal plans, shared groceries, and Coh Home Chef' },
+  { title: 'Family Places', icon: 'location-outline', color: '#19A47B', detail: 'Opt-in location, arrivals, and departures' },
+  { title: 'Trips', icon: 'airplane-outline', color: '#7047EE', detail: 'Private schedules with friends and other families' },
+  { title: 'Calendar Sync', icon: 'calendar-outline', color: '#2257F4', detail: 'Connect selected calendars on this iPhone' },
+  { title: 'Notes', icon: 'document-text-outline', color: '#7C4DFF', detail: 'Lists, instructions, and family details' },
+  { title: 'Recaps', icon: 'sparkles-outline', color: '#2257F4', detail: 'Daily summaries by push and email' },
+  { title: 'Automations', icon: 'flash-outline', color: '#7047EE', detail: 'Real cloud rules, retries, and household follow-through' },
+  { title: 'Integrations', icon: 'extension-puzzle-outline', color: '#19A47B', detail: 'Skylight, calendars, email, and more' },
+  { title: 'Settings', icon: 'settings-outline', color: '#FF7A2E', detail: 'Household, privacy, and preferences' },
+];
+
+const moreMenuStorageKey = 'coho-more-menu-v1';
+const defaultMoreMenuPreferences: MoreMenuPreferences = {
+  order: moreMenuItems.map((item) => item.title),
+  hidden: [],
+};
+
+function normalizeMoreMenuPreferences(
+  value: Partial<MoreMenuPreferences> | null | undefined,
+): MoreMenuPreferences {
+  const validTitles = new Set<string>(moreMenuItems.map((item) => item.title));
+  const requestedOrder = Array.isArray(value?.order)
+    ? value.order.filter((title): title is string => (
+      typeof title === 'string' && validTitles.has(title)
+    ))
+    : [];
+  const order = [...new Set([...requestedOrder, ...defaultMoreMenuPreferences.order])]
+    .filter((title) => validTitles.has(title));
+  const hidden = Array.isArray(value?.hidden)
+    ? [...new Set(value.hidden.filter((title): title is string => (
+      typeof title === 'string' && validTitles.has(title)
+    )))]
+    : [];
+  return { order, hidden };
+}
+
+function parseMoreMenuPreferences(raw: string | null) {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as Partial<MoreMenuPreferences>;
+  } catch {
+    return null;
+  }
+}
 
 const defaultChiefPrefs: ChiefPrefs = { daily: true, dailyTime: '7:00 AM', weekAhead: true, weekAheadDay: 'Sunday', weekAheadTime: '6:00 PM', followUp: true, followUpDay: 'Friday', followUpTime: '5:00 PM', push: true, email: false, quietHours: true, events: true, chores: true, messages: false, followUps: true, members: [] };
 
@@ -217,6 +281,7 @@ function CohoApp() {
   const systemScheme = useColorScheme();
   const [dark, setDark] = useState(systemScheme === 'dark');
   const [tab, setTab] = useState<Tab>('Today');
+  const [lastPrimaryTab, setLastPrimaryTab] = useState<Exclude<Tab, 'More'>>('Today');
   const [moreView, setMoreView] = useState<MoreView>('Menu');
   const [quickAddOpen, setQuickAddOpen] = useState(false);
   const [quickAddType, setQuickAddType] = useState('Event');
@@ -255,6 +320,10 @@ function CohoApp() {
   const [initialRecapId, setInitialRecapId] = useState<string | null>(null);
   const [briefingSnapshots, setBriefingSnapshots] = useState<BriefingSnapshot[]>([]);
   const [secondUserWelcomeOpen, setSecondUserWelcomeOpen] = useState(false);
+
+  useEffect(() => {
+    if (tab !== 'More') setLastPrimaryTab(tab);
+  }, [tab]);
 
   useEffect(() => {
     AsyncStorage.getItem('homethread-theme').then((saved) => {
@@ -1318,6 +1387,44 @@ function CohoApp() {
     }
   }
 
+  function deleteFamilyProfile(profile: FamilyProfile) {
+    const isSignedInMember = Boolean(profile.linkedUserId);
+    Alert.alert(
+      isSignedInMember ? 'Remove family member?' : 'Delete family profile?',
+      isSignedInMember
+        ? `${profile.name} will lose access to this household, its calendar, chat, assignments, and notifications. Shared family history will remain.`
+        : `${profile.name} will be removed from family profiles and future assignments. Existing shared history will remain.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: isSignedInMember ? 'Remove' : 'Delete',
+          style: 'destructive',
+          onPress: () => {
+            void (async () => {
+              if (!householdId) return;
+              try {
+                if (profile.linkedUserId) {
+                  await removeHouseholdMember(householdId, profile.linkedUserId);
+                } else {
+                  await deleteHouseholdPerson(profile.id);
+                }
+                setEditingProfile(null);
+                await reloadSharedData(householdId, currentUserId);
+                showNotice(isSignedInMember
+                  ? `${profile.name} was removed from the household`
+                  : `${profile.name}’s profile was deleted`);
+              } catch (error) {
+                showNotice(error instanceof Error
+                  ? error.message
+                  : 'The family member could not be removed.');
+              }
+            })();
+          },
+        },
+      ],
+    );
+  }
+
   async function activateChiefOfHome() {
     await saveChiefPreferences(chiefPrefs);
     if (chiefPrefs.push) {
@@ -1365,6 +1472,10 @@ function CohoApp() {
   }
 
   const title = tab === 'More' && moreView !== 'Menu' ? moreView : tab;
+  const currentMembershipRole = profiles.find(
+    (profile) => profile.linkedUserId === currentUserId,
+  )?.membershipRole;
+  const canManageFamily = currentMembershipRole === 'owner' || currentMembershipRole === 'admin';
   const openRecaps = () => { setInitialRecapId(null); setMoreView('Recaps'); setTab('More'); };
   const openCohPrompt = (prompt: string) => {
     setChatMode('coh');
@@ -1404,7 +1515,11 @@ function CohoApp() {
           onTheme={toggleTheme}
           onRecap={openRecaps}
           onAdd={() => setQuickAddOpen(true)}
-          onBack={tab === 'More' && moreView !== 'Menu' ? () => setMoreView('Menu') : undefined}
+          onBack={tab === 'More'
+            ? moreView !== 'Menu'
+              ? () => setMoreView('Menu')
+              : () => setTab(lastPrimaryTab)
+            : undefined}
         />
 
         <View style={styles.screen}>
@@ -1412,7 +1527,7 @@ function CohoApp() {
           {tab === 'Calendar' && <CalendarScreen theme={theme} styles={styles} botEvents={botEvents} focusDate={calendarFocusDate} onOpenEvent={setSelectedEvent} onAction={showNotice} onManage={() => { setMoreView('Integrations'); setTab('More'); }} />}
           {tab === 'Chores' && <ChoresScreen styles={styles} chores={chores} memberNames={profiles.map((profile) => profile.name)} rewardMember={rewardMember} setRewardMember={setRewardMember} selectedRewards={selectedRewards} onConfigure={setEditingChore} onAdd={() => { setQuickAddType('Chore'); setQuickAddOpen(true); }} onSelectReward={(member: string, reward: string) => { const next = { ...selectedRewards, [member]: reward }; setSelectedRewards(next); AsyncStorage.setItem('coho-reward-goals', JSON.stringify(next)); showNotice(`${member} picked a new reward goal`); }} onToggle={toggleChore} />}
           {tab === 'Chat' && <ChatScreen styles={styles} messages={messages} mode={chatMode} setMode={setChatMode} draft={messageDraft} setDraft={setMessageDraft} onSend={sendMessage} onAdd={() => setQuickAddOpen(true)} onVoice={toggleVoiceRequest} voiceRecording={voiceRecorderState.isRecording} voiceSending={voiceSending} cohThinking={cohThinking} />}
-          {tab === 'More' && moreView === 'Menu' && <MoreMenu styles={styles} setView={setMoreView} />}
+          {tab === 'More' && moreView === 'Menu' && <MoreMenu styles={styles} setView={setMoreView} userId={currentUserId} onNotice={showNotice} />}
           {tab === 'More' && moreView === 'Chief of Home' && <ChiefOfHomeScreen styles={styles} prefs={chiefPrefs} memberNames={profiles.map((profile) => profile.name)} setPrefs={saveChiefPreferences} onActivate={activateChiefOfHome} />}
           {tab === 'More' && moreView === 'Family' && <FamilyProfilesScreen styles={styles} profiles={profiles} onInvite={() => setFamilyHubOpen(true)} onEdit={setEditingProfile} onAdd={() => setEditingProfile({ id: `new-${Date.now()}`, name: '', dob: '', bio: '', role: 'Family member', color: '#DCE7FF', ink: '#2257F4' })} />}
           {tab === 'More' && moreView === 'Notes' && <NotesScreen styles={styles} householdId={householdId} userId={currentUserId} onAction={showNotice} />}
@@ -1467,7 +1582,22 @@ function CohoApp() {
         onCancel={cancelSharedItem}
         onApprove={sendSharedItemToCoh}
       />
-      <ProfileEditorModal visible={Boolean(editingProfile)} profile={editingProfile} styles={styles} dark={dark} onClose={() => setEditingProfile(null)} onSave={saveFamilyProfile} />
+      <ProfileEditorModal
+        visible={Boolean(editingProfile)}
+        profile={editingProfile}
+        styles={styles}
+        dark={dark}
+        onClose={() => setEditingProfile(null)}
+        onSave={saveFamilyProfile}
+        onDelete={deleteFamilyProfile}
+        canDelete={Boolean(
+          editingProfile
+          && !editingProfile.id.startsWith('new-')
+          && canManageFamily
+          && editingProfile.membershipRole !== 'owner'
+          && editingProfile.linkedUserId !== currentUserId
+        )}
+      />
       <Modal visible={familyHubOpen} animationType="slide" onRequestClose={() => setFamilyHubOpen(false)}><SafeAreaView style={styles.safeArea}><View style={styles.fullModalHeader}><View><Text style={styles.eyebrow}>HOUSEHOLD ACCESS</Text><Text style={styles.modalTitle}>Invite your family</Text></View><Pressable onPress={() => setFamilyHubOpen(false)} style={styles.iconButton}><Ionicons name="close" size={21} color={styles.iconColor.color} /></Pressable></View><FamilyHub /></SafeAreaView></Modal>
       <EventDetailModal event={selectedEvent} styles={styles} dark={dark} onClose={() => setSelectedEvent(null)} onFollowUp={markEventForFollowUp} />
       <ChoreEditorModal chore={editingChore} profiles={profiles} styles={styles} dark={dark} onClose={() => setEditingChore(null)} onSave={saveChoreSettings} onDelete={deleteChore} />
@@ -1641,6 +1771,7 @@ function personToProfile(person: HouseholdPerson, index: number): FamilyProfile 
   return {
     id: person.id,
     linkedUserId: person.linked_user_id,
+    membershipRole: person.membership_role ?? null,
     name: person.display_name,
     dob: person.date_of_birth ?? '',
     bio: person.bio ?? '',
@@ -1970,7 +2101,7 @@ function startOfWeek(date: Date) { const next = startOfDay(date); next.setDate(n
 function sameDay(a: Date, b: Date) { return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate(); }
 function localDateKey(date: Date) { return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`; }
 function FamilyProfilesScreen({ styles, profiles, onEdit, onAdd, onInvite }: { styles: any; profiles: FamilyProfile[]; onEdit: (profile: FamilyProfile) => void; onAdd: () => void; onInvite: () => void }) {
-  return <ScrollView contentContainerStyle={styles.scrollContent}><View style={styles.familyHero}><View style={styles.flex}><Text style={styles.progressLabel}>YOUR HOUSEHOLD</Text><Text style={styles.familyHeroTitle}>{profiles.length} family members</Text><Text style={styles.muted}>Profiles help Coh personalize schedules, rewards, reminders, and recaps.</Text></View><Pressable onPress={onAdd} style={styles.addProfileButton}><Ionicons name="person-add" size={20} color="#fff" /></Pressable></View><Pressable onPress={onInvite} style={styles.inviteFamilyCard}><View style={styles.inviteFamilyIcon}><Ionicons name="mail-unread" size={21} color="#fff" /></View><View style={styles.flex}><Text style={styles.settingTitle}>Invite another family member</Text><Text style={styles.muted}>Create a secure household invitation and share it from your iPhone.</Text></View><Ionicons name="chevron-forward" size={19} color={styles.iconColor.color} /></Pressable><Text style={styles.sectionTitle}>People</Text>{profiles.map((profile) => <Pressable key={profile.id} onPress={() => onEdit(profile)} style={styles.profileRow}><ProfileAvatar profile={profile} styles={styles} size="large" /><View style={styles.flex}><Text style={styles.profileName}>{profile.name || 'New family member'}</Text><Text style={styles.muted}>{profile.role}{profile.dob ? ` · Born ${profile.dob}` : ''}</Text><Text numberOfLines={1} style={styles.profileBio}>{profile.bio || 'Add a bio, interests, allergies, school, or anything Coh should know.'}</Text></View><Ionicons name="create-outline" size={20} color={styles.iconColor.color} /></Pressable>)}<Pressable onPress={onAdd} style={styles.outlineAction}><Ionicons name="person-add-outline" size={19} color="#2257F4" /><Text style={styles.outlineActionText}>Add family profile</Text></Pressable></ScrollView>;
+  return <ScrollView contentContainerStyle={styles.scrollContent}><View style={styles.familyHero}><View style={styles.flex}><Text style={styles.progressLabel}>YOUR HOUSEHOLD</Text><Text style={styles.familyHeroTitle}>{profiles.length} family members</Text><Text style={styles.muted}>Profiles help Coh personalize schedules, rewards, reminders, and recaps.</Text></View><Pressable onPress={onAdd} style={styles.addProfileButton}><Ionicons name="person-add" size={20} color="#fff" /></Pressable></View><Pressable onPress={onInvite} style={styles.inviteFamilyCard}><View style={styles.inviteFamilyIcon}><Ionicons name="mail-unread" size={21} color="#fff" /></View><View style={styles.flex}><Text style={styles.settingTitle}>Invite another family member</Text><Text style={styles.muted}>Create a secure household invitation and share it from your iPhone.</Text></View><Ionicons name="chevron-forward" size={19} color={styles.iconColor.color} /></Pressable><Text style={styles.sectionTitle}>People</Text>{profiles.map((profile) => <Pressable key={profile.id} onPress={() => onEdit(profile)} style={styles.profileRow}><ProfileAvatar profile={profile} styles={styles} size="large" /><View style={styles.flex}><Text style={styles.profileName}>{profile.name || 'New family member'}</Text><Text style={styles.muted}>{profile.membershipRole === 'owner' ? 'Household owner' : profile.role}{profile.dob ? ` · Born ${profile.dob}` : ''}</Text><Text numberOfLines={1} style={styles.profileBio}>{profile.bio || 'Add a bio, interests, allergies, school, or anything Coh should know.'}</Text></View><Ionicons name="create-outline" size={20} color={styles.iconColor.color} /></Pressable>)}<Pressable onPress={onAdd} style={styles.outlineAction}><Ionicons name="person-add-outline" size={19} color="#2257F4" /><Text style={styles.outlineActionText}>Add family profile</Text></Pressable></ScrollView>;
 }
 
 function ProfileAvatar({ profile, styles, size }: { profile: FamilyProfile; styles: any; size?: string }) {
@@ -1978,7 +2109,7 @@ function ProfileAvatar({ profile, styles, size }: { profile: FamilyProfile; styl
   return <View style={[styles.profileAvatar, size === 'large' && styles.profileAvatarLarge, { backgroundColor: profile.color }]}>{profile.avatarUri ? <Image source={{ uri: profile.avatarUri }} style={styles.profileAvatarImage} /> : <Text style={[styles.avatarText, { color: profile.ink }]}>{initials}</Text>}</View>;
 }
 
-function ProfileEditorModal({ visible, profile, styles, dark, onClose, onSave }: any) {
+function ProfileEditorModal({ visible, profile, styles, dark, onClose, onSave, onDelete, canDelete }: any) {
   const [draft, setDraft] = useState<FamilyProfile | null>(profile);
   useEffect(() => setDraft(profile), [profile]);
   if (!draft) return null;
@@ -1997,25 +2128,106 @@ function ProfileEditorModal({ visible, profile, styles, dark, onClose, onSave }:
     }
   }
   const update = (patch: Partial<FamilyProfile>) => setDraft((current) => current ? { ...current, ...patch } : current);
-  return <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}><KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.modalBackdrop}><Pressable style={styles.modalDismiss} onPress={onClose} /><ScrollView style={styles.profileSheet} contentContainerStyle={styles.profileSheetContent} keyboardShouldPersistTaps="handled"><View style={styles.modalHandle} /><View style={styles.modalHead}><View><Text style={styles.eyebrow}>FAMILY PROFILE</Text><Text style={styles.modalTitle}>{draft.name ? `Edit ${draft.name}` : 'Add someone'}</Text></View><Pressable onPress={onClose} style={styles.iconButton}><Ionicons name="close" size={21} color={styles.iconColor.color} /></Pressable></View><Pressable onPress={choosePhoto} style={styles.photoEditor}><ProfileAvatar profile={draft} styles={styles} size="large" /><View><Text style={styles.settingTitle}>Profile picture</Text><Text style={styles.link}>Choose from Photos</Text></View></Pressable><Text style={styles.fieldLabel}>NAME</Text><TextInput value={draft.name} onChangeText={(name) => update({ name })} placeholder="Full name" placeholderTextColor="#8B93A5" style={styles.modalInput} /><Text style={styles.fieldLabel}>DATE OF BIRTH</Text><TextInput value={draft.dob} onChangeText={(dob) => update({ dob })} placeholder="YYYY-MM-DD" placeholderTextColor="#8B93A5" keyboardType="numbers-and-punctuation" style={styles.modalInput} /><Text style={styles.fieldLabel}>ROLE</Text><View style={styles.chipRow}>{(['Adult admin', 'Family member', 'Child'] as FamilyProfile['role'][]).map((role) => <Pressable key={role} onPress={() => update({ role })} style={[styles.choiceChip, draft.role === role && styles.choiceChipActive]}><Text style={[styles.choiceChipText, draft.role === role && styles.choiceChipTextActive]}>{role}</Text></Pressable>)}</View><Text style={styles.fieldLabel}>ABOUT</Text><TextInput value={draft.bio} onChangeText={(bio) => update({ bio })} multiline placeholder="Interests, allergies, school, preferences, or anything useful for the family" placeholderTextColor="#8B93A5" style={[styles.modalInput, styles.modalTextArea]} /><Text style={styles.profilePrivacy}>This information stays inside your Coho household and is used to personalize family assistance.</Text><Pressable disabled={!draft.name.trim()} onPress={() => onSave(draft)} style={[styles.saveButton, !draft.name.trim() && { opacity: .45 }]}><Text style={styles.saveButtonText}>Save profile</Text></Pressable></ScrollView><StatusBar style={dark ? 'light' : 'dark'} /></KeyboardAvoidingView></Modal>;
+  return <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}><KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.modalBackdrop}><Pressable style={styles.modalDismiss} onPress={onClose} /><ScrollView style={styles.profileSheet} contentContainerStyle={styles.profileSheetContent} keyboardShouldPersistTaps="handled"><View style={styles.modalHandle} /><View style={styles.modalHead}><View><Text style={styles.eyebrow}>FAMILY PROFILE</Text><Text style={styles.modalTitle}>{draft.name ? `Edit ${draft.name}` : 'Add someone'}</Text></View><Pressable onPress={onClose} style={styles.iconButton}><Ionicons name="close" size={21} color={styles.iconColor.color} /></Pressable></View><Pressable onPress={choosePhoto} style={styles.photoEditor}><ProfileAvatar profile={draft} styles={styles} size="large" /><View><Text style={styles.settingTitle}>Profile picture</Text><Text style={styles.link}>Choose from Photos</Text></View></Pressable><Text style={styles.fieldLabel}>NAME</Text><TextInput value={draft.name} onChangeText={(name) => update({ name })} placeholder="Full name" placeholderTextColor="#8B93A5" style={styles.modalInput} /><Text style={styles.fieldLabel}>DATE OF BIRTH</Text><TextInput value={draft.dob} onChangeText={(dob) => update({ dob })} placeholder="YYYY-MM-DD" placeholderTextColor="#8B93A5" keyboardType="numbers-and-punctuation" style={styles.modalInput} /><Text style={styles.fieldLabel}>ROLE</Text><View style={styles.chipRow}>{(['Adult admin', 'Family member', 'Child'] as FamilyProfile['role'][]).map((role) => <Pressable key={role} onPress={() => update({ role })} style={[styles.choiceChip, draft.role === role && styles.choiceChipActive]}><Text style={[styles.choiceChipText, draft.role === role && styles.choiceChipTextActive]}>{role}</Text></Pressable>)}</View><Text style={styles.fieldLabel}>ABOUT</Text><TextInput value={draft.bio} onChangeText={(bio) => update({ bio })} multiline placeholder="Interests, allergies, school, preferences, or anything useful for the family" placeholderTextColor="#8B93A5" style={[styles.modalInput, styles.modalTextArea]} /><Text style={styles.profilePrivacy}>This information stays inside your Coho household and is used to personalize family assistance.</Text><Pressable disabled={!draft.name.trim()} onPress={() => onSave(draft)} style={[styles.saveButton, !draft.name.trim() && { opacity: .45 }]}><Text style={styles.saveButtonText}>Save profile</Text></Pressable>{canDelete && <Pressable onPress={() => onDelete(draft)} style={styles.deleteProfileButton}><Ionicons name="trash-outline" size={18} color="#D64545" /><Text style={styles.deleteProfileText}>{draft.linkedUserId ? 'Remove from household' : 'Delete family profile'}</Text></Pressable>}</ScrollView><StatusBar style={dark ? 'light' : 'dark'} /></KeyboardAvoidingView></Modal>;
 }
 
-function MoreMenu({ styles, setView }: any) {
-  const items = [
-    ['Chief of Home', 'home-outline', '#7047EE', 'Personal briefings, week ahead, and follow-ups'],
-    ['Family', 'people-outline', '#2257F4', 'Members, roles, and family invitations'],
-    ['Family Inbox', 'mail-unread-outline', '#FF7A2E', 'One private address for school, appointments, and activities'],
-    ['Meals & Groceries', 'restaurant-outline', '#D7550D', 'Meal plans, shared groceries, and Coh Home Chef'],
-    ['Family Places', 'location-outline', '#19A47B', 'Opt-in location, arrivals, and departures'],
-    ['Trips', 'airplane-outline', '#7047EE', 'Private schedules with friends and other families'],
-    ['Calendar Sync', 'calendar-outline', '#2257F4', 'Connect selected calendars on this iPhone'],
-    ['Notes', 'document-text-outline', '#7C4DFF', 'Lists, instructions, and family details'],
-    ['Recaps', 'sparkles-outline', '#2257F4', 'Daily summaries by push and email'],
-    ['Automations', 'flash-outline', '#7047EE', 'Real cloud rules, retries, and household follow-through'],
-    ['Integrations', 'extension-puzzle-outline', '#19A47B', 'Skylight, calendars, email, and more'],
-    ['Settings', 'settings-outline', '#FF7A2E', 'Household, privacy, and preferences'],
-  ];
-  return <ScrollView contentContainerStyle={styles.scrollContent}><Text style={styles.moreIntro}>Everything else your household needs, without cluttering the everyday view.</Text><View style={styles.moreGrid}>{items.map(([title, icon, color, detail]) => <Pressable key={title} onPress={() => setView(title)} style={styles.moreCard}><View style={[styles.moreIcon, { backgroundColor: `${color}18` }]}><Ionicons name={icon as any} size={25} color={color} /></View><Text style={styles.moreTitle}>{title}</Text><Text style={styles.moreDetail}>{detail}</Text><Ionicons name="chevron-forward" size={18} color={styles.iconColor.color} style={styles.moreChevron} /></Pressable>)}</View></ScrollView>;
+function MoreMenu({ styles, setView, userId, onNotice }: { styles: any; setView: (view: MoreView) => void; userId: string | null; onNotice: (message: string) => void }) {
+  const [editing, setEditing] = useState(false);
+  const [preferences, setPreferences] = useState<MoreMenuPreferences>(defaultMoreMenuPreferences);
+
+  useEffect(() => {
+    let active = true;
+    void (async () => {
+      const local = await AsyncStorage.getItem(moreMenuStorageKey).catch(() => null);
+      const localPreferences = normalizeMoreMenuPreferences(parseMoreMenuPreferences(local));
+      let next = localPreferences;
+      if (userId) {
+        next = await loadMoreMenuPreferences(userId)
+          .then((remote) => remote
+            ? normalizeMoreMenuPreferences(remote)
+            : localPreferences)
+          .catch(() => localPreferences);
+      }
+      if (active) setPreferences(next);
+    })();
+    return () => { active = false; };
+  }, [userId]);
+
+  async function persist(next: MoreMenuPreferences) {
+    const normalized = normalizeMoreMenuPreferences(next);
+    setPreferences(normalized);
+    await AsyncStorage.setItem(moreMenuStorageKey, JSON.stringify(normalized));
+    if (userId) {
+      await saveMoreMenuPreferences(userId, normalized).catch(() => undefined);
+    }
+  }
+
+  function move(title: string, offset: -1 | 1) {
+    const order = [...preferences.order];
+    const visibleOrder = order.filter((item) => !preferences.hidden.includes(item));
+    const visibleFrom = visibleOrder.indexOf(title);
+    const visibleTo = visibleFrom + offset;
+    if (visibleFrom < 0 || visibleTo < 0 || visibleTo >= visibleOrder.length) return;
+    const from = order.indexOf(title);
+    const to = order.indexOf(visibleOrder[visibleTo]);
+    [order[from], order[to]] = [order[to], order[from]];
+    void persist({ ...preferences, order });
+  }
+
+  function removeFromMore(title: string) {
+    void persist({
+      ...preferences,
+      hidden: [...new Set([...preferences.hidden, title])],
+    });
+    onNotice(`${title} was removed from More. You can restore it anytime.`);
+  }
+
+  function restore(title: string) {
+    void persist({
+      ...preferences,
+      hidden: preferences.hidden.filter((item) => item !== title),
+    });
+    onNotice(`${title} is back in More`);
+  }
+
+  const byTitle = new Map<string, MoreMenuItem>(
+    moreMenuItems.map((item) => [item.title, item]),
+  );
+  const orderedItems = preferences.order
+    .map((title) => byTitle.get(title))
+    .filter((item): item is MoreMenuItem => Boolean(item));
+  const visibleItems = orderedItems.filter((item) => !preferences.hidden.includes(item.title));
+  const hiddenItems = orderedItems.filter((item) => preferences.hidden.includes(item.title));
+
+  return <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
+    <View style={styles.moreToolbar}>
+      <Text style={styles.moreIntro}>Everything else your household needs, without cluttering the everyday view.</Text>
+      <Pressable onPress={() => setEditing((current) => !current)} style={[styles.moreCustomizeButton, editing && styles.moreCustomizeButtonActive]}>
+        <Ionicons name={editing ? 'checkmark' : 'options-outline'} size={17} color={editing ? '#fff' : '#2257F4'} />
+        <Text style={[styles.moreCustomizeText, editing && styles.moreCustomizeTextActive]}>{editing ? 'Done' : 'Customize'}</Text>
+      </Pressable>
+    </View>
+    {editing && <View style={styles.moreEditingHint}><Ionicons name="information-circle-outline" size={18} color="#7047EE" /><Text style={styles.moreEditingHintText}>Move features earlier or later, or remove anything you do not use. Removing a feature never deletes its data.</Text></View>}
+    <View style={styles.moreGrid}>{visibleItems.map((item, index) => <Pressable key={item.title} disabled={editing} onPress={() => setView(item.title)} style={styles.moreCard}>
+      <View style={[styles.moreIcon, { backgroundColor: `${item.color}18` }]}><Ionicons name={item.icon as any} size={25} color={item.color} /></View>
+      <Text style={styles.moreTitle}>{item.title}</Text>
+      <Text style={styles.moreDetail}>{item.detail}</Text>
+      {editing ? <View style={styles.moreEditControls}>
+        <Pressable accessibilityLabel={`Move ${item.title} earlier`} disabled={index === 0} onPress={() => move(item.title, -1)} style={[styles.moreEditButton, index === 0 && styles.moreEditButtonDisabled]}><Ionicons name="arrow-back" size={16} color={styles.iconColor.color} /></Pressable>
+        <Pressable accessibilityLabel={`Move ${item.title} later`} disabled={index === visibleItems.length - 1} onPress={() => move(item.title, 1)} style={[styles.moreEditButton, index === visibleItems.length - 1 && styles.moreEditButtonDisabled]}><Ionicons name="arrow-forward" size={16} color={styles.iconColor.color} /></Pressable>
+        <Pressable accessibilityLabel={`Remove ${item.title} from More`} onPress={() => removeFromMore(item.title)} style={[styles.moreEditButton, styles.moreHideButton]}><Ionicons name="eye-off-outline" size={16} color="#D64545" /></Pressable>
+      </View> : <Ionicons name="chevron-forward" size={18} color={styles.iconColor.color} style={styles.moreChevron} />}
+    </Pressable>)}</View>
+    {editing && hiddenItems.length > 0 && <>
+      <Text style={styles.sectionTitle}>Removed from More</Text>
+      <View style={styles.moreHiddenList}>{hiddenItems.map((item) => <View key={item.title} style={styles.moreHiddenRow}>
+        <View style={[styles.moreHiddenIcon, { backgroundColor: `${item.color}18` }]}><Ionicons name={item.icon as any} size={18} color={item.color} /></View>
+        <Text style={styles.moreHiddenTitle}>{item.title}</Text>
+        <Pressable onPress={() => restore(item.title)} style={styles.moreRestoreButton}><Text style={styles.moreRestoreText}>Restore</Text></Pressable>
+      </View>)}</View>
+    </>}
+    {editing && <Pressable onPress={() => void persist(defaultMoreMenuPreferences)} style={styles.moreResetButton}><Text style={styles.moreResetText}>Reset default layout</Text></Pressable>}
+  </ScrollView>;
 }
 
 function ChiefOfHomeScreen({ styles, prefs, memberNames, setPrefs, onActivate }: { styles: any; prefs: ChiefPrefs; memberNames: string[]; setPrefs: (value: ChiefPrefs) => void; onActivate: () => void }) {
@@ -2480,8 +2692,8 @@ function createStyles(t: Theme) {
     calendarTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 14 }, smallButton: { width: 38, height: 38, borderRadius: 12, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, alignItems: 'center', justifyContent: 'center' }, calendarPeriod: { color: t.text, fontWeight: '800', fontSize: 15, textAlign: 'center' }, calendarTodayLink: { color: t.primary, fontSize: 8, fontWeight: '800', textAlign: 'center', marginTop: 2 }, weekRow: { flexDirection: 'row', justifyContent: 'space-between', backgroundColor: t.surface, borderRadius: 18, borderWidth: 1, borderColor: t.line, padding: 7 }, dayBubble: { width: 40, height: 58, borderRadius: 13, alignItems: 'center', justifyContent: 'center' }, dayBubbleActive: { backgroundColor: t.primary }, dayLabel: { color: t.muted, fontSize: 7, fontWeight: '800' }, dayNumber: { color: t.text, fontSize: 17, fontWeight: '800', marginTop: 3 }, dayTextActive: { color: '#fff' }, timelineRow: { minHeight: 76, borderRadius: 18, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, flexDirection: 'row', alignItems: 'center', padding: 12, gap: 10 }, timelineLine: { width: 4, height: 42, borderRadius: 3 }, timelineTime: { color: t.muted, fontSize: 10, width: 50, fontWeight: '700' }, timelineTitle: { color: t.text, fontSize: 13, fontWeight: '800' }, eventSourceTitleRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 6 }, eventSourcePill: { borderRadius: 99, paddingHorizontal: 7, paddingVertical: 3 }, eventSourceText: { fontSize: 7, fontWeight: '900', letterSpacing: .3 }, eventDetailSource: { fontSize: 9, fontWeight: '800', marginTop: 4 }, syncCard: { minHeight: 67, borderRadius: 18, padding: 13, flexDirection: 'row', gap: 10, alignItems: 'center', backgroundColor: `${t.primary}0C`, borderWidth: 1, borderColor: `${t.primary}24` }, syncTitle: { color: t.text, fontSize: 11, fontWeight: '800' },
     progressCard: { minHeight: 130, borderRadius: 23, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, padding: 20, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }, progressLabel: { color: t.primary, fontSize: 8, fontWeight: '800', letterSpacing: 1 }, progressValue: { color: t.text, fontSize: 28, fontWeight: '800', letterSpacing: -1, marginTop: 5 }, progressRing: { width: 74, height: 74, borderRadius: 37, borderWidth: 8, borderColor: '#19A47B', alignItems: 'center', justifyContent: 'center' }, progressPercent: { color: t.text, fontSize: 16, fontWeight: '800' }, memberRewardTabs: { flexDirection: 'row', padding: 4, borderRadius: 16, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line }, memberRewardTab: { flex: 1, minHeight: 48, borderRadius: 12, alignItems: 'center', justifyContent: 'center' }, memberRewardTabActive: { backgroundColor: t.primary }, memberRewardName: { color: t.text, fontSize: 10, fontWeight: '800' }, memberRewardNameActive: { color: '#fff' }, memberRewardPoints: { color: t.muted, fontSize: 8, marginTop: 2, fontWeight: '700' }, rewardHero: { minHeight: 118, borderRadius: 21, padding: 16, flexDirection: 'row', gap: 13, alignItems: 'center', backgroundColor: t.surface, borderWidth: 1, borderColor: t.line }, rewardIcon: { width: 52, height: 52, borderRadius: 17, alignItems: 'center', justifyContent: 'center' }, rewardHeroTitle: { color: t.text, fontSize: 14, lineHeight: 19, fontWeight: '800', marginTop: 4 }, rewardProgressTrack: { height: 7, borderRadius: 4, backgroundColor: t.line, overflow: 'hidden', marginTop: 10 }, rewardProgressFill: { height: 7, borderRadius: 4 }, rewardProgressText: { color: t.muted, fontSize: 8, fontWeight: '700', marginTop: 5 }, rewardPrompt: { color: t.text, fontSize: 12, fontWeight: '800', marginTop: 2 }, rewardChoices: { gap: 10, paddingRight: 18 }, rewardChoice: { width: 145, minHeight: 130, borderRadius: 18, padding: 14, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line }, rewardChoiceTitle: { color: t.text, fontSize: 12, fontWeight: '800', marginTop: 11, marginBottom: 3 }, rewardCost: { fontSize: 9, fontWeight: '800', marginTop: 10 }, rewardSelected: { position: 'absolute', right: 10, top: 10 }, choreRow: { minHeight: 70, borderRadius: 17, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, padding: 12, flexDirection: 'row', alignItems: 'center', gap: 10 }, checkCircle: { width: 27, height: 27, borderRadius: 14, borderWidth: 2, borderColor: t.line, alignItems: 'center', justifyContent: 'center' }, choreTitle: { color: t.text, fontSize: 13, fontWeight: '800' }, struck: { textDecorationLine: 'line-through', color: t.muted }, pointPill: { minHeight: 27, borderRadius: 14, paddingHorizontal: 8, flexDirection: 'row', gap: 4, alignItems: 'center', backgroundColor: '#7047EE14' }, pointPillText: { color: '#7047EE', fontSize: 9, fontWeight: '900' }, ownerDot: { width: 9, height: 9, borderRadius: 5 }, outlineAction: { minHeight: 48, borderRadius: 15, borderWidth: 1, borderStyle: 'dashed', borderColor: t.primary, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7 }, outlineActionText: { color: t.primary, fontSize: 11, fontWeight: '800' },
     messageList: { padding: 18, paddingBottom: 24, gap: 16 }, chatHeader: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 12, paddingBottom: 14, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: t.line }, homeThreadIcon: { width: 42, height: 42, borderRadius: 14, backgroundColor: `${t.primary}14`, alignItems: 'center', justifyContent: 'center' }, chatTitle: { color: t.text, fontSize: 14, fontWeight: '800' }, botHint: { minHeight: 48, borderRadius: 15, paddingHorizontal: 12, marginBottom: 5, flexDirection: 'row', gap: 8, alignItems: 'center', backgroundColor: '#7047EE12', borderWidth: 1, borderColor: '#7047EE30' }, botHintText: { color: t.text, fontSize: 10, lineHeight: 14, flex: 1, fontWeight: '700' }, messageWrap: { maxWidth: '88%', flexDirection: 'row', gap: 8, alignSelf: 'flex-start' }, messageBody: { flexShrink: 1 }, messageMine: { alignSelf: 'flex-end' }, chatAvatar: { width: 32, height: 32, backgroundColor: '#FFE1CF' }, botAvatar: { width: 32, height: 32, backgroundColor: '#7047EE' }, messageAuthor: { color: t.muted, fontSize: 8, marginBottom: 4 }, botAuthor: { color: '#7047EE', fontWeight: '800' }, messageAuthorMine: { textAlign: 'right' }, messageBubble: { backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, borderRadius: 5, borderTopRightRadius: 16, borderBottomLeftRadius: 16, borderBottomRightRadius: 16, padding: 12 }, botBubble: { borderColor: '#7047EE55', backgroundColor: t.dark ? '#251F46' : '#F5F0FF' }, messageBubbleMine: { backgroundColor: t.primary, borderColor: t.primary, borderTopLeftRadius: 16, borderTopRightRadius: 5 }, messageText: { color: t.text, fontSize: 12, lineHeight: 17 }, messageTextMine: { color: '#fff' }, cohMention: { color: '#FFD84D', fontWeight: '900', textShadowColor: '#FFD84D99', textShadowRadius: 8 }, composeRow: { minHeight: 61, paddingHorizontal: 12, paddingVertical: 8, gap: 8, flexDirection: 'row', alignItems: 'center', borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: t.line, backgroundColor: t.surfaceStrong }, composeRowCoh: { borderTopColor: '#A777FF', backgroundColor: t.dark ? '#211A42' : '#F7F0FF', shadowColor: '#7047EE', shadowOpacity: .42, shadowRadius: 16, shadowOffset: { width: 0, height: -3 } }, composePlus: { width: 36, height: 36, borderRadius: 12, backgroundColor: `${t.primary}13`, alignItems: 'center', justifyContent: 'center' }, composeCohBadge: { backgroundColor: '#7047EE', shadowColor: '#A777FF', shadowOpacity: .9, shadowRadius: 10 }, composeInput: { flex: 1, minHeight: 40, maxHeight: 90, borderRadius: 13, borderWidth: 1, borderColor: t.line, backgroundColor: t.surface, color: t.text, paddingHorizontal: 12, fontSize: 12 }, composeInputCoh: { borderColor: '#A777FF', borderWidth: 2, color: t.dark ? '#E8DDFF' : '#4B168D', fontWeight: '800', shadowColor: '#7047EE', shadowOpacity: .5, shadowRadius: 9 }, sendButton: { width: 37, height: 37, borderRadius: 12, backgroundColor: t.primary, alignItems: 'center', justifyContent: 'center' }, sendButtonCoh: { backgroundColor: '#7047EE', shadowColor: '#A777FF', shadowOpacity: .9, shadowRadius: 10 },
-    moreIntro: { color: t.muted, fontSize: 12, lineHeight: 18, marginBottom: 4 }, moreGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 11 }, moreCard: { width: '48.5%', minHeight: 180, borderRadius: 22, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, padding: 16 }, moreIcon: { width: 45, height: 45, borderRadius: 15, alignItems: 'center', justifyContent: 'center' }, moreTitle: { color: t.text, fontSize: 15, fontWeight: '800', marginTop: 17 }, moreDetail: { color: t.muted, fontSize: 9, lineHeight: 14, marginTop: 5, paddingRight: 10 }, moreChevron: { position: 'absolute', right: 14, bottom: 14 },
-    familyHero: { minHeight: 116, borderRadius: 22, padding: 18, flexDirection: 'row', alignItems: 'center', backgroundColor: t.surface, borderWidth: 1, borderColor: t.line }, familyHeroTitle: { color: t.text, fontSize: 22, fontWeight: '900', marginTop: 5, marginBottom: 4 }, addProfileButton: { width: 46, height: 46, borderRadius: 15, backgroundColor: t.primary, alignItems: 'center', justifyContent: 'center', marginLeft: 'auto' }, profileRow: { minHeight: 88, borderRadius: 19, padding: 12, flexDirection: 'row', alignItems: 'center', gap: 11, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line }, profileAvatar: { width: 42, height: 42, borderRadius: 15, overflow: 'hidden', alignItems: 'center', justifyContent: 'center' }, profileAvatarLarge: { width: 58, height: 58, borderRadius: 19 }, profileAvatarImage: { width: '100%', height: '100%' }, profileName: { color: t.text, fontSize: 14, fontWeight: '900' }, profileBio: { color: t.muted, fontSize: 9, lineHeight: 13, marginTop: 4 }, profileSheet: { maxHeight: '88%', backgroundColor: t.surfaceStrong, borderTopLeftRadius: 28, borderTopRightRadius: 28 }, profileSheetContent: { paddingHorizontal: 19, paddingTop: 9, paddingBottom: 34 }, photoEditor: { minHeight: 76, borderRadius: 18, padding: 10, flexDirection: 'row', alignItems: 'center', gap: 12, marginTop: 16, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line }, profilePrivacy: { color: t.muted, fontSize: 9, lineHeight: 14, marginTop: 14 },
+    moreToolbar: { flexDirection: 'row', alignItems: 'flex-start', gap: 10 }, moreIntro: { flex: 1, color: t.muted, fontSize: 12, lineHeight: 18, marginBottom: 4 }, moreCustomizeButton: { minHeight: 36, borderRadius: 12, borderWidth: 1, borderColor: `${t.primary}55`, paddingHorizontal: 10, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 5, backgroundColor: `${t.primary}0D` }, moreCustomizeButtonActive: { backgroundColor: '#7047EE', borderColor: '#7047EE' }, moreCustomizeText: { color: t.primary, fontSize: 9, fontWeight: '900' }, moreCustomizeTextActive: { color: '#fff' }, moreEditingHint: { minHeight: 64, borderRadius: 16, padding: 12, flexDirection: 'row', alignItems: 'center', gap: 9, backgroundColor: '#7047EE12', borderWidth: 1, borderColor: '#7047EE35' }, moreEditingHintText: { flex: 1, color: t.text, fontSize: 9, lineHeight: 14, fontWeight: '700' }, moreGrid: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between' }, moreCard: { width: '48%', minHeight: 180, marginBottom: 10, borderRadius: 22, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, padding: 16 }, moreIcon: { width: 45, height: 45, borderRadius: 15, alignItems: 'center', justifyContent: 'center' }, moreTitle: { color: t.text, fontSize: 15, fontWeight: '800', marginTop: 17 }, moreDetail: { color: t.muted, fontSize: 9, lineHeight: 14, marginTop: 5, paddingRight: 10 }, moreChevron: { position: 'absolute', right: 14, bottom: 14 }, moreEditControls: { position: 'absolute', left: 12, right: 12, bottom: 11, flexDirection: 'row', gap: 6 }, moreEditButton: { flex: 1, minHeight: 30, borderRadius: 9, backgroundColor: t.surfaceStrong, borderWidth: 1, borderColor: t.line, alignItems: 'center', justifyContent: 'center' }, moreEditButtonDisabled: { opacity: .3 }, moreHideButton: { backgroundColor: '#D645450D', borderColor: '#D6454535' }, moreHiddenList: { borderRadius: 18, overflow: 'hidden', borderWidth: 1, borderColor: t.line, backgroundColor: t.surface }, moreHiddenRow: { minHeight: 58, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', gap: 10, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: t.line }, moreHiddenIcon: { width: 34, height: 34, borderRadius: 11, alignItems: 'center', justifyContent: 'center' }, moreHiddenTitle: { flex: 1, color: t.text, fontSize: 11, fontWeight: '800' }, moreRestoreButton: { minHeight: 32, borderRadius: 10, paddingHorizontal: 10, backgroundColor: `${t.primary}12`, alignItems: 'center', justifyContent: 'center' }, moreRestoreText: { color: t.primary, fontSize: 9, fontWeight: '900' }, moreResetButton: { alignSelf: 'center', minHeight: 38, borderRadius: 12, borderWidth: 1, borderColor: t.line, paddingHorizontal: 13, alignItems: 'center', justifyContent: 'center', backgroundColor: t.surface }, moreResetText: { color: t.muted, fontSize: 9, fontWeight: '800' },
+    familyHero: { minHeight: 116, borderRadius: 22, padding: 18, flexDirection: 'row', alignItems: 'center', backgroundColor: t.surface, borderWidth: 1, borderColor: t.line }, familyHeroTitle: { color: t.text, fontSize: 22, fontWeight: '900', marginTop: 5, marginBottom: 4 }, addProfileButton: { width: 46, height: 46, borderRadius: 15, backgroundColor: t.primary, alignItems: 'center', justifyContent: 'center', marginLeft: 'auto' }, profileRow: { minHeight: 88, borderRadius: 19, padding: 12, flexDirection: 'row', alignItems: 'center', gap: 11, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line }, profileAvatar: { width: 42, height: 42, borderRadius: 15, overflow: 'hidden', alignItems: 'center', justifyContent: 'center' }, profileAvatarLarge: { width: 58, height: 58, borderRadius: 19 }, profileAvatarImage: { width: '100%', height: '100%' }, profileName: { color: t.text, fontSize: 14, fontWeight: '900' }, profileBio: { color: t.muted, fontSize: 9, lineHeight: 13, marginTop: 4 }, profileSheet: { maxHeight: '88%', backgroundColor: t.surfaceStrong, borderTopLeftRadius: 28, borderTopRightRadius: 28 }, profileSheetContent: { paddingHorizontal: 19, paddingTop: 9, paddingBottom: 34 }, photoEditor: { minHeight: 76, borderRadius: 18, padding: 10, flexDirection: 'row', alignItems: 'center', gap: 12, marginTop: 16, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line }, profilePrivacy: { color: t.muted, fontSize: 9, lineHeight: 14, marginTop: 14 }, deleteProfileButton: { minHeight: 44, marginTop: 10, borderRadius: 14, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7, backgroundColor: '#D645450D', borderWidth: 1, borderColor: '#D6454535' }, deleteProfileText: { color: '#D64545', fontSize: 10, fontWeight: '800' },
     searchInput: { height: 45, borderRadius: 15, borderWidth: 1, borderColor: t.line, backgroundColor: t.surface, color: t.text, paddingHorizontal: 14 }, notesGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 }, noteCard: { width: '48.5%', minHeight: 140, borderRadius: 19, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, padding: 15 }, noteEmoji: { fontSize: 24 }, noteTitle: { color: t.text, fontSize: 12, fontWeight: '800', marginTop: 18, marginBottom: 4 }, noteChevron: { position: 'absolute', right: 12, bottom: 12 },
     recapHero: { minHeight: 260, borderRadius: 24, padding: 23, justifyContent: 'center' }, recapHeroLabel: { color: '#FFFFFFB5', fontSize: 8, fontWeight: '800', letterSpacing: 1, marginTop: 13 }, recapHeroTitle: { color: '#fff', fontSize: 28, lineHeight: 31, fontWeight: '800', letterSpacing: -1, marginTop: 8 }, recapHeroText: { color: '#FFFFFFC0', fontSize: 11, lineHeight: 16, marginTop: 8 }, recapActionRow: { flexDirection: 'row', gap: 8, marginTop: 18 }, recapHeroButton: { alignSelf: 'flex-start', minHeight: 38, borderRadius: 12, backgroundColor: '#fff', flexDirection: 'row', gap: 7, alignItems: 'center', paddingHorizontal: 13 }, recapSnapshot: { minHeight: 66, borderRadius: 17, padding: 11, flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line }, recapSnapshotActive: { borderColor: '#7047EE88', backgroundColor: t.dark ? '#251F46' : '#F5F0FF' }, recapSnapshotIcon: { width: 38, height: 38, borderRadius: 13, alignItems: 'center', justifyContent: 'center', backgroundColor: '#7047EE14' }, recapSnapshotDetail: { borderRadius: 19, padding: 13, gap: 8, backgroundColor: t.surface, borderWidth: 1, borderColor: '#7047EE55' }, listenSnapshot: { alignSelf: 'flex-start', minHeight: 36, borderRadius: 11, paddingHorizontal: 10, flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: '#7047EE12' }, highlightRow: { minHeight: 61, flexDirection: 'row', gap: 11, alignItems: 'center', borderRadius: 16, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, padding: 12 }, highlightTime: { color: t.primary, fontSize: 11, fontWeight: '800', width: 38 }, highlightText: { color: t.text, fontSize: 11, fontWeight: '700', flex: 1 },
     automationCard: { minHeight: 90, borderRadius: 20, padding: 16, flexDirection: 'row', gap: 12, alignItems: 'center' }, automationLabel: { color: '#FFFFFFA8', fontSize: 7, fontWeight: '800', letterSpacing: 1 }, automationTitle: { color: '#fff', fontSize: 12, fontWeight: '800', lineHeight: 17, marginTop: 3 }, integrationRow: { minHeight: 78, borderRadius: 18, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, padding: 12, flexDirection: 'row', alignItems: 'center', gap: 10 }, integrationIcon: { width: 43, height: 43, borderRadius: 14, alignItems: 'center', justifyContent: 'center' }, integrationTitle: { color: t.text, fontSize: 12, fontWeight: '800' }, connectButton: { minHeight: 31, borderRadius: 10, borderWidth: 1, borderColor: t.primary, paddingHorizontal: 9, alignItems: 'center', justifyContent: 'center' }, connectedButton: { borderColor: '#19A47B', backgroundColor: '#19A47B12' }, connectText: { color: t.primary, fontSize: 8, fontWeight: '800' }, connectedText: { color: '#19A47B' },

@@ -5,9 +5,10 @@ import path from 'node:path';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const read = (relativePath) => readFile(path.join(root, relativePath), 'utf8');
-const [repair, choreScheduling, edgeClient, familyData, deviceCalendar, householdOS, deploy, supabaseConfig, invitationFunction, assistant, extractor] = await Promise.all([
+const [repair, choreScheduling, familyManagement, edgeClient, familyData, deviceCalendar, householdOS, deploy, supabaseConfig, invitationFunction, assistant, extractor] = await Promise.all([
   read('supabase/migrations/202607230008_edge_function_repairs.sql'),
   read('supabase/migrations/202607230009_chore_scheduling.sql'),
+  read('supabase/migrations/202607250001_family_management.sql'),
   read('src/services/edgeFunctions.ts'),
   read('src/services/familyData.ts'),
   read('src/services/deviceCalendar.ts'),
@@ -38,6 +39,11 @@ const contracts = [
   ['device calendar imports preserve their source calendar', deviceCalendar, /source_calendar_id: event\.calendarId/],
   ['missing iPhone events are canceled during reconciliation', deviceCalendar, /status: 'canceled'/],
   ['calendar sync reports removed iPhone events', householdOS, /deleted event.*removed from Coho/],
+  ['member removal requires household administration', familyManagement, /if not public\.is_household_admin\(target_household\)/],
+  ['household owners cannot be removed', familyManagement, /if member_role = 'owner'/],
+  ['member removal clears household access', familyManagement, /delete from public\.household_members/],
+  ['linked profiles cannot bypass member removal', familyManagement, /if person\.linked_user_id is not null/],
+  ['More menu preferences are private to their user', familyManagement, /using \(user_id = auth\.uid\(\)\)[\s\S]*with check \(user_id = auth\.uid\(\)\)/],
   ['invite landing pages bypass gateway JWT verification', supabaseConfig, /\[functions\.send-household-invite\][\s\S]*verify_jwt = false/],
   ['invite deployment preserves its public landing page', deploy, /public_entry_functions=\([\s\S]*send-household-invite[\s\S]*\)/],
   ['invite creation still requires a user session', invitationFunction, /if \(!authorization\) return json\(\{ error: 'Authentication required\.' \}, 401\)/],

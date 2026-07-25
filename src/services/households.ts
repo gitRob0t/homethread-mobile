@@ -8,6 +8,7 @@ export type HouseholdPerson = {
   date_of_birth: string | null;
   bio: string | null;
   role: 'Adult admin' | 'Family member' | 'Child';
+  membership_role?: 'owner' | 'admin' | 'member' | 'child' | null;
   avatar_url: string | null;
   avatar_signed_url?: string | null;
 };
@@ -88,6 +89,23 @@ export async function listHouseholdMembers(householdId: string) {
   }));
 }
 
+export async function removeHouseholdMember(householdId: string, userId: string) {
+  const { data, error } = await supabase.rpc('remove_household_member', {
+    target_household: householdId,
+    target_user: userId,
+  });
+  if (error) throw error;
+  return data as string;
+}
+
+export async function deleteHouseholdPerson(personId: string) {
+  const { data, error } = await supabase.rpc('delete_household_person', {
+    target_person: personId,
+  });
+  if (error) throw error;
+  return data as string;
+}
+
 export async function listInvitations(householdId: string) {
   const { data, error } = await supabase
     .from('invitations')
@@ -97,6 +115,14 @@ export async function listInvitations(householdId: string) {
     .order('created_at', { ascending: false });
   if (error) throw error;
   return data;
+}
+
+export async function revokeHouseholdInvitation(invitationId: string) {
+  const { data, error } = await supabase.rpc('revoke_household_invitation', {
+    target_invitation: invitationId,
+  });
+  if (error) throw error;
+  return data as string;
 }
 
 export function subscribeToHouseholdAccess(householdId: string, onChange: () => void) {
@@ -125,19 +151,35 @@ export function subscribeToHouseholdAccess(householdId: string, onChange: () => 
 }
 
 export async function listHouseholdPeople(householdId: string) {
-  const { data, error } = await supabase
-    .from('household_people')
-    .select('id, linked_user_id, display_name, date_of_birth, bio, role, avatar_url')
-    .eq('household_id', householdId)
-    .order('created_at', { ascending: true });
-  if (error) throw error;
+  const [peopleResult, membersResult] = await Promise.all([
+    supabase
+      .from('household_people')
+      .select('id, linked_user_id, display_name, date_of_birth, bio, role, avatar_url')
+      .eq('household_id', householdId)
+      .order('created_at', { ascending: true }),
+    supabase
+      .from('household_members')
+      .select('user_id, role')
+      .eq('household_id', householdId),
+  ]);
+  if (peopleResult.error) throw peopleResult.error;
+  if (membersResult.error) throw membersResult.error;
+  const membershipByUser = new Map(
+    (membersResult.data ?? []).map((member) => [member.user_id, member.role]),
+  );
 
-  return Promise.all(((data ?? []) as HouseholdPerson[]).map(async (person) => {
-    if (!person.avatar_url) return person;
+  return Promise.all(((peopleResult.data ?? []) as HouseholdPerson[]).map(async (person) => {
+    const enriched = {
+      ...person,
+      membership_role: person.linked_user_id
+        ? membershipByUser.get(person.linked_user_id) ?? null
+        : null,
+    } as HouseholdPerson;
+    if (!person.avatar_url) return enriched;
     const { data: signed } = await supabase.storage
       .from('family-avatars')
       .createSignedUrl(person.avatar_url, 60 * 60);
-    return { ...person, avatar_signed_url: signed?.signedUrl ?? null };
+    return { ...enriched, avatar_signed_url: signed?.signedUrl ?? null };
   }));
 }
 
