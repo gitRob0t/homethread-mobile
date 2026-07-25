@@ -35,6 +35,37 @@ function preferenceAllows(item: any, preferences: any) {
   return true;
 }
 
+function localMinutes(timezone: string) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: timezone || 'UTC',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(new Date());
+  const hour = Number(parts.find((part) => part.type === 'hour')?.value ?? 0) % 24;
+  const minute = Number(parts.find((part) => part.type === 'minute')?.value ?? 0);
+  return (hour * 60) + minute;
+}
+
+function clockMinutes(value: unknown, fallback: number) {
+  const match = String(value ?? '').match(/^(\d{1,2}):(\d{2})/);
+  if (!match) return fallback;
+  return ((Number(match[1]) % 24) * 60) + Number(match[2]);
+}
+
+function isQuietTime(item: any, preferences: any) {
+  if (!preferences?.quiet_hours || item.payload?.urgent === true) return false;
+  try {
+    const now = localMinutes(preferences.timezone || 'UTC');
+    const start = clockMinutes(preferences.quiet_hours_start, 21 * 60);
+    const end = clockMinutes(preferences.quiet_hours_end, 7 * 60);
+    if (start === end) return true;
+    return start < end ? now >= start && now < end : now >= start || now < end;
+  } catch {
+    return false;
+  }
+}
+
 Deno.serve(async (request) => {
   if (request.method !== 'POST') return json({ error: 'Method not allowed.' }, 405);
 
@@ -66,7 +97,7 @@ Deno.serve(async (request) => {
         .eq('enabled', true),
       supabase
         .from('notification_preferences')
-        .select('user_id, daily_recap, event_reminders, chore_reminders, messages, week_ahead, follow_up, push_delivery, email_copy')
+        .select('user_id, daily_recap, event_reminders, chore_reminders, messages, week_ahead, follow_up, push_delivery, email_copy, quiet_hours, quiet_hours_start, quiet_hours_end, timezone')
         .in('user_id', recipientIds),
     ]);
     const preferences = new Map((preferenceRows ?? []).map((row: any) => [row.user_id, row]));
@@ -78,10 +109,20 @@ Deno.serve(async (request) => {
     const pushDeliveries: Array<{ outbox: any; token: any; message: any }> = [];
     const emailDeliveries: any[] = [];
     for (const item of claimed) {
-      if (!preferenceAllows(item, preferences.get(item.recipient_user_id))) {
+      const recipientPreferences = preferences.get(item.recipient_user_id);
+      if (!preferenceAllows(item, recipientPreferences)) {
         await supabase.from('notification_outbox').update({
           status: 'canceled',
           last_error: 'Disabled by notification preferences.',
+        }).eq('id', item.id);
+        continue;
+      }
+      if (isQuietTime(item, recipientPreferences)) {
+        await supabase.from('notification_outbox').update({
+          status: 'queued',
+          attempts: Math.max(0, Number(item.attempts ?? 1) - 1),
+          next_attempt_at: new Date(Date.now() + 15 * 60_000).toISOString(),
+          last_error: 'Deferred by quiet hours.',
         }).eq('id', item.id);
         continue;
       }

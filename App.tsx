@@ -34,7 +34,12 @@ import {
   type CohDraft,
   type CohHistoryItem,
 } from './src/services/cohAssistant';
-import { writeApprovedEventToDevice } from './src/services/deviceCalendar';
+import {
+  getDeviceCalendarSettings,
+  hasDeviceCalendarAccess,
+  writeApprovedEventToDevice,
+} from './src/services/deviceCalendar';
+import { listCalendarConnections } from './src/services/calendarConnections';
 import { supabase } from './src/lib/supabase';
 import {
   deleteHouseholdPerson,
@@ -50,8 +55,19 @@ import {
   saveMoreMenuPreferences,
   type MoreMenuPreferences,
 } from './src/services/uiPreferences';
+import {
+  getHouseholdInbox,
+  listInboundItems,
+  subscribeToFamilyInbox,
+} from './src/services/familyInbox';
+import { getLocationSharingState } from './src/services/familyLocation';
 import { addGroceryItems, upsertMealPlans } from './src/services/householdOperations';
-import { registerPushDevice, syncBriefingPreferences } from './src/services/pushNotifications';
+import {
+  loadBriefingPreferences,
+  registerPushDevice,
+  syncBriefingPreferences,
+  type BriefingPreferences,
+} from './src/services/pushNotifications';
 import {
   getHouseholdAction,
   listBriefingSnapshots,
@@ -109,6 +125,13 @@ type MoreView =
   | 'Recaps'
   | 'Automations'
   | 'Integrations'
+  | 'Calendars'
+  | 'Inbox & Communication'
+  | 'Notifications'
+  | 'Food & Dining'
+  | 'Location & Safety'
+  | 'Displays & Migration'
+  | 'Notification Settings'
   | 'Calendar Sync'
   | 'Family Places'
   | 'Meals & Groceries'
@@ -166,7 +189,7 @@ type ChoreFormValue = {
 };
 type BotField = 'title' | 'day' | 'time' | 'meridiem' | 'place' | 'directions' | 'reminder' | 'confirm';
 type BotDraft = { title?: string; person?: string; day?: string; dateISO?: string; time?: string; meridiem?: 'AM' | 'PM'; place?: string; reminder?: number; directions?: boolean; awaiting: BotField };
-type ChiefPrefs = { daily: boolean; dailyTime: string; weekAhead: boolean; weekAheadDay: string; weekAheadTime: string; followUp: boolean; followUpDay: string; followUpTime: string; push: boolean; email: boolean; quietHours: boolean; events: boolean; chores: boolean; messages: boolean; followUps: boolean; members: string[] };
+type ChiefPrefs = BriefingPreferences & { members: string[] };
 type RewardGoal = { id: string; title: string; detail: string; cost: number; icon: string; color: string };
 type FamilyProfile = {
   id: string;
@@ -204,6 +227,95 @@ const moreMenuItems: MoreMenuItem[] = [
   { title: 'Integrations', icon: 'extension-puzzle-outline', color: '#19A47B', detail: 'Skylight, calendars, email, and more' },
   { title: 'Settings', icon: 'settings-outline', color: '#FF7A2E', detail: 'Household, privacy, and preferences' },
 ];
+
+type IntegrationCategoryView =
+  | 'Calendars'
+  | 'Inbox & Communication'
+  | 'Notifications'
+  | 'Food & Dining'
+  | 'Location & Safety'
+  | 'Displays & Migration';
+
+type IntegrationProvider = {
+  name: string;
+  icon: string;
+  color: string;
+  detail: string;
+};
+
+type IntegrationCategory = {
+  view: IntegrationCategoryView;
+  icon: string;
+  color: string;
+  detail: string;
+  providers: IntegrationProvider[];
+};
+
+const integrationCategories: IntegrationCategory[] = [
+  {
+    view: 'Calendars',
+    icon: 'calendar-outline',
+    color: '#2257F4',
+    detail: 'Bring every approved family calendar into one timeline.',
+    providers: [
+      { name: 'Apple Calendar', icon: 'logo-apple', color: '#5A667A', detail: 'Select device calendars and sync changes both ways.' },
+      { name: 'Google Calendar', icon: 'logo-google', color: '#4285F4', detail: 'Connect Google, then choose exactly which calendars Coho uses.' },
+      { name: 'Outlook Calendar', icon: 'mail-outline', color: '#0078D4', detail: 'Connect Microsoft and choose work or personal calendars.' },
+    ],
+  },
+  {
+    view: 'Inbox & Communication',
+    icon: 'mail-unread-outline',
+    color: '#FF7A2E',
+    detail: 'Turn school, appointment, and activity email into approved actions.',
+    providers: [
+      { name: 'Family Inbox', icon: 'mail-unread-outline', color: '#FF7A2E', detail: 'A private household inbox with extraction and review before action.' },
+      { name: 'Email forwarding', icon: 'arrow-redo-outline', color: '#7047EE', detail: 'Forward from Gmail, Outlook, school portals, or any email provider.' },
+    ],
+  },
+  {
+    view: 'Notifications',
+    icon: 'notifications-outline',
+    color: '#7047EE',
+    detail: 'Configure each person’s delivery, timing, content, and quiet hours.',
+    providers: [
+      { name: 'iOS Notifications', icon: 'phone-portrait-outline', color: '#7047EE', detail: 'Push alerts, reminders, assignments, and deep links on this iPhone.' },
+      { name: 'Email Briefings', icon: 'mail-outline', color: '#2257F4', detail: 'Daily sync, week-ahead, and follow-up copies by email.' },
+    ],
+  },
+  {
+    view: 'Food & Dining',
+    icon: 'restaurant-outline',
+    color: '#D7550D',
+    detail: 'Move from a family plan to groceries or a reservation.',
+    providers: [
+      { name: 'Instacart', icon: 'basket-outline', color: '#19A47B', detail: 'Create a live shoppable list, review local prices, then check out.' },
+      { name: 'OpenTable', icon: 'restaurant-outline', color: '#D7550D', detail: 'Find restaurants and complete a real reservation handoff.' },
+    ],
+  },
+  {
+    view: 'Location & Safety',
+    icon: 'location-outline',
+    color: '#19A47B',
+    detail: 'Consent-first family location, saved places, and arrival alerts.',
+    providers: [
+      { name: 'Family Places', icon: 'location-outline', color: '#19A47B', detail: 'Share this phone’s location and create opt-in place alerts.' },
+    ],
+  },
+  {
+    view: 'Displays & Migration',
+    icon: 'tablet-landscape-outline',
+    color: '#A96013',
+    detail: 'Move existing household schedules into Coho cleanly.',
+    providers: [
+      { name: 'Skylight', icon: 'cloud-download-outline', color: '#FF7A2E', detail: 'Import or subscribe to an exported Skylight calendar feed.' },
+    ],
+  },
+];
+
+const integrationCategoryViews = new Set<MoreView>(
+  integrationCategories.map((category) => category.view),
+);
 
 const moreMenuStorageKey = 'coho-more-menu-v1';
 const defaultMoreMenuPreferences: MoreMenuPreferences = {
@@ -319,6 +431,8 @@ function CohoApp() {
   const [initialInboxItemId, setInitialInboxItemId] = useState<string | null>(null);
   const [initialRecapId, setInitialRecapId] = useState<string | null>(null);
   const [briefingSnapshots, setBriefingSnapshots] = useState<BriefingSnapshot[]>([]);
+  const [inboxReviewCount, setInboxReviewCount] = useState(0);
+  const [integrationReturnView, setIntegrationReturnView] = useState<IntegrationCategoryView | null>(null);
   const [secondUserWelcomeOpen, setSecondUserWelcomeOpen] = useState(false);
 
   useEffect(() => {
@@ -422,8 +536,51 @@ function CohoApp() {
           const welcomeSeen = await AsyncStorage.getItem(`coho-member-welcome:${authData.user.id}:${household.id}`);
           if (!welcomeSeen && active) setSecondUserWelcomeOpen(true);
         }
+        const remoteBriefingPreferences = await loadBriefingPreferences(authData.user.id)
+          .catch(() => null);
+        if (remoteBriefingPreferences && active) {
+          setChiefPrefs((current) => ({
+            ...current,
+            ...remoteBriefingPreferences,
+          }));
+          setConnected((current) => ({
+            ...current,
+            'Email Briefings': remoteBriefingPreferences.email === true,
+          }));
+        }
         await reloadSharedData(household.id, authData.user.id);
-        const notificationPermission = await Notifications.getPermissionsAsync();
+        const [
+          notificationPermission,
+          deviceCalendarAccess,
+          deviceCalendarSettings,
+          calendarConnections,
+          householdInbox,
+          locationSharing,
+        ] = await Promise.all([
+          Notifications.getPermissionsAsync(),
+          hasDeviceCalendarAccess().catch(() => false),
+          getDeviceCalendarSettings().catch(() => null),
+          listCalendarConnections(household.id).catch(() => []),
+          getHouseholdInbox(household.id).catch(() => null),
+          getLocationSharingState(household.id, authData.user.id).catch(() => null),
+        ]);
+        const activeCalendarProviders = new Set(
+          calendarConnections
+            .filter((connection) => connection.status === 'active')
+            .map((connection) => connection.provider),
+        );
+        const inboxActive = householdInbox?.status === 'active';
+        setConnected((current) => ({
+          ...current,
+          'iOS Notifications': notificationPermission.granted,
+          'Apple Calendar': deviceCalendarAccess
+            && Boolean(deviceCalendarSettings?.selectedCalendarIds.length),
+          'Google Calendar': activeCalendarProviders.has('google'),
+          'Outlook Calendar': activeCalendarProviders.has('outlook'),
+          'Family Inbox': inboxActive,
+          'Email forwarding': inboxActive,
+          'Family Places': locationSharing?.sharing_enabled === true,
+        }));
         if (notificationPermission.granted) {
           await registerPushDevice(authData.user.id, household.id).catch(() => undefined);
         }
@@ -434,6 +591,9 @@ function CohoApp() {
         );
         removeSubscriptions.push(
           subscribeToClosedLoop(household.id, () => void reloadSharedData(household.id, authData.user!.id)),
+        );
+        removeSubscriptions.push(
+          subscribeToFamilyInbox(household.id, () => void reloadSharedData(household.id, authData.user!.id)),
         );
       } catch {
         showNotice('Coho is offline. Changes will stay on this iPhone until the household reconnects.');
@@ -449,13 +609,14 @@ function CohoApp() {
 
   async function reloadSharedData(targetHousehold = householdId, targetUser = currentUserId) {
     if (!targetHousehold || !targetUser) return;
-    const [sharedMessages, sharedEvents, sharedChores, sharedFollowUps, householdPeople, snapshots] = await Promise.all([
+    const [sharedMessages, sharedEvents, sharedChores, sharedFollowUps, householdPeople, snapshots, inboxItems] = await Promise.all([
       listSharedMessages(targetHousehold),
       listSharedEvents(targetHousehold),
       listSharedChores(targetHousehold),
       listEventFollowUps(targetHousehold),
       listHouseholdPeople(targetHousehold),
       listBriefingSnapshots(targetHousehold),
+      listInboundItems(targetHousehold).catch(() => []),
     ]);
     setMessages((current) => [
       ...current.filter((message) => messageChannel(message) === 'coh'),
@@ -465,6 +626,9 @@ function CohoApp() {
     setChores(sharedChores.map((chore: any, index: number) => cloudChore(chore, index)));
     setFollowUps(sharedFollowUps);
     setBriefingSnapshots(snapshots);
+    setInboxReviewCount(inboxItems.filter((item) =>
+      ['queued', 'processing', 'needs_review', 'needs_details', 'ready', 'failed'].includes(item.status),
+    ).length);
     const nextProfiles = householdPeople.map((person, index) => personToProfile(person, index));
     setProfiles(nextProfiles);
     setRewardMember((current) => nextProfiles.some((profile) => profile.name === current) ? current : nextProfiles[0]?.name ?? '');
@@ -1439,9 +1603,17 @@ function CohoApp() {
       if (currentUserId) {
         await registerPushDevice(currentUserId, householdId).catch(() => undefined);
       }
-      setConnected((current) => ({ ...current, 'iOS Notifications': true }));
+      setConnected((current) => ({
+        ...current,
+        'iOS Notifications': true,
+        'Email Briefings': chiefPrefs.email,
+      }));
     } else {
       await scheduleChiefNotifications({ ...chiefPrefs, push: false });
+      setConnected((current) => ({
+        ...current,
+        'Email Briefings': chiefPrefs.email,
+      }));
     }
     showNotice(chiefPrefs.email && chiefPrefs.push
       ? 'Push and email briefings are scheduled'
@@ -1471,7 +1643,11 @@ function CohoApp() {
     await AsyncStorage.setItem('kincue-chief-notification-ids', JSON.stringify(ids));
   }
 
-  const title = tab === 'More' && moreView !== 'Menu' ? moreView : tab;
+  const title = tab === 'Today'
+    ? 'Command Center'
+    : tab === 'More' && moreView !== 'Menu'
+      ? moreView
+      : tab;
   const currentMembershipRole = profiles.find(
     (profile) => profile.linkedUserId === currentUserId,
   )?.membershipRole;
@@ -1485,17 +1661,64 @@ function CohoApp() {
     showNotice('Review the request, then send it to Coh');
   };
   const openHouseholdOS = (view: MoreView) => {
+    setIntegrationReturnView(null);
     setMoreView(view);
     setTab('More');
   };
-  const handleIntegration = (name: string) => {
-    if (name === 'iOS Notifications') return void enableNotifications();
-    if (name === 'Family Inbox') return openHouseholdOS('Family Inbox');
-    if (name === 'Family Places') return openHouseholdOS('Family Places');
-    if (['Apple Calendar', 'Google Calendar', 'Outlook'].includes(name)) return openHouseholdOS('Calendar Sync');
-    if (name === 'Instacart') return openHouseholdOS('Meals & Groceries');
-    if (name === 'OpenTable') return openHouseholdOS('Trips');
+  const openIntegrationCategory = (view: IntegrationCategoryView) => {
+    setIntegrationReturnView(null);
+    setMoreView(view);
+    setTab('More');
+  };
+  const handleIntegration = (name: string, returnView?: IntegrationCategoryView) => {
+    if (returnView) setIntegrationReturnView(returnView);
+    if (['iOS Notifications', 'Email Briefings'].includes(name)) {
+      setMoreView('Notification Settings');
+      setTab('More');
+      return;
+    }
+    if (['Family Inbox', 'Email forwarding'].includes(name)) {
+      setMoreView('Family Inbox');
+      setTab('More');
+      return;
+    }
+    if (name === 'Family Places') {
+      setMoreView('Family Places');
+      setTab('More');
+      return;
+    }
+    if (['Apple Calendar', 'Google Calendar', 'Outlook Calendar'].includes(name)) {
+      setMoreView('Calendar Sync');
+      setTab('More');
+      return;
+    }
+    if (name === 'Instacart') {
+      setMoreView('Meals & Groceries');
+      setTab('More');
+      return;
+    }
+    if (name === 'OpenTable') {
+      setMoreView('Trips');
+      setTab('More');
+      return;
+    }
     showNotice(`${name} setup requires provider authorization. Coho will never mark it connected before that succeeds.`);
+  };
+  const handleMoreBack = () => {
+    if (integrationReturnView && !integrationCategoryViews.has(moreView)) {
+      setMoreView(integrationReturnView);
+      setIntegrationReturnView(null);
+      return;
+    }
+    if (integrationCategoryViews.has(moreView)) {
+      setMoreView('Integrations');
+      return;
+    }
+    if (moreView !== 'Menu') {
+      setMoreView('Menu');
+      return;
+    }
+    setTab(lastPrimaryTab);
   };
 
   return (
@@ -1515,15 +1738,28 @@ function CohoApp() {
           onTheme={toggleTheme}
           onRecap={openRecaps}
           onAdd={() => setQuickAddOpen(true)}
-          onBack={tab === 'More'
-            ? moreView !== 'Menu'
-              ? () => setMoreView('Menu')
-              : () => setTab(lastPrimaryTab)
-            : undefined}
+          onBack={tab === 'More' ? handleMoreBack : undefined}
         />
 
         <View style={styles.screen}>
-          {tab === 'Today' && <TodayScreen styles={styles} events={botEvents} chores={chores} onCalendar={() => setTab('Calendar')} onRecap={openRecaps} onOpenEvent={openCalendarEvent} onChores={() => setTab('Chores')} />}
+          {tab === 'Today' && <TodayScreen
+            styles={styles}
+            events={botEvents}
+            chores={chores}
+            messages={messages}
+            followUps={followUps}
+            profiles={profiles}
+            inboxReviewCount={inboxReviewCount}
+            notificationsEnabled={connected['iOS Notifications'] === true}
+            onCalendar={() => setTab('Calendar')}
+            onRecap={openRecaps}
+            onOpenEvent={openCalendarEvent}
+            onChores={() => setTab('Chores')}
+            onInbox={() => { setMoreView('Family Inbox'); setTab('More'); }}
+            onChat={() => { setChatMode('family'); setTab('Chat'); }}
+            onFamily={() => { setMoreView('Family'); setTab('More'); }}
+            onNotifications={() => { setMoreView('Notification Settings'); setTab('More'); }}
+          />}
           {tab === 'Calendar' && <CalendarScreen theme={theme} styles={styles} botEvents={botEvents} focusDate={calendarFocusDate} onOpenEvent={setSelectedEvent} onAction={showNotice} onManage={() => { setMoreView('Integrations'); setTab('More'); }} />}
           {tab === 'Chores' && <ChoresScreen styles={styles} chores={chores} memberNames={profiles.map((profile) => profile.name)} rewardMember={rewardMember} setRewardMember={setRewardMember} selectedRewards={selectedRewards} onConfigure={setEditingChore} onAdd={() => { setQuickAddType('Chore'); setQuickAddOpen(true); }} onSelectReward={(member: string, reward: string) => { const next = { ...selectedRewards, [member]: reward }; setSelectedRewards(next); AsyncStorage.setItem('coho-reward-goals', JSON.stringify(next)); showNotice(`${member} picked a new reward goal`); }} onToggle={toggleChore} />}
           {tab === 'Chat' && <ChatScreen styles={styles} messages={messages} mode={chatMode} setMode={setChatMode} draft={messageDraft} setDraft={setMessageDraft} onSend={sendMessage} onAdd={() => setQuickAddOpen(true)} onVoice={toggleVoiceRequest} voiceRecording={voiceRecorderState.isRecording} voiceSending={voiceSending} cohThinking={cohThinking} />}
@@ -1533,20 +1769,38 @@ function CohoApp() {
           {tab === 'More' && moreView === 'Notes' && <NotesScreen styles={styles} householdId={householdId} userId={currentUserId} onAction={showNotice} />}
           {tab === 'More' && moreView === 'Recaps' && <RecapsScreen styles={styles} onRefresh={refreshDailySync} onListen={speakDailySync} onOpenEvent={openCalendarEvent} onCompleteFollowUp={completeFollowUpItem} events={botEvents} chores={chores} messages={messages} followUps={followUps} snapshots={briefingSnapshots} initialSnapshotId={initialRecapId} />}
           {tab === 'More' && moreView === 'Automations' && <AutomationRulesScreen dark={dark} householdId={householdId} userId={currentUserId} onNotice={showNotice} />}
-          {tab === 'More' && moreView === 'Integrations' && <IntegrationsScreen styles={styles} connected={connected} onConnect={handleIntegration} />}
+          {tab === 'More' && moreView === 'Integrations' && <IntegrationsScreen styles={styles} connected={connected} onOpenCategory={openIntegrationCategory} />}
+          {tab === 'More' && integrationCategoryViews.has(moreView) && <IntegrationCategoryScreen
+            styles={styles}
+            view={moreView as IntegrationCategoryView}
+            connected={connected}
+            onConnect={handleIntegration}
+          />}
+          {tab === 'More' && moreView === 'Notification Settings' && <NotificationCenterScreen
+            styles={styles}
+            prefs={chiefPrefs}
+            permissionEnabled={connected['iOS Notifications'] === true}
+            onChange={saveChiefPreferences}
+            onEnable={enableNotifications}
+            onSave={activateChiefOfHome}
+          />}
           {tab === 'More' && moreView === 'Calendar Sync' && <CalendarConnectionScreen dark={dark} householdId={householdId} userId={currentUserId} onNotice={showNotice} onConnected={(source) => setConnected((current) => ({
             ...current,
-            [source === 'google' ? 'Google Calendar' : source === 'outlook' ? 'Outlook' : 'Apple Calendar']: true,
+            [source === 'google' ? 'Google Calendar' : source === 'outlook' ? 'Outlook Calendar' : 'Apple Calendar']: true,
           }))} onSynced={() => reloadSharedData()} />}
           {tab === 'More' && moreView === 'Family Inbox' && <FamilyInboxScreen dark={dark} householdId={householdId} householdName={householdName} userId={currentUserId} onNotice={showNotice} onAskCoh={openCohPrompt} onOpenAction={openActionTarget} initialItemId={initialInboxItemId} />}
           {tab === 'More' && moreView === 'Family Places' && <FamilyPlacesScreen dark={dark} householdId={householdId} userId={currentUserId} onNotice={showNotice} />}
           {tab === 'More' && moreView === 'Meals & Groceries' && <FoodHubScreen dark={dark} householdId={householdId} userId={currentUserId} onNotice={showNotice} onAskCoh={openCohPrompt} />}
           {tab === 'More' && moreView === 'Trips' && <TravelHubScreen dark={dark} householdId={householdId} userId={currentUserId} onNotice={showNotice} onAskCoh={openCohPrompt} />}
           {tab === 'More' && moreView === 'Privacy' && <PrivacyDataScreen dark={dark} householdId={householdId} onNotice={showNotice} />}
-          {tab === 'More' && moreView === 'Settings' && <SettingsScreen styles={styles} dark={dark} onTheme={toggleTheme} onNotifications={enableNotifications} onFamily={() => setMoreView('Family')} onPrivacy={() => setMoreView('Privacy')} profiles={profiles} />}
+          {tab === 'More' && moreView === 'Settings' && <SettingsScreen styles={styles} dark={dark} onTheme={toggleTheme} onNotifications={() => setMoreView('Notification Settings')} onFamily={() => setMoreView('Family')} onPrivacy={() => setMoreView('Privacy')} profiles={profiles} />}
         </View>
 
-        <BottomTabs tab={tab} setTab={(next: Tab) => { setTab(next); if (next !== 'More') setMoreView('Menu'); }} theme={theme} styles={styles} />
+        <BottomTabs tab={tab} setTab={(next: Tab) => {
+          setTab(next);
+          setIntegrationReturnView(null);
+          if (next !== 'More') setMoreView('Menu');
+        }} theme={theme} styles={styles} />
 
         {notice && <View style={styles.toast}><Ionicons name="checkmark-circle" size={18} color="#19A47B" /><Text style={styles.toastText}>{notice}</Text></View>}
       </KeyboardAvoidingView>
@@ -1617,11 +1871,10 @@ function CohoApp() {
 function Header({ title, styles, dark, householdName, onTheme, onRecap, onAdd, onBack }: any) {
   const now = new Date();
   const dateLabel = now.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' }).toUpperCase();
-  const greeting = now.getHours() < 12 ? 'Good morning,' : now.getHours() < 18 ? 'Good afternoon,' : 'Good evening,';
   return <View style={styles.header}>
     <View style={styles.headerTitleWrap}>
       {onBack && <Pressable onPress={onBack} style={styles.backButton}><Ionicons name="chevron-back" size={22} color={styles.iconColor.color} /></Pressable>}
-      <View><Text style={styles.eyebrow}>{dateLabel}</Text><Text style={styles.headerTitle}>{title === 'Today' ? greeting : title}</Text>{title === 'Today' && <Text style={styles.headerTitle}>{householdName} {now.getHours() < 18 ? '☀️' : '🌙'}</Text>}</View>
+      <View style={styles.flex}><Text style={styles.eyebrow}>{dateLabel}</Text><Text numberOfLines={1} style={styles.headerTitle}>{title}</Text>{title === 'Command Center' && <Text numberOfLines={1} style={styles.headerSubtitle}>{householdName}</Text>}</View>
     </View>
     <View style={styles.headerButtons}>
       <Pressable accessibilityLabel="Open daily recap" onPress={onRecap} style={styles.recapHeaderButton}><Ionicons name="sparkles" size={19} color="#fff" /></Pressable>
@@ -1631,16 +1884,104 @@ function Header({ title, styles, dark, householdName, onTheme, onRecap, onAdd, o
   </View>;
 }
 
-function TodayScreen({ styles, events, chores, onCalendar, onRecap, onOpenEvent, onChores }: any) {
+function TodayScreen({
+  styles,
+  events,
+  chores,
+  messages,
+  followUps,
+  profiles,
+  inboxReviewCount,
+  notificationsEnabled,
+  onCalendar,
+  onRecap,
+  onOpenEvent,
+  onChores,
+  onInbox,
+  onChat,
+  onFamily,
+  onNotifications,
+}: any) {
   const today = localDateKey(new Date());
   const todaysEvents = events.filter((event: BotEvent) => event.dateISO === today);
   const openChores = chores.filter((chore: Chore) => !chore.done);
+  const overdueChores = openChores.filter((chore: Chore) =>
+    chore.dueAt && new Date(chore.dueAt).getTime() < Date.now(),
+  );
+  const familyMessages = messages.filter((message: ChatMessage) =>
+    messageChannel(message) === 'family' && !message.bot,
+  );
   const cards = [
     ...todaysEvents.map((event: BotEvent) => ({ kind: 'event', item: event, title: event.title, value: event.time, detail: `${event.person}${event.place ? ` · ${event.place}` : ''}`, icon: 'calendar-outline', color: '#2257F4', tint: '#DCE7FF' })),
     ...openChores.map((chore: Chore) => ({ kind: 'chore', item: chore, title: chore.title, value: chore.due, detail: `${chore.owner} · ${formatChoreReward(chore)}`, icon: 'checkmark-done-outline', color: '#19A47B', tint: '#D9F7ED' })),
   ].slice(0, 4);
   const upcomingEvents = events.filter((event: BotEvent) => !event.dateISO || event.dateISO >= today).slice(0, 5);
+  const nextEvent = upcomingEvents[0] ?? null;
+  const attentionItems = [
+    inboxReviewCount > 0 && {
+      key: 'inbox',
+      icon: 'mail-unread-outline',
+      color: '#FF7A2E',
+      title: `${inboxReviewCount} inbox item${inboxReviewCount === 1 ? '' : 's'} need review`,
+      detail: 'Approve the details before Coh adds anything.',
+      action: onInbox,
+    },
+    followUps.length > 0 && {
+      key: 'follow-ups',
+      icon: 'refresh-circle-outline',
+      color: '#7047EE',
+      title: `${followUps.length} follow-up${followUps.length === 1 ? '' : 's'} still open`,
+      detail: 'Resurface outcomes and capture the next step.',
+      action: onRecap,
+    },
+    overdueChores.length > 0 && {
+      key: 'chores',
+      icon: 'alert-circle-outline',
+      color: '#D7550D',
+      title: `${overdueChores.length} chore${overdueChores.length === 1 ? '' : 's'} overdue`,
+      detail: 'Reassign, reschedule, or mark completed.',
+      action: onChores,
+    },
+    !notificationsEnabled && {
+      key: 'notifications',
+      icon: 'notifications-off-outline',
+      color: '#D64545',
+      title: 'Family alerts are not ready',
+      detail: 'Choose delivery, timing, and quiet hours.',
+      action: onNotifications,
+    },
+  ].filter(Boolean) as Array<{
+    key: string;
+    icon: string;
+    color: string;
+    title: string;
+    detail: string;
+    action: () => void;
+  }>;
+  const commandStats = [
+    { label: 'Today', value: todaysEvents.length, color: '#2257F4', action: onCalendar },
+    { label: 'Open chores', value: openChores.length, color: '#19A47B', action: onChores },
+    { label: 'Inbox', value: inboxReviewCount, color: '#FF7A2E', action: onInbox },
+    { label: 'Follow-ups', value: followUps.length, color: '#7047EE', action: onRecap },
+  ];
   return <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
+    <LinearGradient colors={['#1C49DB', '#7047EE']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={styles.commandCenterHero}>
+      <View style={styles.commandCenterTop}>
+        <View style={styles.commandCenterMark}><Ionicons name="home" size={21} color="#7047EE" /></View>
+        <View style={styles.flex}><Text style={styles.commandCenterLabel}>FAMILY COMMAND CENTER</Text><Text style={styles.commandCenterTitle}>{nextEvent ? `Next: ${nextEvent.title}` : 'Your household is clear.'}</Text><Text style={styles.commandCenterDetail}>{nextEvent ? `${nextEvent.day} at ${nextEvent.time}${nextEvent.place ? ` · ${nextEvent.place}` : ''}` : 'Coh is watching the calendar, chores, inbox, and follow-ups.'}</Text></View>
+      </View>
+      <View style={styles.commandStatsRow}>{commandStats.map((item) => <Pressable key={item.label} onPress={item.action} style={styles.commandStat}>
+        <Text style={styles.commandStatValue}>{item.value}</Text><Text style={styles.commandStatLabel}>{item.label}</Text>
+      </Pressable>)}</View>
+    </LinearGradient>
+
+    <View style={styles.sectionHead}><View><Text style={styles.sectionTitle}>Needs attention</Text><Text style={styles.muted}>{attentionItems.length ? 'The shortest path to a clear household.' : 'Nothing is waiting on the family.'}</Text></View></View>
+    {attentionItems.length === 0 ? <View style={styles.commandClear}><Ionicons name="checkmark-circle" size={23} color="#19A47B" /><View style={styles.flex}><Text style={styles.settingTitle}>You’re caught up</Text><Text style={styles.muted}>No reviews, overdue chores, or follow-ups need action.</Text></View></View> : attentionItems.slice(0, 4).map((item) => <Pressable key={item.key} onPress={item.action} style={styles.attentionRow}>
+      <View style={[styles.attentionIcon, { backgroundColor: `${item.color}18` }]}><Ionicons name={item.icon as any} size={21} color={item.color} /></View>
+      <View style={styles.flex}><Text style={styles.settingTitle}>{item.title}</Text><Text style={styles.muted}>{item.detail}</Text></View>
+      <Ionicons name="chevron-forward" size={18} color={item.color} />
+    </Pressable>)}
+
     <View style={styles.sectionHead}><View><Text style={styles.sectionTitle}>Today</Text><Text style={styles.muted}>{todaysEvents.length} event{todaysEvents.length === 1 ? '' : 's'} · {openChores.length} open chore{openChores.length === 1 ? '' : 's'}</Text></View><Pressable onPress={onCalendar}><Text style={styles.link}>See full day ›</Text></Pressable></View>
     {cards.length === 0 ? <View style={styles.emptyChat}><Ionicons name="sparkles-outline" size={28} color="#7047EE" /><Text style={styles.settingTitle}>Your family radar is clear</Text><Text style={styles.muted}>Ask Coh to add an event or create the first shared chore.</Text></View> : <View style={styles.bentoGrid}>{cards.map((card: any) => <Pressable key={`${card.kind}-${card.item.id}`} onPress={() => card.kind === 'event' ? onOpenEvent(card.item) : onChores()} style={styles.bentoCard}>
       <View style={[styles.cardIcon, { backgroundColor: card.tint }]}><Ionicons name={card.icon as any} size={24} color={card.color} /></View>
@@ -1650,6 +1991,11 @@ function TodayScreen({ styles, events, chores, onCalendar, onRecap, onOpenEvent,
     <Pressable onPress={onRecap}><LinearGradient colors={['#2257F4', '#7047EE']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={styles.recapCard}>
       <View style={styles.recapIcon}><Ionicons name="sparkles" size={21} color="#fff" /></View><View style={styles.recapCopy}><Text style={styles.recapLabel}>COHO DAILY</Text><Text style={styles.recapTitle}>Your live family sync</Text><Text style={styles.recapText}>{events.length} shared event{events.length === 1 ? '' : 's'} and {openChores.length} open chore{openChores.length === 1 ? '' : 's'}.</Text></View><Ionicons name="chevron-forward" size={20} color="#fff" />
     </LinearGradient></Pressable>
+    <Text style={styles.sectionTitle}>Family pulse</Text>
+    <View style={styles.familyPulseGrid}>
+      <Pressable onPress={onFamily} style={styles.familyPulseCard}><Ionicons name="people-outline" size={22} color="#2257F4" /><Text style={styles.familyPulseValue}>{profiles.length}</Text><Text style={styles.familyPulseLabel}>Family members</Text></Pressable>
+      <Pressable onPress={onChat} style={styles.familyPulseCard}><Ionicons name="chatbubbles-outline" size={22} color="#7047EE" /><Text style={styles.familyPulseValue}>{familyMessages.length}</Text><Text style={styles.familyPulseLabel}>Shared messages</Text></Pressable>
+    </View>
     <Text style={styles.sectionTitle}>Coming up</Text>{upcomingEvents.length === 0 ? <Text style={styles.muted}>No upcoming events yet.</Text> : upcomingEvents.map((event: BotEvent) => <Pressable key={event.id} onPress={() => onOpenEvent(event)} style={styles.upcomingRow}><View style={[styles.dateTile, { borderColor: '#2257F4' }]}><Text style={[styles.dateMonth, { color: '#2257F4' }]}>{event.dateISO ? new Date(`${event.dateISO}T12:00:00`).toLocaleDateString(undefined, { month: 'short' }).toUpperCase() : 'NEXT'}</Text><Text style={[styles.dateNumber, { color: '#2257F4' }]}>{event.dateISO ? Number(event.dateISO.slice(-2)) : '•'}</Text></View><View style={styles.flex}><Text style={styles.upcomingTime}>{event.time}{event.provider && event.provider !== 'coho' ? ` · ${calendarSourceLabel(event.provider)}` : ''}</Text><Text style={styles.upcomingTitle}>{event.title}</Text></View><Ionicons name="chevron-forward" size={18} color="#2257F4" /></Pressable>)}
   </ScrollView>;
 }
@@ -2361,19 +2707,125 @@ function RecapsScreen({ styles, onRefresh, onListen, onOpenEvent, onCompleteFoll
   </ScrollView>;
 }
 
-function IntegrationsScreen({ styles, connected, onConnect }: any) {
-  const items = [
-    { name: 'iOS Notifications', icon: 'phone-portrait-outline', color: '#7C4DFF', detail: 'Daily syncs, week-ahead briefings, and reminders' },
-    { name: 'Family Inbox', icon: 'mail-unread-outline', color: '#FF7A2E', detail: 'Forward school and appointment email into a review queue' },
-    { name: 'Family Places', icon: 'location-outline', color: '#19A47B', detail: 'Consent-first phone location and arrival or departure alerts' },
-    { name: 'Apple Calendar', icon: 'calendar-outline', color: '#2257F4', detail: 'Read and write approved family events' },
-    { name: 'Google Calendar', icon: 'logo-google', color: '#19A47B', detail: 'Import selected calendars with per-calendar controls' },
-    { name: 'Outlook', icon: 'mail-outline', color: '#2257F4', detail: 'Calendar and forwarded-email connection' },
-    { name: 'Instacart', icon: 'basket-outline', color: '#19A47B', detail: 'Live local products, pricing, shopping lists, and checkout' },
-    { name: 'OpenTable', icon: 'restaurant-outline', color: '#D7550D', detail: 'Restaurant discovery and confirmed reservation handoff' },
-    { name: 'Skylight', icon: 'cloud-outline', color: '#FF7A2E', detail: 'Migration bridge for existing family schedules' },
+function IntegrationsScreen({
+  styles,
+  connected,
+  onOpenCategory,
+}: {
+  styles: any;
+  connected: Record<string, boolean>;
+  onOpenCategory: (view: IntegrationCategoryView) => void;
+}) {
+  return <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
+    <LinearGradient colors={['#24116D', '#6648EF']} style={styles.integrationHero}>
+      <View style={styles.commandCenterMark}><Ionicons name="extension-puzzle" size={22} color="#7047EE" /></View>
+      <Text style={styles.recapHeroLabel}>COHO CONNECTIONS</Text>
+      <Text style={styles.integrationHeroTitle}>Everything connected, nothing cluttered.</Text>
+      <Text style={styles.recapHeroText}>Choose a category, then connect only the services your household trusts. Coh keeps the important output in one command center.</Text>
+    </LinearGradient>
+    <View style={styles.integrationCategoryGrid}>{integrationCategories.map((category) => {
+      const connectedCount = category.providers.filter((provider) => connected[provider.name]).length;
+      return <Pressable key={category.view} onPress={() => onOpenCategory(category.view)} style={styles.integrationCategoryCard}>
+        <View style={[styles.integrationCategoryIcon, { backgroundColor: `${category.color}18` }]}><Ionicons name={category.icon as any} size={24} color={category.color} /></View>
+        <Text style={styles.integrationCategoryTitle}>{category.view}</Text>
+        <Text style={styles.integrationCategoryDetail}>{category.detail}</Text>
+        <View style={styles.integrationCategoryFooter}><Text style={[styles.integrationCategoryCount, { color: category.color }]}>{connectedCount ? `${connectedCount} connected` : `${category.providers.length} option${category.providers.length === 1 ? '' : 's'}`}</Text><Ionicons name="chevron-forward" size={18} color={category.color} /></View>
+      </Pressable>;
+    })}</View>
+    <View style={styles.integrationTrustCard}><Ionicons name="shield-checkmark-outline" size={22} color="#19A47B" /><View style={styles.flex}><Text style={styles.settingTitle}>Household-controlled by design</Text><Text style={styles.muted}>Connections are opt-in, visible, and removable. Inbox suggestions always require family approval before creating an action.</Text></View></View>
+  </ScrollView>;
+}
+
+function IntegrationCategoryScreen({
+  styles,
+  view,
+  connected,
+  onConnect,
+}: {
+  styles: any;
+  view: IntegrationCategoryView;
+  connected: Record<string, boolean>;
+  onConnect: (name: string, returnView?: IntegrationCategoryView) => void;
+}) {
+  const category = integrationCategories.find((item) => item.view === view)
+    ?? integrationCategories[0];
+  return <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
+    <View style={styles.integrationCategoryHeader}>
+      <View style={[styles.integrationCategoryIconLarge, { backgroundColor: `${category.color}18` }]}><Ionicons name={category.icon as any} size={27} color={category.color} /></View>
+      <View style={styles.flex}><Text style={styles.eyebrow}>INTEGRATIONS</Text><Text style={styles.integrationCategoryPageTitle}>{category.view}</Text><Text style={styles.muted}>{category.detail}</Text></View>
+    </View>
+    {category.providers.map((provider) => {
+      const active = connected[provider.name] === true;
+      const actionLabel = ['iOS Notifications', 'Email Briefings'].includes(provider.name)
+        ? 'Configure'
+        : ['Family Inbox', 'Email forwarding', 'Instacart', 'OpenTable'].includes(provider.name)
+          ? 'Open'
+          : active
+            ? 'Manage'
+            : 'Set up';
+      return <View key={provider.name} style={styles.integrationProviderCard}>
+        <View style={[styles.integrationIcon, { backgroundColor: `${provider.color}18` }]}><Ionicons name={provider.icon as any} size={23} color={provider.color} /></View>
+        <View style={styles.flex}><View style={styles.integrationProviderTitleRow}><Text style={styles.integrationTitle}>{provider.name}</Text>{active && <View style={styles.integrationConnectedPill}><Text style={styles.integrationConnectedPillText}>CONNECTED</Text></View>}</View><Text style={styles.muted}>{provider.detail}</Text></View>
+        <Pressable onPress={() => onConnect(provider.name, view)} style={[styles.connectButton, active && styles.connectedButton]}><Text style={[styles.connectText, active && styles.connectedText]}>{actionLabel}</Text></Pressable>
+      </View>;
+    })}
+  </ScrollView>;
+}
+
+function NotificationCenterScreen({
+  styles,
+  prefs,
+  permissionEnabled,
+  onChange,
+  onEnable,
+  onSave,
+}: {
+  styles: any;
+  prefs: ChiefPrefs;
+  permissionEnabled: boolean;
+  onChange: (value: ChiefPrefs) => void;
+  onEnable: () => void;
+  onSave: () => void;
+}) {
+  const update = (patch: Partial<ChiefPrefs>) => onChange({ ...prefs, ...patch });
+  const briefingRows = [
+    { key: 'daily' as const, timeKey: 'dailyTime' as const, title: 'Daily sync', detail: 'Appointments, chores, messages, and priorities', times: ['6:30 AM', '7:00 AM', '8:00 AM'] },
+    { key: 'weekAhead' as const, timeKey: 'weekAheadTime' as const, title: 'Week ahead', detail: `${prefs.weekAheadDay} preparation and conflicts`, times: ['5:00 PM', '6:00 PM', '7:00 PM'] },
+    { key: 'followUp' as const, timeKey: 'followUpTime' as const, title: 'Weekly follow-up', detail: `${prefs.followUpDay} unresolved appointments and actions`, times: ['4:00 PM', '5:00 PM', '6:00 PM'] },
   ];
-  return <ScrollView contentContainerStyle={styles.scrollContent}><LinearGradient colors={['#24116D', '#6648EF']} style={styles.automationCard}><Ionicons name="flash" size={23} color="#fff" /><View style={styles.flex}><Text style={styles.automationLabel}>REVIEW FIRST</Text><Text style={styles.automationTitle}>Coh suggests events from email. A family member approves before anything reaches the calendar.</Text></View></LinearGradient>{items.map(({ name, icon, color, detail }) => <View key={name} style={styles.integrationRow}><View style={[styles.integrationIcon, { backgroundColor: `${color}18` }]}><Ionicons name={icon as any} size={23} color={color} /></View><View style={styles.flex}><Text style={styles.integrationTitle}>{name}</Text><Text style={styles.muted}>{detail}</Text></View><Pressable onPress={() => onConnect(name)} style={[styles.connectButton, connected[name] && styles.connectedButton]}><Text style={[styles.connectText, connected[name] && styles.connectedText]}>{connected[name] ? 'Connected' : name === 'iOS Notifications' ? 'Enable' : 'Set up'}</Text></Pressable></View>)}</ScrollView>;
+  return <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
+    <View style={[styles.notificationStatusCard, permissionEnabled && styles.notificationStatusReady]}>
+      <View style={[styles.integrationIcon, { backgroundColor: permissionEnabled ? '#19A47B18' : '#FF7A2E18' }]}><Ionicons name={permissionEnabled ? 'checkmark-circle' : 'notifications-off-outline'} size={23} color={permissionEnabled ? '#19A47B' : '#FF7A2E'} /></View>
+      <View style={styles.flex}><Text style={styles.settingTitle}>{permissionEnabled ? 'This iPhone is registered' : 'iOS permission is required'}</Text><Text style={styles.muted}>{permissionEnabled ? 'Your settings below are saved to your Coho profile and follow you across sessions.' : 'Enable once in iOS, then personalize what Coho sends below.'}</Text></View>
+      {!permissionEnabled && <Pressable onPress={onEnable} style={styles.connectButton}><Text style={styles.connectText}>Enable</Text></Pressable>}
+    </View>
+
+    <Text style={styles.sectionTitle}>Delivery</Text>
+    <View style={styles.notificationChoiceGrid}>
+      <Pressable onPress={() => update({ push: !prefs.push })} style={[styles.notificationChoice, prefs.push && styles.notificationChoiceActive]}><Ionicons name="phone-portrait-outline" size={21} color={prefs.push ? '#7047EE' : styles.iconColor.color} /><View style={styles.flex}><Text style={styles.settingTitle}>Push</Text><Text style={styles.muted}>On this device</Text></View><Ionicons name={prefs.push ? 'checkmark-circle' : 'ellipse-outline'} size={20} color={prefs.push ? '#19A47B' : styles.iconColor.color} /></Pressable>
+      <Pressable onPress={() => update({ email: !prefs.email })} style={[styles.notificationChoice, prefs.email && styles.notificationChoiceActive]}><Ionicons name="mail-outline" size={21} color={prefs.email ? '#2257F4' : styles.iconColor.color} /><View style={styles.flex}><Text style={styles.settingTitle}>Email</Text><Text style={styles.muted}>Verified account</Text></View><Ionicons name={prefs.email ? 'checkmark-circle' : 'ellipse-outline'} size={20} color={prefs.email ? '#19A47B' : styles.iconColor.color} /></Pressable>
+    </View>
+
+    <Text style={styles.sectionTitle}>Notify me about</Text>
+    <View style={styles.preferenceGrid}>{([
+      ['events', 'Events & reminders', 'calendar-outline'],
+      ['chores', 'Chores & assignments', 'checkbox-outline'],
+      ['messages', 'Family messages', 'chatbubble-outline'],
+      ['followUps', 'Follow-ups', 'refresh-outline'],
+    ] as const).map(([key, label, icon]) => <Pressable key={key} onPress={() => update({ [key]: !prefs[key] })} style={[styles.preferenceTile, prefs[key] && styles.preferenceTileActive]}><Ionicons name={icon} size={19} color={prefs[key] ? '#19A47B' : styles.iconColor.color} /><Text style={styles.preferenceText}>{label}</Text><Ionicons name={prefs[key] ? 'checkmark-circle' : 'ellipse-outline'} size={18} color={prefs[key] ? '#19A47B' : styles.iconColor.color} /></Pressable>)}</View>
+
+    <Text style={styles.sectionTitle}>Scheduled briefings</Text>
+    {briefingRows.map((row) => <View key={row.key} style={styles.notificationBriefingCard}>
+      <View style={styles.settingRowTop}><View style={styles.flex}><Text style={styles.settingTitle}>{row.title}</Text><Text style={styles.muted}>{row.detail}</Text></View><Switch value={prefs[row.key]} onValueChange={(value) => update({ [row.key]: value })} trackColor={{ true: '#6687FF' }} /></View>
+      {prefs[row.key] && <View style={styles.chipRow}>{row.times.map((time) => <Pressable key={time} onPress={() => update({ [row.timeKey]: time })} style={[styles.choiceChip, prefs[row.timeKey] === time && styles.choiceChipActive]}><Text style={[styles.choiceChipText, prefs[row.timeKey] === time && styles.choiceChipTextActive]}>{time}</Text></Pressable>)}</View>}
+    </View>)}
+
+    <Text style={styles.sectionTitle}>Quiet hours</Text>
+    <View style={styles.settingRow}><Ionicons name="moon-outline" size={21} color="#7047EE" /><View style={styles.flex}><Text style={styles.settingTitle}>9:00 PM–7:00 AM</Text><Text style={styles.muted}>Non-urgent notifications wait until morning. Urgent alerts still arrive.</Text></View><Switch value={prefs.quietHours} onValueChange={(quietHours) => update({ quietHours })} trackColor={{ true: '#6687FF' }} /></View>
+
+    <Pressable onPress={onSave} style={styles.saveButton}><Text style={styles.saveButtonText}>Save notification profile</Text></Pressable>
+    <Pressable onPress={() => void Linking.openSettings()} style={styles.notificationSystemLink}><Ionicons name="settings-outline" size={17} color="#2257F4" /><Text style={styles.link}>Open iOS notification settings</Text></Pressable>
+  </ScrollView>;
 }
 
 function SettingsScreen({ styles, dark, onTheme, onNotifications, onFamily, onPrivacy, profiles }: any) {
@@ -2679,9 +3131,26 @@ function createStyles(t: Theme) {
     safeArea: { flex: 1, backgroundColor: t.canvas }, app: { flex: 1, backgroundColor: t.canvas }, screen: { flex: 1 }, flex: { flex: 1 }, iconColor: { color: t.muted },
     header: { paddingHorizontal: 18, paddingTop: 10, paddingBottom: 12, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: t.line },
     headerTitleWrap: { flexDirection: 'row', alignItems: 'center', flex: 1 }, backButton: { width: 36, height: 36, borderRadius: 12, alignItems: 'center', justifyContent: 'center', backgroundColor: t.surface, marginRight: 8 },
-    eyebrow: { color: t.primary, fontSize: 9, fontWeight: '800', letterSpacing: 1.1, marginBottom: 4 }, headerTitle: { color: t.text, fontSize: 30, fontWeight: '800', letterSpacing: -1.4, lineHeight: 31 }, headerButtons: { flexDirection: 'row', gap: 8 },
+    eyebrow: { color: t.primary, fontSize: 9, fontWeight: '800', letterSpacing: 1.1, marginBottom: 4 }, headerTitle: { color: t.text, fontSize: 30, fontWeight: '800', letterSpacing: -1.4, lineHeight: 31 }, headerSubtitle: { color: t.muted, fontSize: 9, fontWeight: '700', marginTop: 3 }, headerButtons: { flexDirection: 'row', gap: 8 },
     iconButton: { width: 42, height: 42, borderRadius: 14, borderWidth: 1, borderColor: t.line, backgroundColor: t.surface, alignItems: 'center', justifyContent: 'center' }, recapHeaderButton: { width: 42, height: 42, borderRadius: 14, backgroundColor: '#7047EE', alignItems: 'center', justifyContent: 'center', shadowColor: '#7047EE', shadowOpacity: .35, shadowRadius: 10 }, addButton: { width: 43, height: 43, borderRadius: 15, backgroundColor: t.primary, alignItems: 'center', justifyContent: 'center', shadowColor: t.primary, shadowOpacity: .26, shadowRadius: 10, shadowOffset: { width: 0, height: 6 } },
     scrollContent: { padding: 18, paddingBottom: 32, gap: 12 }, sectionHead: { flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between', marginTop: 4 }, sectionTitle: { color: t.text, fontSize: 20, fontWeight: '800', letterSpacing: -.5, marginTop: 10 }, muted: { color: t.muted, fontSize: 11, lineHeight: 15 }, link: { color: t.primary, fontSize: 11, fontWeight: '700' },
+    commandCenterHero: { minHeight: 222, borderRadius: 26, padding: 18, gap: 18, shadowColor: '#24116D', shadowOpacity: t.dark ? .34 : .22, shadowRadius: 18, shadowOffset: { width: 0, height: 9 } },
+    commandCenterTop: { flexDirection: 'row', alignItems: 'flex-start', gap: 12 },
+    commandCenterMark: { width: 46, height: 46, borderRadius: 15, backgroundColor: '#fff', alignItems: 'center', justifyContent: 'center', shadowColor: '#24116D', shadowOpacity: .16, shadowRadius: 9, shadowOffset: { width: 0, height: 4 } },
+    commandCenterLabel: { color: '#FFFFFFB8', fontSize: 8, fontWeight: '900', letterSpacing: 1.1 },
+    commandCenterTitle: { color: '#fff', fontSize: 23, lineHeight: 27, fontWeight: '900', letterSpacing: -.8, marginTop: 5 },
+    commandCenterDetail: { color: '#FFFFFFC7', fontSize: 10, lineHeight: 15, marginTop: 6 },
+    commandStatsRow: { marginTop: 'auto', flexDirection: 'row', gap: 7 },
+    commandStat: { flex: 1, minHeight: 58, borderRadius: 15, paddingHorizontal: 8, paddingVertical: 9, justifyContent: 'center', backgroundColor: '#FFFFFF18', borderWidth: 1, borderColor: '#FFFFFF20' },
+    commandStatValue: { color: '#fff', fontSize: 19, lineHeight: 21, fontWeight: '900' },
+    commandStatLabel: { color: '#FFFFFFB8', fontSize: 7, lineHeight: 10, fontWeight: '800', marginTop: 3 },
+    commandClear: { minHeight: 68, borderRadius: 18, padding: 13, flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: '#19A47B10', borderWidth: 1, borderColor: '#19A47B35' },
+    attentionRow: { minHeight: 72, borderRadius: 18, padding: 12, flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line },
+    attentionIcon: { width: 42, height: 42, borderRadius: 14, alignItems: 'center', justifyContent: 'center' },
+    familyPulseGrid: { flexDirection: 'row', gap: 10 },
+    familyPulseCard: { flex: 1, minHeight: 112, borderRadius: 19, padding: 14, justifyContent: 'space-between', backgroundColor: t.surface, borderWidth: 1, borderColor: t.line },
+    familyPulseValue: { color: t.text, fontSize: 25, lineHeight: 27, fontWeight: '900', marginTop: 10 },
+    familyPulseLabel: { color: t.muted, fontSize: 9, fontWeight: '800', marginTop: 2 },
     bentoGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 }, bentoCard: { width: '48.5%', minHeight: 190, borderRadius: 22, padding: 15, backgroundColor: t.surfaceStrong, borderWidth: 1, borderColor: t.line, shadowColor: '#392B14', shadowOpacity: t.dark ? .24 : .07, shadowRadius: 12, shadowOffset: { width: 0, height: 7 } },
     cardIcon: { width: 43, height: 43, borderRadius: 14, alignItems: 'center', justifyContent: 'center', marginBottom: 14 }, cardTitle: { color: t.text, fontSize: 14, fontWeight: '800' }, cardValue: { color: t.text, fontSize: 21, fontWeight: '800', letterSpacing: -.7, marginTop: 3 }, cardDetail: { color: t.muted, fontSize: 9, marginTop: 4, minHeight: 26 }, cardPill: { alignSelf: 'flex-start', flexDirection: 'row', gap: 4, alignItems: 'center', borderRadius: 99, paddingHorizontal: 8, paddingVertical: 6, marginTop: 'auto' }, cardPillText: { fontSize: 8, fontWeight: '700' },
     recapCard: { minHeight: 88, borderRadius: 21, padding: 15, flexDirection: 'row', alignItems: 'center', gap: 11, marginTop: 2 }, recapIcon: { width: 43, height: 43, borderRadius: 14, backgroundColor: '#FFFFFF24', alignItems: 'center', justifyContent: 'center' }, recapCopy: { flex: 1 }, recapLabel: { color: '#FFFFFFB5', fontSize: 7, fontWeight: '800', letterSpacing: 1 }, recapTitle: { color: '#fff', fontSize: 13, fontWeight: '800', marginTop: 2 }, recapText: { color: '#FFFFFFB8', fontSize: 9, lineHeight: 13, marginTop: 2 },
@@ -2696,7 +3165,32 @@ function createStyles(t: Theme) {
     familyHero: { minHeight: 116, borderRadius: 22, padding: 18, flexDirection: 'row', alignItems: 'center', backgroundColor: t.surface, borderWidth: 1, borderColor: t.line }, familyHeroTitle: { color: t.text, fontSize: 22, fontWeight: '900', marginTop: 5, marginBottom: 4 }, addProfileButton: { width: 46, height: 46, borderRadius: 15, backgroundColor: t.primary, alignItems: 'center', justifyContent: 'center', marginLeft: 'auto' }, profileRow: { minHeight: 88, borderRadius: 19, padding: 12, flexDirection: 'row', alignItems: 'center', gap: 11, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line }, profileAvatar: { width: 42, height: 42, borderRadius: 15, overflow: 'hidden', alignItems: 'center', justifyContent: 'center' }, profileAvatarLarge: { width: 58, height: 58, borderRadius: 19 }, profileAvatarImage: { width: '100%', height: '100%' }, profileName: { color: t.text, fontSize: 14, fontWeight: '900' }, profileBio: { color: t.muted, fontSize: 9, lineHeight: 13, marginTop: 4 }, profileSheet: { maxHeight: '88%', backgroundColor: t.surfaceStrong, borderTopLeftRadius: 28, borderTopRightRadius: 28 }, profileSheetContent: { paddingHorizontal: 19, paddingTop: 9, paddingBottom: 34 }, photoEditor: { minHeight: 76, borderRadius: 18, padding: 10, flexDirection: 'row', alignItems: 'center', gap: 12, marginTop: 16, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line }, profilePrivacy: { color: t.muted, fontSize: 9, lineHeight: 14, marginTop: 14 }, deleteProfileButton: { minHeight: 44, marginTop: 10, borderRadius: 14, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7, backgroundColor: '#D645450D', borderWidth: 1, borderColor: '#D6454535' }, deleteProfileText: { color: '#D64545', fontSize: 10, fontWeight: '800' },
     searchInput: { height: 45, borderRadius: 15, borderWidth: 1, borderColor: t.line, backgroundColor: t.surface, color: t.text, paddingHorizontal: 14 }, notesGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 }, noteCard: { width: '48.5%', minHeight: 140, borderRadius: 19, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, padding: 15 }, noteEmoji: { fontSize: 24 }, noteTitle: { color: t.text, fontSize: 12, fontWeight: '800', marginTop: 18, marginBottom: 4 }, noteChevron: { position: 'absolute', right: 12, bottom: 12 },
     recapHero: { minHeight: 260, borderRadius: 24, padding: 23, justifyContent: 'center' }, recapHeroLabel: { color: '#FFFFFFB5', fontSize: 8, fontWeight: '800', letterSpacing: 1, marginTop: 13 }, recapHeroTitle: { color: '#fff', fontSize: 28, lineHeight: 31, fontWeight: '800', letterSpacing: -1, marginTop: 8 }, recapHeroText: { color: '#FFFFFFC0', fontSize: 11, lineHeight: 16, marginTop: 8 }, recapActionRow: { flexDirection: 'row', gap: 8, marginTop: 18 }, recapHeroButton: { alignSelf: 'flex-start', minHeight: 38, borderRadius: 12, backgroundColor: '#fff', flexDirection: 'row', gap: 7, alignItems: 'center', paddingHorizontal: 13 }, recapSnapshot: { minHeight: 66, borderRadius: 17, padding: 11, flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line }, recapSnapshotActive: { borderColor: '#7047EE88', backgroundColor: t.dark ? '#251F46' : '#F5F0FF' }, recapSnapshotIcon: { width: 38, height: 38, borderRadius: 13, alignItems: 'center', justifyContent: 'center', backgroundColor: '#7047EE14' }, recapSnapshotDetail: { borderRadius: 19, padding: 13, gap: 8, backgroundColor: t.surface, borderWidth: 1, borderColor: '#7047EE55' }, listenSnapshot: { alignSelf: 'flex-start', minHeight: 36, borderRadius: 11, paddingHorizontal: 10, flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: '#7047EE12' }, highlightRow: { minHeight: 61, flexDirection: 'row', gap: 11, alignItems: 'center', borderRadius: 16, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, padding: 12 }, highlightTime: { color: t.primary, fontSize: 11, fontWeight: '800', width: 38 }, highlightText: { color: t.text, fontSize: 11, fontWeight: '700', flex: 1 },
-    automationCard: { minHeight: 90, borderRadius: 20, padding: 16, flexDirection: 'row', gap: 12, alignItems: 'center' }, automationLabel: { color: '#FFFFFFA8', fontSize: 7, fontWeight: '800', letterSpacing: 1 }, automationTitle: { color: '#fff', fontSize: 12, fontWeight: '800', lineHeight: 17, marginTop: 3 }, integrationRow: { minHeight: 78, borderRadius: 18, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, padding: 12, flexDirection: 'row', alignItems: 'center', gap: 10 }, integrationIcon: { width: 43, height: 43, borderRadius: 14, alignItems: 'center', justifyContent: 'center' }, integrationTitle: { color: t.text, fontSize: 12, fontWeight: '800' }, connectButton: { minHeight: 31, borderRadius: 10, borderWidth: 1, borderColor: t.primary, paddingHorizontal: 9, alignItems: 'center', justifyContent: 'center' }, connectedButton: { borderColor: '#19A47B', backgroundColor: '#19A47B12' }, connectText: { color: t.primary, fontSize: 8, fontWeight: '800' }, connectedText: { color: '#19A47B' },
+    automationCard: { minHeight: 90, borderRadius: 20, padding: 16, flexDirection: 'row', gap: 12, alignItems: 'center' }, automationLabel: { color: '#FFFFFFA8', fontSize: 7, fontWeight: '800', letterSpacing: 1 }, automationTitle: { color: '#fff', fontSize: 12, fontWeight: '800', lineHeight: 17, marginTop: 3 },
+    integrationHero: { minHeight: 230, borderRadius: 25, padding: 20, justifyContent: 'center', shadowColor: '#24116D', shadowOpacity: t.dark ? .34 : .2, shadowRadius: 17, shadowOffset: { width: 0, height: 8 } },
+    integrationHeroTitle: { color: '#fff', fontSize: 26, lineHeight: 30, fontWeight: '900', letterSpacing: -.9, marginTop: 7 },
+    integrationCategoryGrid: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between' },
+    integrationCategoryCard: { width: '48.5%', minHeight: 190, marginBottom: 10, borderRadius: 21, padding: 15, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line },
+    integrationCategoryIcon: { width: 45, height: 45, borderRadius: 15, alignItems: 'center', justifyContent: 'center' },
+    integrationCategoryTitle: { color: t.text, fontSize: 14, lineHeight: 18, fontWeight: '900', marginTop: 15 },
+    integrationCategoryDetail: { color: t.muted, fontSize: 9, lineHeight: 14, marginTop: 5 },
+    integrationCategoryFooter: { marginTop: 'auto', paddingTop: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+    integrationCategoryCount: { fontSize: 8, fontWeight: '900' },
+    integrationTrustCard: { minHeight: 82, borderRadius: 19, padding: 14, flexDirection: 'row', alignItems: 'center', gap: 11, backgroundColor: '#19A47B0D', borderWidth: 1, borderColor: '#19A47B35' },
+    integrationCategoryHeader: { minHeight: 106, borderRadius: 21, padding: 16, flexDirection: 'row', alignItems: 'center', gap: 13, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line },
+    integrationCategoryIconLarge: { width: 55, height: 55, borderRadius: 18, alignItems: 'center', justifyContent: 'center' },
+    integrationCategoryPageTitle: { color: t.text, fontSize: 23, lineHeight: 26, fontWeight: '900', letterSpacing: -.7, marginBottom: 4 },
+    integrationProviderCard: { minHeight: 92, borderRadius: 19, padding: 13, flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line },
+    integrationProviderTitleRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 6, marginBottom: 3 },
+    integrationConnectedPill: { borderRadius: 99, paddingHorizontal: 7, paddingVertical: 3, backgroundColor: '#19A47B12' },
+    integrationConnectedPillText: { color: '#168866', fontSize: 6, fontWeight: '900', letterSpacing: .5 },
+    integrationRow: { minHeight: 78, borderRadius: 18, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, padding: 12, flexDirection: 'row', alignItems: 'center', gap: 10 }, integrationIcon: { width: 43, height: 43, borderRadius: 14, alignItems: 'center', justifyContent: 'center' }, integrationTitle: { color: t.text, fontSize: 12, fontWeight: '800' }, connectButton: { minHeight: 31, borderRadius: 10, borderWidth: 1, borderColor: t.primary, paddingHorizontal: 9, alignItems: 'center', justifyContent: 'center' }, connectedButton: { borderColor: '#19A47B', backgroundColor: '#19A47B12' }, connectText: { color: t.primary, fontSize: 8, fontWeight: '800' }, connectedText: { color: '#19A47B' },
+    notificationStatusCard: { minHeight: 88, borderRadius: 20, padding: 13, flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: '#FF7A2E0D', borderWidth: 1, borderColor: '#FF7A2E42' },
+    notificationStatusReady: { backgroundColor: '#19A47B0D', borderColor: '#19A47B42' },
+    notificationChoiceGrid: { flexDirection: 'row', gap: 10 },
+    notificationChoice: { flex: 1, minHeight: 82, borderRadius: 18, padding: 12, gap: 8, justifyContent: 'center', backgroundColor: t.surface, borderWidth: 1, borderColor: t.line },
+    notificationChoiceActive: { borderColor: '#7047EE55', backgroundColor: t.dark ? '#251F46' : '#F6F1FF' },
+    notificationBriefingCard: { borderRadius: 19, padding: 14, gap: 12, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line },
+    notificationSystemLink: { minHeight: 44, borderRadius: 14, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7, backgroundColor: `${t.primary}0C`, borderWidth: 1, borderColor: `${t.primary}2A` },
     chiefHero: { minHeight: 210, borderRadius: 24, padding: 22, justifyContent: 'center' }, chiefBadge: { width: 48, height: 48, borderRadius: 16, backgroundColor: '#fff', alignItems: 'center', justifyContent: 'center', marginBottom: 14 }, chiefHeroTitle: { color: '#fff', fontSize: 28, lineHeight: 32, fontWeight: '800', letterSpacing: -1, marginTop: 5 }, chiefSettingCard: { borderRadius: 19, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, padding: 13, gap: 12 }, settingRowTop: { flexDirection: 'row', alignItems: 'center', gap: 10 }, chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 }, choiceChip: { minHeight: 34, borderRadius: 11, borderWidth: 1, borderColor: t.line, paddingHorizontal: 11, alignItems: 'center', justifyContent: 'center', backgroundColor: t.surfaceStrong }, choiceChipActive: { backgroundColor: t.primary, borderColor: t.primary }, choiceChipText: { color: t.text, fontSize: 9, fontWeight: '800' }, choiceChipTextActive: { color: '#fff' }, preferenceGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 9 }, preferenceTile: { width: '48.5%', minHeight: 58, borderRadius: 15, padding: 11, flexDirection: 'row', gap: 8, alignItems: 'center', backgroundColor: t.surface, borderWidth: 1, borderColor: t.line }, preferenceTileActive: { borderColor: '#19A47B55', backgroundColor: '#19A47B0D' }, preferenceText: { color: t.text, fontSize: 10, fontWeight: '700', flex: 1 }, memberChip: { minHeight: 36, borderRadius: 18, borderWidth: 1, borderColor: t.line, paddingHorizontal: 14, alignItems: 'center', justifyContent: 'center', backgroundColor: t.surface }, memberChipActive: { backgroundColor: t.primary, borderColor: t.primary }, followUpCard: { minHeight: 72, borderRadius: 18, padding: 12, flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line },
     personSetting: { minHeight: 65, borderRadius: 17, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, padding: 11, flexDirection: 'row', alignItems: 'center', gap: 10 }, settingRow: { minHeight: 70, borderRadius: 17, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, padding: 13, flexDirection: 'row', alignItems: 'center', gap: 11 }, settingTitle: { color: t.text, fontSize: 12, fontWeight: '800' },
     modalBackdrop: { flex: 1, backgroundColor: '#0C111D88', justifyContent: 'flex-end' }, modalDismiss: { flex: 1 }, modalSheet: { backgroundColor: t.surfaceStrong, borderTopLeftRadius: 28, borderTopRightRadius: 28, paddingHorizontal: 19, paddingTop: 9, paddingBottom: Platform.OS === 'ios' ? 28 : 18 }, choreModalSheet: { maxHeight: '94%', paddingBottom: Platform.OS === 'ios' ? 12 : 8 }, modalHandle: { width: 39, height: 4, borderRadius: 2, backgroundColor: t.line, alignSelf: 'center', marginBottom: 15 }, modalHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' }, modalTitle: { color: t.text, fontSize: 23, fontWeight: '800', letterSpacing: -.7 }, typeTabs: { flexDirection: 'row', borderRadius: 14, padding: 4, backgroundColor: t.canvas, marginTop: 19 }, typeTab: { flex: 1, minHeight: 38, borderRadius: 10, alignItems: 'center', justifyContent: 'center' }, typeTabActive: { backgroundColor: t.surfaceStrong }, typeTabText: { color: t.muted, fontSize: 10, fontWeight: '700' }, typeTabTextActive: { color: t.primary }, fieldLabel: { color: t.muted, fontSize: 9, fontWeight: '800', marginTop: 15, marginBottom: 6 }, modalInput: { minHeight: 46, borderRadius: 13, borderWidth: 1, borderColor: t.line, backgroundColor: t.surface, color: t.text, paddingHorizontal: 12 }, modalTextArea: { minHeight: 83, paddingTop: 12, textAlignVertical: 'top' }, saveButton: { minHeight: 48, borderRadius: 15, backgroundColor: t.primary, alignItems: 'center', justifyContent: 'center', marginTop: 18 }, saveButtonText: { color: '#fff', fontSize: 12, fontWeight: '800' }, disabled: { opacity: .45 },

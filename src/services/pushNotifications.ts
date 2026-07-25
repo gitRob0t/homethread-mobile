@@ -5,7 +5,7 @@ import { supabase } from '../lib/supabase';
 
 const EAS_PROJECT_ID = '7b3c09f6-d932-4a01-943b-a74fe2a4fd88';
 
-type BriefingPreferences = {
+export type BriefingPreferences = {
   daily: boolean;
   dailyTime: string;
   weekAhead: boolean;
@@ -17,7 +17,13 @@ type BriefingPreferences = {
   push: boolean;
   email: boolean;
   messages: boolean;
+  events: boolean;
+  chores: boolean;
+  followUps: boolean;
+  quietHours: boolean;
 };
+
+export type StoredBriefingPreferences = Partial<BriefingPreferences>;
 
 export async function registerPushDevice(
   userId: string,
@@ -60,8 +66,8 @@ export async function syncBriefingPreferences(
   const { error } = await supabase.from('notification_preferences').upsert({
     user_id: userId,
     daily_recap: preferences.daily && (preferences.push || preferences.email),
-    event_reminders: preferences.push,
-    chore_reminders: preferences.push,
+    event_reminders: preferences.events && preferences.push,
+    chore_reminders: preferences.chores && preferences.push,
     messages: preferences.messages && preferences.push,
     push_delivery: preferences.push,
     email_copy: preferences.email,
@@ -70,12 +76,44 @@ export async function syncBriefingPreferences(
     week_ahead: preferences.weekAhead && (preferences.push || preferences.email),
     week_ahead_weekday: weekdayIndex(preferences.weekAheadDay),
     week_ahead_time: databaseTime(preferences.weekAheadTime),
-    follow_up: preferences.followUp && (preferences.push || preferences.email),
+    follow_up: preferences.followUp && preferences.followUps && (preferences.push || preferences.email),
     follow_up_weekday: weekdayIndex(preferences.followUpDay),
     follow_up_time: databaseTime(preferences.followUpTime),
+    quiet_hours: preferences.quietHours,
+    quiet_hours_start: '21:00:00',
+    quiet_hours_end: '07:00:00',
     updated_at: new Date().toISOString(),
   }, { onConflict: 'user_id' });
   if (error) throw error;
+}
+
+export async function loadBriefingPreferences(
+  userId: string,
+): Promise<StoredBriefingPreferences | null> {
+  const { data, error } = await supabase
+    .from('notification_preferences')
+    .select('daily_recap, event_reminders, chore_reminders, messages, recap_time, week_ahead, week_ahead_weekday, week_ahead_time, follow_up, follow_up_weekday, follow_up_time, push_delivery, email_copy, quiet_hours')
+    .eq('user_id', userId)
+    .maybeSingle();
+  if (error) throw error;
+  if (!data) return null;
+  return {
+    daily: data.daily_recap !== false,
+    dailyTime: displayTime(data.recap_time, '7:00 AM'),
+    weekAhead: data.week_ahead !== false,
+    weekAheadDay: weekdayName(data.week_ahead_weekday, 'Sunday'),
+    weekAheadTime: displayTime(data.week_ahead_time, '6:00 PM'),
+    followUp: data.follow_up !== false,
+    followUpDay: weekdayName(data.follow_up_weekday, 'Friday'),
+    followUpTime: displayTime(data.follow_up_time, '5:00 PM'),
+    push: data.push_delivery !== false,
+    email: data.email_copy === true,
+    events: data.event_reminders !== false,
+    chores: data.chore_reminders !== false,
+    messages: data.messages !== false,
+    followUps: data.follow_up !== false,
+    quietHours: data.quiet_hours !== false,
+  };
 }
 
 function databaseTime(value: string) {
@@ -90,4 +128,19 @@ function databaseTime(value: string) {
 function weekdayIndex(day: string) {
   const value = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'].indexOf(day);
   return value < 0 ? 0 : value;
+}
+
+function weekdayName(value: unknown, fallback: string) {
+  const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  const index = Number(value);
+  return Number.isInteger(index) && days[index] ? days[index] : fallback;
+}
+
+function displayTime(value: unknown, fallback: string) {
+  const match = String(value ?? '').match(/^(\d{1,2}):(\d{2})/);
+  if (!match) return fallback;
+  const hour = Number(match[1]);
+  if (!Number.isFinite(hour) || hour < 0 || hour > 23) return fallback;
+  const meridiem = hour >= 12 ? 'PM' : 'AM';
+  return `${hour % 12 || 12}:${match[2]} ${meridiem}`;
 }
