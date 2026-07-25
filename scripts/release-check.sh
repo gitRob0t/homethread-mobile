@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+npm run verify:source
 npm run typecheck
 npm run eval:coh
 npm run eval:backend

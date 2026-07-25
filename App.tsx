@@ -449,40 +449,19 @@ function CohoApp() {
     AsyncStorage.getItem('coho-reward-goals').then((saved) => {
       if (saved) setSelectedRewards(JSON.parse(saved));
     }).catch(() => undefined);
-    Promise.all([
-      AsyncStorage.getItem('coho-chat-messages-v2'),
-      AsyncStorage.getItem('coho-calendar-events-v2'),
-      AsyncStorage.getItem('coho-chores-v2'),
-    ]).then(([savedMessages, savedEvents, savedChores]) => {
-      if (savedMessages) setMessages(JSON.parse(savedMessages));
-      if (savedEvents) setBotEvents(JSON.parse(savedEvents));
-      if (savedChores) setChores(JSON.parse(savedChores).map((chore: Chore) => ({
-        ...chore,
-        details: chore.details ?? '',
-        assignedPersonId: chore.assignedPersonId ?? null,
-        assignedUserId: chore.assignedUserId ?? null,
-        dueAt: chore.dueAt ?? null,
-        recurrence: chore.recurrence ?? 'none',
-        recurrenceRule: chore.recurrenceRule ?? null,
-        reminderMinutes: chore.reminderMinutes ?? null,
-        rewardId: chore.rewardId ?? 'choice',
-        rewardValue: chore.rewardValue ?? chore.points ?? 10,
-        rewardLabel: chore.rewardLabel ?? null,
-      })));
-    }).catch(() => undefined).finally(() => setLocalDataReady(true));
+    // Older prototypes cached sample household data in global keys. Hydrating those
+    // keys can leak stale/demo content into a different signed-in household after
+    // an app update. Live household data is now the only source for chat, events,
+    // and chores; remove the unsafe legacy cache before connecting.
+    AsyncStorage.multiRemove([
+      'coho-chat-messages-v2',
+      'coho-calendar-events-v2',
+      'coho-chores-v2',
+    ]).catch(() => undefined).finally(() => setLocalDataReady(true));
     Notifications.getPermissionsAsync().then((permission) => {
       if (permission.granted) setConnected((current) => ({ ...current, 'iOS Notifications': true }));
     }).catch(() => undefined);
   }, []);
-
-  useEffect(() => {
-    if (!localDataReady) return;
-    AsyncStorage.multiSet([
-      ['coho-chat-messages-v2', JSON.stringify(messages.slice(-150))],
-      ['coho-calendar-events-v2', JSON.stringify(botEvents)],
-      ['coho-chores-v2', JSON.stringify(chores)],
-    ]).catch(() => undefined);
-  }, [localDataReady, messages, botEvents, chores]);
 
   useEffect(() => {
     const openNotification = (response: Notifications.NotificationResponse | null) => {
