@@ -146,6 +146,7 @@ type BotEvent = {
   sourceId?: string;
   title: string;
   person: string;
+  personId?: string;
   day: string;
   dateISO?: string;
   time: string;
@@ -1385,10 +1386,15 @@ function CohoApp() {
 
   async function speakDailySync(snapshotSummary?: string) {
     const openChores = chores.filter((item) => !item.done);
-    const nextEvents = botEvents.slice(-4);
+    const now = Date.now();
+    const today = localDateKey(new Date());
+    const nextEvents = botEvents
+      .filter((event) => isUpcomingCalendarEvent(event, now, today))
+      .sort((a, b) => botEventTimestamp(a) - botEventTimestamp(b))
+      .slice(0, 4);
     const eventSummary = nextEvents.length
       ? `You have ${nextEvents.length} upcoming family events. ${nextEvents.map((event) => `${event.title}, ${event.day} at ${event.time}`).join('. ')}.`
-      : 'There are no events added by Coh yet.';
+      : 'There are no upcoming events on the shared family calendar.';
     const choreSummary = openChores.length
       ? `${openChores.length} chores are still open. ${openChores.slice(0, 4).map((chore) => `${chore.title}, assigned to ${chore.owner}`).join('. ')}.`
       : 'All current chores are complete.';
@@ -1739,7 +1745,7 @@ function CohoApp() {
             onFamily={() => { setMoreView('Family'); setTab('More'); }}
             onNotifications={() => { setMoreView('Notification Settings'); setTab('More'); }}
           />}
-          {tab === 'Calendar' && <CalendarScreen theme={theme} styles={styles} botEvents={botEvents} focusDate={calendarFocusDate} onOpenEvent={setSelectedEvent} onAction={showNotice} onManage={() => { setMoreView('Integrations'); setTab('More'); }} />}
+          {tab === 'Calendar' && <CalendarScreen theme={theme} styles={styles} botEvents={botEvents} profiles={profiles} focusDate={calendarFocusDate} onOpenEvent={setSelectedEvent} onAction={showNotice} onManage={() => { setMoreView('Integrations'); setTab('More'); }} />}
           {tab === 'Chores' && <ChoresScreen styles={styles} chores={chores} memberNames={profiles.map((profile) => profile.name)} rewardMember={rewardMember} setRewardMember={setRewardMember} selectedRewards={selectedRewards} onConfigure={setEditingChore} onAdd={() => { setQuickAddType('Chore'); setQuickAddOpen(true); }} onSelectReward={(member: string, reward: string) => { const next = { ...selectedRewards, [member]: reward }; setSelectedRewards(next); AsyncStorage.setItem('coho-reward-goals', JSON.stringify(next)); showNotice(`${member} picked a new reward goal`); }} onToggle={toggleChore} />}
           {tab === 'Chat' && <ChatScreen styles={styles} messages={messages} mode={chatMode} setMode={setChatMode} draft={messageDraft} setDraft={setMessageDraft} onSend={sendMessage} onAdd={() => setQuickAddOpen(true)} onVoice={toggleVoiceRequest} voiceRecording={voiceRecorderState.isRecording} voiceSending={voiceSending} cohThinking={cohThinking} />}
           {tab === 'More' && moreView === 'Menu' && <MoreMenu styles={styles} setView={setMoreView} userId={currentUserId} onNotice={showNotice} />}
@@ -1881,20 +1887,29 @@ function TodayScreen({
   onFamily,
   onNotifications,
 }: any) {
-  const today = localDateKey(new Date());
+  const now = new Date();
+  const nowValue = now.getTime();
+  const today = localDateKey(now);
+  const tomorrowStart = startOfDay(addDays(now, 1)).getTime();
   const todaysEvents = events.filter((event: BotEvent) => event.dateISO === today);
   const openChores = chores.filter((chore: Chore) => !chore.done);
+  const todaysChores = openChores.filter((chore: Chore) =>
+    chore.dueAt && new Date(chore.dueAt).getTime() < tomorrowStart,
+  );
   const overdueChores = openChores.filter((chore: Chore) =>
-    chore.dueAt && new Date(chore.dueAt).getTime() < Date.now(),
+    chore.dueAt && new Date(chore.dueAt).getTime() < nowValue,
   );
   const familyMessages = messages.filter((message: ChatMessage) =>
     messageChannel(message) === 'family' && !message.bot,
   );
   const cards = [
     ...todaysEvents.map((event: BotEvent) => ({ kind: 'event', item: event, title: event.title, value: event.time, detail: `${event.person}${event.place ? ` · ${event.place}` : ''}`, icon: 'calendar-outline', color: '#2257F4', tint: '#DCE7FF' })),
-    ...openChores.map((chore: Chore) => ({ kind: 'chore', item: chore, title: chore.title, value: chore.due, detail: `${chore.owner} · ${formatChoreReward(chore)}`, icon: 'checkmark-done-outline', color: '#19A47B', tint: '#D9F7ED' })),
+    ...todaysChores.map((chore: Chore) => ({ kind: 'chore', item: chore, title: chore.title, value: chore.due, detail: `${chore.owner} · ${formatChoreReward(chore)}`, icon: 'checkmark-done-outline', color: '#19A47B', tint: '#D9F7ED' })),
   ].slice(0, 4);
-  const upcomingEvents = events.filter((event: BotEvent) => !event.dateISO || event.dateISO >= today).slice(0, 5);
+  const upcomingEvents = events
+    .filter((event: BotEvent) => isUpcomingCalendarEvent(event, nowValue, today))
+    .sort((a: BotEvent, b: BotEvent) => botEventTimestamp(a) - botEventTimestamp(b))
+    .slice(0, 5);
   const nextEvent = upcomingEvents[0] ?? null;
   const attentionItems = [
     inboxReviewCount > 0 && {
@@ -1961,7 +1976,7 @@ function TodayScreen({
       <Ionicons name="chevron-forward" size={18} color={item.color} />
     </Pressable>)}
 
-    <View style={styles.sectionHead}><View><Text style={styles.sectionTitle}>Today</Text><Text style={styles.muted}>{todaysEvents.length} event{todaysEvents.length === 1 ? '' : 's'} · {openChores.length} open chore{openChores.length === 1 ? '' : 's'}</Text></View><Pressable onPress={onCalendar}><Text style={styles.link}>See full day ›</Text></Pressable></View>
+    <View style={styles.sectionHead}><View><Text style={styles.sectionTitle}>Today</Text><Text style={styles.muted}>{todaysEvents.length} event{todaysEvents.length === 1 ? '' : 's'} · {todaysChores.length} chore{todaysChores.length === 1 ? '' : 's'} due</Text></View><Pressable onPress={onCalendar}><Text style={styles.link}>See full day ›</Text></Pressable></View>
     {cards.length === 0 ? <View style={styles.emptyChat}><Ionicons name="sparkles-outline" size={28} color="#7047EE" /><Text style={styles.settingTitle}>Your family radar is clear</Text><Text style={styles.muted}>Ask Coh to add an event or create the first shared chore.</Text></View> : <View style={styles.bentoGrid}>{cards.map((card: any) => <Pressable key={`${card.kind}-${card.item.id}`} onPress={() => card.kind === 'event' ? onOpenEvent(card.item) : onChores()} style={styles.bentoCard}>
       <View style={[styles.cardIcon, { backgroundColor: card.tint }]}><Ionicons name={card.icon as any} size={24} color={card.color} /></View>
       <Text style={styles.cardTitle}>{card.title}</Text><Text style={styles.cardValue}>{card.value}</Text><Text style={styles.cardDetail}>{card.detail}</Text>
@@ -1979,18 +1994,256 @@ function TodayScreen({
   </ScrollView>;
 }
 
-function CalendarScreen({ styles, botEvents, focusDate, onOpenEvent, onAction, onManage }: any) {
+type CalendarViewMode = 'month' | 'week' | 'agenda';
+
+const calendarPersonPalette = [
+  '#2257F4',
+  '#7047EE',
+  '#19A47B',
+  '#FF7A2E',
+  '#D6457A',
+  '#0F8FA8',
+  '#A96013',
+  '#5E6AD2',
+];
+
+function stableCalendarColor(value: string) {
+  const index = [...value].reduce((result, char) => result + char.charCodeAt(0), 0);
+  return calendarPersonPalette[index % calendarPersonPalette.length];
+}
+
+function calendarTimeValue(value: string) {
+  const text = value.trim().toLowerCase();
+  if (text.includes('all day')) return -1;
+  const match = text.match(/(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/);
+  if (!match) return Number.MAX_SAFE_INTEGER;
+  let hour = Number(match[1]);
+  const minute = Number(match[2] ?? 0);
+  if (match[3] === 'pm' && hour < 12) hour += 12;
+  if (match[3] === 'am' && hour === 12) hour = 0;
+  return hour * 60 + minute;
+}
+
+function calendarEventSort(a: BotEvent, b: BotEvent) {
+  const dateCompare = (a.dateISO ?? '').localeCompare(b.dateISO ?? '');
+  return dateCompare || calendarTimeValue(a.time) - calendarTimeValue(b.time) || a.title.localeCompare(b.title);
+}
+
+function botEventTimestamp(event: BotEvent) {
+  if (!event.dateISO) return Number.MAX_SAFE_INTEGER;
+  const date = new Date(`${event.dateISO}T00:00:00`);
+  if (Number.isNaN(date.getTime())) return Number.MAX_SAFE_INTEGER;
+  const minutes = calendarTimeValue(event.time);
+  if (minutes === Number.MAX_SAFE_INTEGER) return date.getTime();
+  if (minutes >= 0) date.setMinutes(minutes);
+  return date.getTime();
+}
+
+function isUpcomingCalendarEvent(event: BotEvent, now: number, today: string) {
+  if (!event.dateISO) return false;
+  if (/all day/i.test(event.time)) return event.dateISO >= today;
+  return botEventTimestamp(event) >= now;
+}
+
+function addMonths(date: Date, count: number) {
+  const next = new Date(date.getFullYear(), date.getMonth() + count, 1, 12, 0, 0, 0);
+  return startOfDay(next);
+}
+
+function CalendarScreen({ theme, styles, botEvents, profiles, focusDate, onOpenEvent, onAction, onManage }: any) {
   const [selected, setSelected] = useState(startOfDay(new Date()));
+  const [view, setView] = useState<CalendarViewMode>('month');
+  const [personFilter, setPersonFilter] = useState<string | null>(null);
   useEffect(() => {
     if (!focusDate) return;
     const date = new Date(`${focusDate}T12:00:00`);
     if (!Number.isNaN(date.getTime())) setSelected(startOfDay(date));
   }, [focusDate]);
+
+  const people = useMemo(() => {
+    const byName = new Map<string, { id?: string; name: string; color: string; tint: string }>();
+    (profiles as FamilyProfile[]).forEach((profile) => {
+      const name = profile.name.trim();
+      if (name) byName.set(name.toLowerCase(), { id: profile.id, name, color: profile.ink || stableCalendarColor(profile.id || name), tint: profile.color || `${stableCalendarColor(profile.id || name)}18` });
+    });
+    (botEvents as BotEvent[]).forEach((event) => {
+      const name = event.person?.trim();
+      if (!name || /^(family|everyone|all)$/i.test(name) || byName.has(name.toLowerCase())) return;
+      const color = stableCalendarColor(name);
+      byName.set(name.toLowerCase(), { name, color, tint: `${color}18` });
+    });
+    return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
+  }, [botEvents, profiles]);
+
+  const personMeta = (name: string, id?: string) => {
+    if (/^(family|everyone|all)$/i.test(name ?? '')) return { name: 'Family', color: '#7047EE', tint: '#7047EE18' };
+    return people.find((person) => (id && person.id === id) || person.name.toLowerCase() === name?.toLowerCase())
+      ?? { name: name || 'Family', color: stableCalendarColor(name || 'Family'), tint: `${stableCalendarColor(name || 'Family')}18` };
+  };
+
+  const filteredEvents = useMemo(() => (botEvents as BotEvent[])
+    .filter((event) => !personFilter || event.person?.toLowerCase() === personFilter.toLowerCase())
+    .sort(calendarEventSort), [botEvents, personFilter]);
+  const datedEvents = filteredEvents.filter((event) => Boolean(event.dateISO));
+  const unscheduledEvents = filteredEvents.filter((event) => !event.dateISO);
+  const eventsByDate = useMemo(() => {
+    const result = new Map<string, BotEvent[]>();
+    datedEvents.forEach((event) => result.set(event.dateISO!, [...(result.get(event.dateISO!) ?? []), event]));
+    return result;
+  }, [datedEvents]);
+  const conflictIds = useMemo(() => {
+    const result = new Set<string>();
+    const slots = new Map<string, BotEvent[]>();
+    datedEvents.forEach((event) => {
+      if (!event.time || /all day/i.test(event.time)) return;
+      const key = `${event.dateISO}-${calendarTimeValue(event.time)}`;
+      slots.set(key, [...(slots.get(key) ?? []), event]);
+    });
+    slots.forEach((events) => {
+      if (events.length > 1) events.forEach((event) => result.add(event.id));
+    });
+    return result;
+  }, [datedEvents]);
+
+  const selectedKey = localDateKey(selected);
+  const selectedEvents = eventsByDate.get(selectedKey) ?? [];
   const weekStart = startOfWeek(selected);
-  const days = Array.from({ length: 7 }, (_, index) => addDays(weekStart, index));
-  const visibleBotEvents = botEvents.filter((event: BotEvent) => !event.dateISO || event.dateISO === localDateKey(selected));
-  const period = `${days[0].toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}–${days[6].toLocaleDateString(undefined, { month: days[0].getMonth() === days[6].getMonth() ? undefined : 'short', day: 'numeric' })}`;
-  return <ScrollView contentContainerStyle={styles.scrollContent}><View style={styles.calendarTop}><Pressable onPress={() => setSelected(addDays(selected, -7))} style={styles.smallButton}><Ionicons name="chevron-back" size={18} color={styles.iconColor.color} /></Pressable><Pressable onPress={() => setSelected(startOfDay(new Date()))}><Text style={styles.calendarPeriod}>{period}</Text><Text style={styles.calendarTodayLink}>Tap for today</Text></Pressable><Pressable onPress={() => setSelected(addDays(selected, 7))} style={styles.smallButton}><Ionicons name="chevron-forward" size={18} color={styles.iconColor.color} /></Pressable></View><View style={styles.weekRow}>{days.map((day) => { const active = sameDay(day, selected); return <Pressable key={day.toISOString()} onPress={() => setSelected(day)} style={[styles.dayBubble, active && styles.dayBubbleActive]}><Text style={[styles.dayLabel, active && styles.dayTextActive]}>{day.toLocaleDateString(undefined, { weekday: 'short' }).toUpperCase()}</Text><Text style={[styles.dayNumber, active && styles.dayTextActive]}>{day.getDate()}</Text></Pressable>; })}</View><Text style={styles.sectionTitle}>{selected.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' })}</Text>{visibleBotEvents.length === 0 && <View style={styles.emptyChat}><Ionicons name="calendar-clear-outline" size={28} color="#2257F4" /><Text style={styles.settingTitle}>Nothing scheduled</Text><Text style={styles.muted}>Ask Coh to add something or choose another day.</Text></View>}{visibleBotEvents.map((event: BotEvent) => <Pressable key={event.id} onPress={() => onOpenEvent(event)} style={styles.timelineRow}><View style={[styles.timelineLine, { backgroundColor: calendarSourceColor(event.provider) }]} /><Text style={styles.timelineTime}>{event.time}</Text><View style={styles.flex}><View style={styles.eventSourceTitleRow}><Text style={styles.timelineTitle}>{event.title}</Text>{event.provider && event.provider !== 'coho' && <View style={[styles.eventSourcePill, { backgroundColor: `${calendarSourceColor(event.provider)}18` }]}><Text style={[styles.eventSourceText, { color: calendarSourceColor(event.provider) }]}>{calendarSourceLabel(event.provider)}</Text></View>}</View><Text style={styles.muted}>{event.person} · {event.place ?? event.day}{event.reminder ? ` · ${event.reminder} min reminder` : ''}{event.recurrenceRule ? ' · Repeats' : ''}</Text></View><Ionicons name="chevron-forward" size={18} color="#7047EE" /></Pressable>)}<Pressable onPress={onManage} style={styles.syncCard}><Ionicons name="sync" size={18} color="#2257F4" /><View style={styles.flex}><Text style={styles.syncTitle}>Calendar connections</Text><Text style={styles.muted}>Connect only the calendars your household chooses</Text></View><Text style={styles.link}>Manage</Text></Pressable></ScrollView>;
+  const weekDays = Array.from({ length: 7 }, (_, index) => addDays(weekStart, index));
+  const monthStart = new Date(selected.getFullYear(), selected.getMonth(), 1, 12, 0, 0, 0);
+  const monthGridStart = startOfWeek(monthStart);
+  const monthDays = Array.from({ length: 42 }, (_, index) => addDays(monthGridStart, index));
+  const agendaStart = startOfDay(selected);
+  const agendaEnd = addDays(agendaStart, 30);
+  const agendaKeys = [...eventsByDate.keys()]
+    .filter((key) => {
+      const date = new Date(`${key}T12:00:00`);
+      return date >= agendaStart && date < agendaEnd;
+    })
+    .sort();
+  const viewOptions: Array<{ id: CalendarViewMode; label: string; icon: string }> = [
+    { id: 'month', label: 'Month', icon: 'calendar-outline' },
+    { id: 'week', label: 'Week', icon: 'albums-outline' },
+    { id: 'agenda', label: 'Agenda', icon: 'list-outline' },
+  ];
+  const period = view === 'month'
+    ? selected.toLocaleDateString(undefined, { month: 'long', year: 'numeric' })
+    : view === 'week'
+      ? `${weekDays[0].toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}–${weekDays[6].toLocaleDateString(undefined, { month: weekDays[0].getMonth() === weekDays[6].getMonth() ? undefined : 'short', day: 'numeric' })}`
+      : `${agendaStart.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}–${addDays(agendaEnd, -1).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`;
+
+  function navigatePeriod(direction: -1 | 1) {
+    setSelected((current) => view === 'month'
+      ? addMonths(current, direction)
+      : addDays(current, direction * (view === 'week' ? 7 : 30)));
+  }
+
+  function renderEvent(event: BotEvent, compact = false) {
+    const person = personMeta(event.person, event.personId);
+    const conflict = conflictIds.has(event.id);
+    return <Pressable key={event.id} accessibilityRole="button" accessibilityLabel={`Open ${event.title} for ${person.name}`} onPress={() => onOpenEvent(event)} style={[styles.calendarEventRow, compact && styles.calendarEventRowCompact]}>
+      <View style={[styles.calendarEventAccent, { backgroundColor: person.color }]} />
+      <View style={[styles.calendarEventAvatar, { backgroundColor: person.tint }]}><Text style={[styles.calendarEventInitials, { color: person.color }]}>{initials(person.name)}</Text></View>
+      <View style={styles.flex}>
+        <View style={styles.eventSourceTitleRow}>
+          <Text numberOfLines={1} style={styles.timelineTitle}>{event.title}</Text>
+          {conflict && <View style={styles.calendarConflictPill}><Ionicons name="warning" size={9} color="#D7550D" /><Text style={styles.calendarConflictText}>Conflict</Text></View>}
+        </View>
+        <Text style={styles.calendarEventMeta}>{event.time} · {person.name}{event.place ? ` · ${event.place}` : ''}</Text>
+        <View style={styles.calendarEventFooter}>
+          {event.provider && <Text style={[styles.calendarSourceText, { color: calendarSourceColor(event.provider) }]}>{calendarSourceLabel(event.provider)}</Text>}
+          {event.recurrenceRule && <Text style={styles.calendarEventSecondary}>Repeats</Text>}
+          {event.reminder != null && <Text style={styles.calendarEventSecondary}>{event.reminder}m alert</Text>}
+        </View>
+      </View>
+      <Ionicons name="chevron-forward" size={16} color={person.color} />
+    </Pressable>;
+  }
+
+  function renderDaySection(day: Date, showEmpty = false) {
+    const key = localDateKey(day);
+    const events = eventsByDate.get(key) ?? [];
+    if (!showEmpty && events.length === 0) return null;
+    return <View key={key} style={styles.calendarDaySection}>
+      <Pressable onPress={() => setSelected(day)} style={styles.calendarDayHeading}>
+        <View style={[styles.calendarAgendaDate, sameDay(day, new Date()) && styles.calendarAgendaDateToday]}>
+          <Text style={[styles.calendarAgendaWeekday, sameDay(day, new Date()) && styles.calendarAgendaDateTodayText]}>{day.toLocaleDateString(undefined, { weekday: 'short' }).toUpperCase()}</Text>
+          <Text style={[styles.calendarAgendaNumber, sameDay(day, new Date()) && styles.calendarAgendaDateTodayText]}>{day.getDate()}</Text>
+        </View>
+        <View style={styles.flex}><Text style={styles.calendarDayTitle}>{day.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' })}</Text><Text style={styles.muted}>{events.length} event{events.length === 1 ? '' : 's'}</Text></View>
+      </Pressable>
+      {events.length ? events.map((event) => renderEvent(event, true)) : <Text style={styles.calendarEmptyDay}>No family plans</Text>}
+    </View>;
+  }
+
+  return <ScrollView contentContainerStyle={styles.calendarScrollContent} showsVerticalScrollIndicator={false}>
+    <View style={styles.calendarViewTabs}>{viewOptions.map((option) => {
+      const active = view === option.id;
+      return <Pressable key={option.id} accessibilityRole="tab" accessibilityState={{ selected: active }} onPress={() => setView(option.id)} style={[styles.calendarViewTab, active && styles.calendarViewTabActive]}>
+        <Ionicons name={option.icon as any} size={14} color={active ? '#fff' : styles.iconColor.color} />
+        <Text style={[styles.calendarViewTabText, active && styles.calendarViewTabTextActive]}>{option.label}</Text>
+      </Pressable>;
+    })}</View>
+
+    <View style={styles.calendarNav}>
+      <Pressable accessibilityLabel={`Previous ${view}`} hitSlop={8} onPress={() => navigatePeriod(-1)} style={styles.smallButton}><Ionicons name="chevron-back" size={18} color={styles.iconColor.color} /></Pressable>
+      <View style={styles.flex}><Text style={styles.calendarPeriod}>{period}</Text><Pressable onPress={() => setSelected(startOfDay(new Date()))}><Text style={styles.calendarTodayLink}>TODAY</Text></Pressable></View>
+      <Pressable accessibilityLabel={`Next ${view}`} hitSlop={8} onPress={() => navigatePeriod(1)} style={styles.smallButton}><Ionicons name="chevron-forward" size={18} color={styles.iconColor.color} /></Pressable>
+    </View>
+
+    <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.calendarPeopleFilters}>
+      <Pressable onPress={() => setPersonFilter(null)} style={[styles.calendarPersonFilter, personFilter === null && styles.calendarPersonFilterActive]}>
+        <Ionicons name="people" size={14} color={personFilter === null ? '#fff' : '#7047EE'} /><Text style={[styles.calendarPersonFilterText, personFilter === null && styles.calendarPersonFilterTextActive]}>Everyone</Text>
+      </Pressable>
+      {people.map((person) => {
+        const active = personFilter?.toLowerCase() === person.name.toLowerCase();
+        return <Pressable key={person.name} onPress={() => setPersonFilter(active ? null : person.name)} style={[styles.calendarPersonFilter, active && { backgroundColor: person.color, borderColor: person.color }]}>
+          <View style={[styles.calendarPersonDot, { backgroundColor: active ? '#fff' : person.color }]} /><Text style={[styles.calendarPersonFilterText, active && styles.calendarPersonFilterTextActive]}>{person.name}</Text>
+        </Pressable>;
+      })}
+    </ScrollView>
+
+    <View style={styles.calendarSummary}>
+      <View><Text style={styles.calendarSummaryValue}>{datedEvents.length}</Text><Text style={styles.calendarSummaryLabel}>scheduled</Text></View>
+      <View style={styles.calendarSummaryDivider} />
+      <View><Text style={styles.calendarSummaryValue}>{new Set(datedEvents.map((event) => event.person)).size}</Text><Text style={styles.calendarSummaryLabel}>people</Text></View>
+      <View style={styles.calendarSummaryDivider} />
+      <Pressable onPress={() => conflictIds.size && onAction(`${conflictIds.size} events share the same start time. Open the highlighted items to resolve them.`)}><Text style={[styles.calendarSummaryValue, conflictIds.size > 0 && { color: '#D7550D' }]}>{conflictIds.size}</Text><Text style={styles.calendarSummaryLabel}>conflicts</Text></Pressable>
+      <View style={styles.calendarSummaryDivider} />
+      <View><Text style={styles.calendarSummaryValue}>{unscheduledEvents.length}</Text><Text style={styles.calendarSummaryLabel}>unscheduled</Text></View>
+    </View>
+
+    {view === 'month' && <>
+      <View style={styles.calendarMonthCard}>
+        <View style={styles.calendarWeekdayRow}>{['S', 'M', 'T', 'W', 'T', 'F', 'S'].map((day, index) => <Text key={`${day}-${index}`} style={[styles.calendarWeekdayLabel, (index === 0 || index === 6) && { color: theme.primary }]}>{day}</Text>)}</View>
+        <View style={styles.calendarMonthGrid}>{monthDays.map((day) => {
+          const key = localDateKey(day);
+          const events = eventsByDate.get(key) ?? [];
+          const inMonth = day.getMonth() === selected.getMonth();
+          const active = sameDay(day, selected);
+          const today = sameDay(day, new Date());
+          return <Pressable key={key} accessibilityRole="button" accessibilityLabel={`${day.toLocaleDateString(undefined, { month: 'long', day: 'numeric' })}, ${events.length} events`} onPress={() => setSelected(day)} style={[styles.calendarMonthDay, !inMonth && styles.calendarMonthDayOutside, active && styles.calendarMonthDaySelected]}>
+            <View style={[styles.calendarMonthNumberWrap, today && styles.calendarMonthToday]}><Text style={[styles.calendarMonthNumber, today && styles.calendarMonthTodayText]}>{day.getDate()}</Text></View>
+            {events.slice(0, 2).map((event) => {
+              const person = personMeta(event.person, event.personId);
+              return <View key={event.id} style={[styles.calendarMonthEvent, { backgroundColor: person.color }]}><Text numberOfLines={1} style={styles.calendarMonthEventText}>{event.title}</Text></View>;
+            })}
+            {events.length > 2 && <Text style={styles.calendarMonthMore}>+{events.length - 2}</Text>}
+          </Pressable>;
+        })}</View>
+      </View>
+      <View style={styles.sectionHead}><View><Text style={styles.sectionTitle}>{selected.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' })}</Text><Text style={styles.muted}>{selectedEvents.length ? `${selectedEvents.length} family event${selectedEvents.length === 1 ? '' : 's'}` : 'No plans yet'}</Text></View></View>
+      {selectedEvents.length ? selectedEvents.map((event) => renderEvent(event)) : <View style={styles.calendarEmptyCard}><Ionicons name="calendar-clear-outline" size={25} color="#2257F4" /><View style={styles.flex}><Text style={styles.settingTitle}>This day is open</Text><Text style={styles.muted}>Add a plan or ask Coh to schedule it.</Text></View></View>}
+    </>}
+
+    {view === 'week' && <View style={styles.calendarSections}>{weekDays.map((day) => renderDaySection(day, true))}</View>}
+
+    {view === 'agenda' && <View style={styles.calendarSections}>
+      {agendaKeys.length ? agendaKeys.map((key) => renderDaySection(new Date(`${key}T12:00:00`))) : <View style={styles.calendarEmptyCard}><Ionicons name="list-outline" size={25} color="#2257F4" /><View style={styles.flex}><Text style={styles.settingTitle}>No plans in the next 30 days</Text><Text style={styles.muted}>Connect calendars or ask Coh to add the first one.</Text></View></View>}
+      {unscheduledEvents.length > 0 && <View style={styles.calendarDaySection}><View style={styles.calendarDayHeading}><View style={styles.calendarAgendaDate}><Ionicons name="help" size={17} color="#D7550D" /></View><View style={styles.flex}><Text style={styles.calendarDayTitle}>Needs a date</Text><Text style={styles.muted}>{unscheduledEvents.length} imported or incomplete item{unscheduledEvents.length === 1 ? '' : 's'}</Text></View></View>{unscheduledEvents.map((event) => renderEvent(event, true))}</View>}
+    </View>}
+
+    <Pressable onPress={onManage} style={styles.syncCard}><Ionicons name="sync" size={18} color="#2257F4" /><View style={styles.flex}><Text style={styles.syncTitle}>Calendar connections</Text><Text style={styles.muted}>Apple, Google, Outlook, and imported family calendars</Text></View><Text style={styles.link}>Manage</Text></Pressable>
+  </ScrollView>;
 }
 
 function ChoresScreen({ styles, chores, memberNames, onToggle, onConfigure, rewardMember, setRewardMember, selectedRewards, onSelectReward, onAdd }: any) {
@@ -2086,13 +2339,8 @@ function cloudMessage(row: any, currentUserId: string): ChatMessage {
 }
 
 function personToProfile(person: HouseholdPerson, index: number): FamilyProfile {
-  const colors = [
-    ['#DCE7FF', '#2257F4'],
-    ['#FFE1CF', '#D7550D'],
-    ['#D9F7ED', '#168866'],
-    ['#EADFFF', '#6E3AE2'],
-  ];
-  const [color, ink] = colors[index % colors.length];
+  const ink = stableCalendarColor(person.id || person.display_name || String(index));
+  const color = `${ink}18`;
   return {
     id: person.id,
     linkedUserId: person.linked_user_id,
@@ -2109,13 +2357,15 @@ function personToProfile(person: HouseholdPerson, index: number): FamilyProfile 
 
 function cloudEvent(row: any): BotEvent {
   const startsAt = new Date(row.starts_at);
+  const assignedPerson = Array.isArray(row.assigned_person) ? row.assigned_person[0] : row.assigned_person;
   let metadata: any = {};
   try { metadata = row.details ? JSON.parse(row.details) : {}; } catch { metadata = {}; }
   return {
     id: `cloud-${row.id}`,
     sourceId: row.id,
     title: row.title,
-    person: metadata.person || relatedName(row.creator, 'Family'),
+    person: assignedPerson?.display_name || metadata.person || relatedName(row.creator, 'Family'),
+    personId: row.assigned_person_id || assignedPerson?.id || undefined,
     day: startsAt.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' }),
     dateISO: localDateKey(startsAt),
     time: startsAt.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }),
@@ -3137,7 +3387,60 @@ function createStyles(t: Theme) {
     upcomingRow: { minHeight: 63, borderRadius: 17, borderWidth: 1, borderColor: t.line, backgroundColor: t.surface, padding: 10, flexDirection: 'row', alignItems: 'center', gap: 11 }, dateTile: { width: 43, height: 44, borderRadius: 11, borderWidth: 1, alignItems: 'center', justifyContent: 'center' }, dateMonth: { fontSize: 7, fontWeight: '800' }, dateNumber: { fontSize: 18, fontWeight: '800', lineHeight: 19 }, upcomingTime: { color: t.muted, fontSize: 8, fontWeight: '700' }, upcomingTitle: { color: t.text, fontSize: 11, fontWeight: '700', marginTop: 3 },
     tabBar: { minHeight: 68, paddingTop: 7, paddingBottom: Platform.OS === 'ios' ? 5 : 8, paddingHorizontal: 7, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: t.line, backgroundColor: t.surfaceStrong, flexDirection: 'row', justifyContent: 'space-around' }, tabItem: { flex: 1, alignItems: 'center', gap: 3 }, tabIconWrap: { width: 38, height: 32, borderRadius: 13, alignItems: 'center', justifyContent: 'center' }, tabIconActive: { backgroundColor: t.primary }, tabLabel: { color: t.muted, fontSize: 8, fontWeight: '700' }, tabLabelActive: { color: t.primary },
     toast: { position: 'absolute', left: 18, right: 18, bottom: 78, minHeight: 50, borderRadius: 16, paddingHorizontal: 14, backgroundColor: t.surfaceStrong, borderWidth: 1, borderColor: t.line, flexDirection: 'row', alignItems: 'center', gap: 8, shadowColor: '#000', shadowOpacity: .16, shadowRadius: 16, shadowOffset: { width: 0, height: 7 } }, toastText: { color: t.text, fontSize: 11, fontWeight: '700', flex: 1 },
-    calendarTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 14 }, smallButton: { width: 38, height: 38, borderRadius: 12, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, alignItems: 'center', justifyContent: 'center' }, calendarPeriod: { color: t.text, fontWeight: '800', fontSize: 15, textAlign: 'center' }, calendarTodayLink: { color: t.primary, fontSize: 8, fontWeight: '800', textAlign: 'center', marginTop: 2 }, weekRow: { flexDirection: 'row', justifyContent: 'space-between', backgroundColor: t.surface, borderRadius: 18, borderWidth: 1, borderColor: t.line, padding: 7 }, dayBubble: { width: 40, height: 58, borderRadius: 13, alignItems: 'center', justifyContent: 'center' }, dayBubbleActive: { backgroundColor: t.primary }, dayLabel: { color: t.muted, fontSize: 7, fontWeight: '800' }, dayNumber: { color: t.text, fontSize: 17, fontWeight: '800', marginTop: 3 }, dayTextActive: { color: '#fff' }, timelineRow: { minHeight: 76, borderRadius: 18, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, flexDirection: 'row', alignItems: 'center', padding: 12, gap: 10 }, timelineLine: { width: 4, height: 42, borderRadius: 3 }, timelineTime: { color: t.muted, fontSize: 10, width: 50, fontWeight: '700' }, timelineTitle: { color: t.text, fontSize: 13, fontWeight: '800' }, eventSourceTitleRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 6 }, eventSourcePill: { borderRadius: 99, paddingHorizontal: 7, paddingVertical: 3 }, eventSourceText: { fontSize: 7, fontWeight: '900', letterSpacing: .3 }, eventDetailSource: { fontSize: 9, fontWeight: '800', marginTop: 4 }, syncCard: { minHeight: 67, borderRadius: 18, padding: 13, flexDirection: 'row', gap: 10, alignItems: 'center', backgroundColor: `${t.primary}0C`, borderWidth: 1, borderColor: `${t.primary}24` }, syncTitle: { color: t.text, fontSize: 11, fontWeight: '800' },
+    calendarTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 14 }, smallButton: { width: 38, height: 38, borderRadius: 12, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, alignItems: 'center', justifyContent: 'center' }, calendarPeriod: { color: t.text, fontWeight: '900', fontSize: 17, textAlign: 'center', letterSpacing: -.4 }, calendarTodayLink: { color: t.primary, fontSize: 8, fontWeight: '900', textAlign: 'center', marginTop: 3, letterSpacing: .7 }, weekRow: { flexDirection: 'row', justifyContent: 'space-between', backgroundColor: t.surface, borderRadius: 18, borderWidth: 1, borderColor: t.line, padding: 7 }, dayBubble: { width: 40, height: 58, borderRadius: 13, alignItems: 'center', justifyContent: 'center' }, dayBubbleActive: { backgroundColor: t.primary }, dayLabel: { color: t.muted, fontSize: 7, fontWeight: '800' }, dayNumber: { color: t.text, fontSize: 17, fontWeight: '800', marginTop: 3 }, dayTextActive: { color: '#fff' }, timelineRow: { minHeight: 76, borderRadius: 18, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, flexDirection: 'row', alignItems: 'center', padding: 12, gap: 10 }, timelineLine: { width: 4, height: 42, borderRadius: 3 }, timelineTime: { color: t.muted, fontSize: 10, width: 50, fontWeight: '700' }, timelineTitle: { color: t.text, fontSize: 13, fontWeight: '800', flexShrink: 1 }, eventSourceTitleRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 6 }, eventSourcePill: { borderRadius: 99, paddingHorizontal: 7, paddingVertical: 3 }, eventSourceText: { fontSize: 7, fontWeight: '900', letterSpacing: .3 }, eventDetailSource: { fontSize: 9, fontWeight: '800', marginTop: 4 }, syncCard: { minHeight: 67, borderRadius: 18, padding: 13, flexDirection: 'row', gap: 10, alignItems: 'center', backgroundColor: `${t.primary}0C`, borderWidth: 1, borderColor: `${t.primary}24` }, syncTitle: { color: t.text, fontSize: 11, fontWeight: '800' },
+    calendarScrollContent: { padding: 14, paddingBottom: 34, gap: 12 },
+    calendarViewTabs: { minHeight: 48, padding: 4, borderRadius: 17, flexDirection: 'row', gap: 5, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line },
+    calendarViewTab: { flex: 1, minHeight: 38, borderRadius: 13, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6 },
+    calendarViewTabActive: { backgroundColor: t.primary, shadowColor: t.primary, shadowOpacity: .22, shadowRadius: 8, shadowOffset: { width: 0, height: 4 } },
+    calendarViewTabText: { color: t.muted, fontSize: 10, fontWeight: '900' },
+    calendarViewTabTextActive: { color: '#fff' },
+    calendarNav: { minHeight: 52, flexDirection: 'row', alignItems: 'center', gap: 10 },
+    calendarPeopleFilters: { gap: 8, paddingRight: 16 },
+    calendarPersonFilter: { minHeight: 37, borderRadius: 19, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', gap: 7, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line },
+    calendarPersonFilterActive: { backgroundColor: '#7047EE', borderColor: '#7047EE' },
+    calendarPersonFilterText: { color: t.text, fontSize: 9, fontWeight: '900' },
+    calendarPersonFilterTextActive: { color: '#fff' },
+    calendarPersonDot: { width: 9, height: 9, borderRadius: 5 },
+    calendarSummary: { minHeight: 66, borderRadius: 18, paddingHorizontal: 14, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', backgroundColor: t.surface, borderWidth: 1, borderColor: t.line },
+    calendarSummaryValue: { color: t.text, fontSize: 18, lineHeight: 20, fontWeight: '900', textAlign: 'center' },
+    calendarSummaryLabel: { color: t.muted, fontSize: 7, fontWeight: '800', textAlign: 'center', marginTop: 3 },
+    calendarSummaryDivider: { width: 1, height: 28, backgroundColor: t.line },
+    calendarMonthCard: { borderRadius: 20, overflow: 'hidden', backgroundColor: t.surface, borderWidth: 1, borderColor: t.line },
+    calendarWeekdayRow: { minHeight: 32, flexDirection: 'row', alignItems: 'center', borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: t.line, backgroundColor: t.surfaceStrong },
+    calendarWeekdayLabel: { width: '14.2857%', textAlign: 'center', color: t.muted, fontSize: 8, fontWeight: '900' },
+    calendarMonthGrid: { flexDirection: 'row', flexWrap: 'wrap' },
+    calendarMonthDay: { width: '14.2857%', minHeight: 72, padding: 3, borderRightWidth: StyleSheet.hairlineWidth, borderBottomWidth: StyleSheet.hairlineWidth, borderColor: t.line, backgroundColor: t.surface },
+    calendarMonthDayOutside: { opacity: .35 },
+    calendarMonthDaySelected: { backgroundColor: `${t.primary}12` },
+    calendarMonthNumberWrap: { width: 21, height: 21, borderRadius: 11, alignItems: 'center', justifyContent: 'center', marginBottom: 2 },
+    calendarMonthToday: { backgroundColor: t.primary },
+    calendarMonthNumber: { color: t.text, fontSize: 9, fontWeight: '900' },
+    calendarMonthTodayText: { color: '#fff' },
+    calendarMonthEvent: { minHeight: 14, borderRadius: 4, justifyContent: 'center', marginTop: 2, paddingHorizontal: 3, overflow: 'hidden' },
+    calendarMonthEventText: { color: '#fff', fontSize: 5.5, lineHeight: 8, fontWeight: '900' },
+    calendarMonthMore: { color: t.muted, fontSize: 6, lineHeight: 8, fontWeight: '900', marginTop: 2, paddingLeft: 2 },
+    calendarEmptyCard: { minHeight: 82, borderRadius: 18, padding: 14, flexDirection: 'row', alignItems: 'center', gap: 11, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line },
+    calendarSections: { gap: 12 },
+    calendarDaySection: { gap: 8, borderRadius: 19, padding: 10, backgroundColor: t.surfaceStrong, borderWidth: 1, borderColor: t.line },
+    calendarDayHeading: { minHeight: 49, flexDirection: 'row', alignItems: 'center', gap: 10 },
+    calendarAgendaDate: { width: 43, height: 43, borderRadius: 14, alignItems: 'center', justifyContent: 'center', backgroundColor: `${t.primary}0D`, borderWidth: 1, borderColor: `${t.primary}28` },
+    calendarAgendaDateToday: { backgroundColor: t.primary, borderColor: t.primary },
+    calendarAgendaDateTodayText: { color: '#fff' },
+    calendarAgendaWeekday: { color: t.primary, fontSize: 6, fontWeight: '900', letterSpacing: .5 },
+    calendarAgendaNumber: { color: t.text, fontSize: 17, lineHeight: 18, fontWeight: '900' },
+    calendarDayTitle: { color: t.text, fontSize: 12, fontWeight: '900' },
+    calendarEmptyDay: { color: t.muted, fontSize: 9, fontWeight: '700', paddingHorizontal: 53, paddingBottom: 8 },
+    calendarEventRow: { minHeight: 76, borderRadius: 17, padding: 10, gap: 9, flexDirection: 'row', alignItems: 'center', overflow: 'hidden', backgroundColor: t.surface, borderWidth: 1, borderColor: t.line },
+    calendarEventRowCompact: { minHeight: 68 },
+    calendarEventAccent: { position: 'absolute', left: 0, top: 0, bottom: 0, width: 4 },
+    calendarEventAvatar: { width: 34, height: 34, borderRadius: 12, alignItems: 'center', justifyContent: 'center', marginLeft: 3 },
+    calendarEventInitials: { fontSize: 9, fontWeight: '900' },
+    calendarEventMeta: { color: t.muted, fontSize: 9, lineHeight: 13, fontWeight: '700', marginTop: 3 },
+    calendarEventFooter: { minHeight: 14, flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 7, marginTop: 3 },
+    calendarSourceText: { fontSize: 7, fontWeight: '900', letterSpacing: .3 },
+    calendarEventSecondary: { color: t.muted, fontSize: 7, fontWeight: '800' },
+    calendarConflictPill: { minHeight: 20, borderRadius: 10, paddingHorizontal: 6, flexDirection: 'row', alignItems: 'center', gap: 3, backgroundColor: '#FF7A2E14' },
+    calendarConflictText: { color: '#D7550D', fontSize: 6, fontWeight: '900' },
     progressCard: { minHeight: 130, borderRadius: 23, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, padding: 20, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }, progressLabel: { color: t.primary, fontSize: 8, fontWeight: '800', letterSpacing: 1 }, progressValue: { color: t.text, fontSize: 28, fontWeight: '800', letterSpacing: -1, marginTop: 5 }, progressRing: { width: 74, height: 74, borderRadius: 37, borderWidth: 8, borderColor: '#19A47B', alignItems: 'center', justifyContent: 'center' }, progressPercent: { color: t.text, fontSize: 16, fontWeight: '800' }, memberRewardTabs: { flexDirection: 'row', padding: 4, borderRadius: 16, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line }, memberRewardTab: { flex: 1, minHeight: 48, borderRadius: 12, alignItems: 'center', justifyContent: 'center' }, memberRewardTabActive: { backgroundColor: t.primary }, memberRewardName: { color: t.text, fontSize: 10, fontWeight: '800' }, memberRewardNameActive: { color: '#fff' }, memberRewardPoints: { color: t.muted, fontSize: 8, marginTop: 2, fontWeight: '700' }, rewardHero: { minHeight: 118, borderRadius: 21, padding: 16, flexDirection: 'row', gap: 13, alignItems: 'center', backgroundColor: t.surface, borderWidth: 1, borderColor: t.line }, rewardIcon: { width: 52, height: 52, borderRadius: 17, alignItems: 'center', justifyContent: 'center' }, rewardHeroTitle: { color: t.text, fontSize: 14, lineHeight: 19, fontWeight: '800', marginTop: 4 }, rewardProgressTrack: { height: 7, borderRadius: 4, backgroundColor: t.line, overflow: 'hidden', marginTop: 10 }, rewardProgressFill: { height: 7, borderRadius: 4 }, rewardProgressText: { color: t.muted, fontSize: 8, fontWeight: '700', marginTop: 5 }, rewardPrompt: { color: t.text, fontSize: 12, fontWeight: '800', marginTop: 2 }, rewardChoices: { gap: 10, paddingRight: 18 }, rewardChoice: { width: 145, minHeight: 130, borderRadius: 18, padding: 14, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line }, rewardChoiceTitle: { color: t.text, fontSize: 12, fontWeight: '800', marginTop: 11, marginBottom: 3 }, rewardCost: { fontSize: 9, fontWeight: '800', marginTop: 10 }, rewardSelected: { position: 'absolute', right: 10, top: 10 }, choreRow: { minHeight: 70, borderRadius: 17, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, padding: 12, flexDirection: 'row', alignItems: 'center', gap: 10 }, checkCircle: { width: 27, height: 27, borderRadius: 14, borderWidth: 2, borderColor: t.line, alignItems: 'center', justifyContent: 'center' }, choreTitle: { color: t.text, fontSize: 13, fontWeight: '800' }, struck: { textDecorationLine: 'line-through', color: t.muted }, pointPill: { minHeight: 27, borderRadius: 14, paddingHorizontal: 8, flexDirection: 'row', gap: 4, alignItems: 'center', backgroundColor: '#7047EE14' }, pointPillText: { color: '#7047EE', fontSize: 9, fontWeight: '900' }, ownerDot: { width: 9, height: 9, borderRadius: 5 }, outlineAction: { minHeight: 48, borderRadius: 15, borderWidth: 1, borderStyle: 'dashed', borderColor: t.primary, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7 }, outlineActionText: { color: t.primary, fontSize: 11, fontWeight: '800' },
     messageList: { padding: 18, paddingBottom: 24, gap: 16 }, chatHeader: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 12, paddingBottom: 14, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: t.line }, homeThreadIcon: { width: 42, height: 42, borderRadius: 14, backgroundColor: `${t.primary}14`, alignItems: 'center', justifyContent: 'center' }, chatTitle: { color: t.text, fontSize: 14, fontWeight: '800' }, botHint: { minHeight: 48, borderRadius: 15, paddingHorizontal: 12, marginBottom: 5, flexDirection: 'row', gap: 8, alignItems: 'center', backgroundColor: '#7047EE12', borderWidth: 1, borderColor: '#7047EE30' }, botHintText: { color: t.text, fontSize: 10, lineHeight: 14, flex: 1, fontWeight: '700' }, messageWrap: { maxWidth: '88%', flexDirection: 'row', gap: 8, alignSelf: 'flex-start' }, messageBody: { flexShrink: 1 }, messageMine: { alignSelf: 'flex-end' }, chatAvatar: { width: 32, height: 32, backgroundColor: '#FFE1CF' }, botAvatar: { width: 32, height: 32, backgroundColor: '#7047EE' }, messageAuthor: { color: t.muted, fontSize: 8, marginBottom: 4 }, botAuthor: { color: '#7047EE', fontWeight: '800' }, messageAuthorMine: { textAlign: 'right' }, messageBubble: { backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, borderRadius: 5, borderTopRightRadius: 16, borderBottomLeftRadius: 16, borderBottomRightRadius: 16, padding: 12 }, botBubble: { borderColor: '#7047EE55', backgroundColor: t.dark ? '#251F46' : '#F5F0FF' }, messageBubbleMine: { backgroundColor: t.primary, borderColor: t.primary, borderTopLeftRadius: 16, borderTopRightRadius: 5 }, messageText: { color: t.text, fontSize: 12, lineHeight: 17 }, messageTextMine: { color: '#fff' }, cohMention: { color: '#FFD84D', fontWeight: '900', textShadowColor: '#FFD84D99', textShadowRadius: 8 }, composeRow: { minHeight: 61, paddingHorizontal: 12, paddingVertical: 8, gap: 8, flexDirection: 'row', alignItems: 'center', borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: t.line, backgroundColor: t.surfaceStrong }, composeRowCoh: { borderTopColor: '#A777FF', backgroundColor: t.dark ? '#211A42' : '#F7F0FF', shadowColor: '#7047EE', shadowOpacity: .42, shadowRadius: 16, shadowOffset: { width: 0, height: -3 } }, composePlus: { width: 36, height: 36, borderRadius: 12, backgroundColor: `${t.primary}13`, alignItems: 'center', justifyContent: 'center' }, composeCohBadge: { backgroundColor: '#7047EE', shadowColor: '#A777FF', shadowOpacity: .9, shadowRadius: 10 }, composeInput: { flex: 1, minHeight: 40, maxHeight: 90, borderRadius: 13, borderWidth: 1, borderColor: t.line, backgroundColor: t.surface, color: t.text, paddingHorizontal: 12, fontSize: 12 }, composeInputCoh: { borderColor: '#A777FF', borderWidth: 2, color: t.dark ? '#E8DDFF' : '#4B168D', fontWeight: '800', shadowColor: '#7047EE', shadowOpacity: .5, shadowRadius: 9 }, sendButton: { width: 37, height: 37, borderRadius: 12, backgroundColor: t.primary, alignItems: 'center', justifyContent: 'center' }, sendButtonCoh: { backgroundColor: '#7047EE', shadowColor: '#A777FF', shadowOpacity: .9, shadowRadius: 10 },
     moreToolbar: { flexDirection: 'row', alignItems: 'flex-start', gap: 10 }, moreIntro: { flex: 1, color: t.muted, fontSize: 12, lineHeight: 18, marginBottom: 4 }, moreCustomizeButton: { minHeight: 36, borderRadius: 12, borderWidth: 1, borderColor: `${t.primary}55`, paddingHorizontal: 10, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 5, backgroundColor: `${t.primary}0D` }, moreCustomizeButtonActive: { backgroundColor: '#7047EE', borderColor: '#7047EE' }, moreCustomizeText: { color: t.primary, fontSize: 9, fontWeight: '900' }, moreCustomizeTextActive: { color: '#fff' }, moreEditingHint: { minHeight: 64, borderRadius: 16, padding: 12, flexDirection: 'row', alignItems: 'center', gap: 9, backgroundColor: '#7047EE12', borderWidth: 1, borderColor: '#7047EE35' }, moreEditingHintText: { flex: 1, color: t.text, fontSize: 9, lineHeight: 14, fontWeight: '700' }, moreGrid: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between' }, moreCard: { width: '48%', minHeight: 180, marginBottom: 10, borderRadius: 22, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, padding: 16 }, moreIcon: { width: 45, height: 45, borderRadius: 15, alignItems: 'center', justifyContent: 'center' }, moreTitle: { color: t.text, fontSize: 15, fontWeight: '800', marginTop: 17 }, moreDetail: { color: t.muted, fontSize: 9, lineHeight: 14, marginTop: 5, paddingRight: 10 }, moreChevron: { position: 'absolute', right: 14, bottom: 14 }, moreEditControls: { position: 'absolute', left: 12, right: 12, bottom: 11, flexDirection: 'row', gap: 6 }, moreEditButton: { flex: 1, minHeight: 30, borderRadius: 9, backgroundColor: t.surfaceStrong, borderWidth: 1, borderColor: t.line, alignItems: 'center', justifyContent: 'center' }, moreEditButtonDisabled: { opacity: .3 }, moreHideButton: { backgroundColor: '#D645450D', borderColor: '#D6454535' }, moreHiddenList: { borderRadius: 18, overflow: 'hidden', borderWidth: 1, borderColor: t.line, backgroundColor: t.surface }, moreHiddenRow: { minHeight: 58, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', gap: 10, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: t.line }, moreHiddenIcon: { width: 34, height: 34, borderRadius: 11, alignItems: 'center', justifyContent: 'center' }, moreHiddenTitle: { flex: 1, color: t.text, fontSize: 11, fontWeight: '800' }, moreRestoreButton: { minHeight: 32, borderRadius: 10, paddingHorizontal: 10, backgroundColor: `${t.primary}12`, alignItems: 'center', justifyContent: 'center' }, moreRestoreText: { color: t.primary, fontSize: 9, fontWeight: '900' }, moreResetButton: { alignSelf: 'center', minHeight: 38, borderRadius: 12, borderWidth: 1, borderColor: t.line, paddingHorizontal: 13, alignItems: 'center', justifyContent: 'center', backgroundColor: t.surface }, moreResetText: { color: t.muted, fontSize: 9, fontWeight: '800' },
