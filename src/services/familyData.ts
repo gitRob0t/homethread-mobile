@@ -77,7 +77,7 @@ export async function sendFamilyMessage(householdId: string, senderId: string, b
 export async function listSharedEvents(householdId: string) {
   const { data, error } = await supabase
     .from('events')
-    .select('id, title, details, starts_at, ends_at, location, created_by, provider, source_calendar_id, recurrence_rule, status, creator:profiles!events_created_by_fkey(display_name)')
+    .select('id, title, details, starts_at, ends_at, location, created_by, assigned_person_id, provider, source_calendar_id, recurrence_rule, status, creator:profiles!events_created_by_fkey(display_name), assigned_person:household_people!events_assigned_person_id_fkey(id, display_name, linked_user_id)')
     .eq('household_id', householdId)
     .neq('status', 'canceled')
     .order('starts_at', { ascending: true });
