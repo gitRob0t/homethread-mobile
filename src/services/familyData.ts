@@ -77,7 +77,7 @@ export async function sendFamilyMessage(householdId: string, senderId: string, b
 export async function listSharedEvents(householdId: string) {
   const { data, error } = await supabase
     .from('events')
-    .select('id, title, details, starts_at, ends_at, location, created_by, assigned_person_id, provider, source_calendar_id, recurrence_rule, status, creator:profiles!events_created_by_fkey(display_name), assigned_person:household_people!events_assigned_person_id_fkey(id, display_name, linked_user_id)')
+    .select('id, title, details, starts_at, ends_at, all_day, location, created_by, assigned_person_id, provider, source_calendar_id, recurrence_rule, status, creator:profiles!events_created_by_fkey(display_name), assigned_person:household_people!events_assigned_person_id_fkey(id, display_name, linked_user_id)')
     .eq('household_id', householdId)
     .neq('status', 'canceled')
     .order('starts_at', { ascending: true });
@@ -90,8 +90,13 @@ export async function createFamilyEvent(input: {
   userId: string;
   title: string;
   startsAt: string;
+  endsAt?: string | null;
+  allDay?: boolean;
   location?: string | null;
   details?: string | null;
+  assignedPersonId?: string | null;
+  provider?: string;
+  recurrenceRule?: string | null;
 }) {
   const { data, error } = await supabase
     .from('events')
@@ -100,8 +105,13 @@ export async function createFamilyEvent(input: {
       created_by: input.userId,
       title: input.title,
       starts_at: input.startsAt,
+      ends_at: input.endsAt ?? null,
+      all_day: input.allDay ?? false,
       location: input.location ?? null,
       details: input.details ?? null,
+      assigned_person_id: input.assignedPersonId ?? null,
+      provider: input.provider ?? 'coho',
+      recurrence_rule: input.recurrenceRule ?? null,
     })
     .select('id')
     .single();

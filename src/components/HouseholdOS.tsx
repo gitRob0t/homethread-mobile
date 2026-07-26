@@ -82,9 +82,11 @@ export function CalendarConnectionScreen({
   onNotice,
   onConnected,
   onSynced,
+  initialProvider = 'device',
 }: CommonProps & {
   onConnected: (source: CalendarProvider | 'device') => void;
   onSynced?: () => void | Promise<void>;
+  initialProvider?: CalendarProvider | 'device';
 }) {
   const styles = useMemo(() => makeStyles(dark), [dark]);
   const [calendars, setCalendars] = useState<DeviceCalendarSummary[]>([]);
@@ -98,6 +100,7 @@ export function CalendarConnectionScreen({
   const [error, setError] = useState('');
   const [cloudConnections, setCloudConnections] = useState<CalendarConnection[]>([]);
   const [conflicts, setConflicts] = useState<CalendarConflict[]>([]);
+  const [deviceExpanded, setDeviceExpanded] = useState(false);
 
   async function loadCloudConnections() {
     if (!householdId) return;
@@ -305,21 +308,44 @@ export function CalendarConnectionScreen({
   }
 
   const writable = calendars.filter((calendar) => calendar.allowsModifications);
+  const deviceGroups = useMemo(() => {
+    const groups = new Map<string, DeviceCalendarSummary[]>();
+    calendars
+      .slice()
+      .sort((a, b) => {
+        const aSelected = settings.selectedCalendarIds.includes(a.id) ? 0 : 1;
+        const bSelected = settings.selectedCalendarIds.includes(b.id) ? 0 : 1;
+        return aSelected - bSelected
+          || a.sourceName.localeCompare(b.sourceName)
+          || a.title.localeCompare(b.title);
+      })
+      .forEach((calendar) => {
+        groups.set(calendar.sourceName, [...(groups.get(calendar.sourceName) ?? []), calendar]);
+      });
+    return [...groups.entries()];
+  }, [calendars, settings.selectedCalendarIds]);
+  const providerName = initialProvider === 'google'
+    ? 'Google Calendar'
+    : initialProvider === 'outlook'
+      ? 'Outlook / Microsoft 365'
+      : 'Apple Calendar on this iPhone';
   return (
     <ScrollView contentContainerStyle={styles.page}>
       <View style={[styles.hero, { backgroundColor: '#2257F4' }]}>
         <Ionicons name="calendar" size={27} color="#fff" />
-        <Text style={styles.heroEyebrow}>REAL DEVICE CONNECTION</Text>
-        <Text style={styles.heroTitle}>Choose what Coho can see.</Text>
+        <Text style={styles.heroEyebrow}>CALENDAR CONNECTION</Text>
+        <Text style={styles.heroTitle}>{providerName}</Text>
         <Text style={styles.heroText}>
-          iPhone Calendar already combines iCloud, Google, Outlook, subscriptions, and other accounts
-          you added to this phone. Coho imports only calendars you select.
+          {initialProvider === 'device'
+            ? 'Use calendars already available on this phone. Account details stay collapsed until you choose which calendars to include.'
+            : 'Connect this provider directly for reliable background sync, source visibility, recurring events, deletions, and conflict handling.'}
         </Text>
       </View>
 
-      <Text style={styles.sectionTitle}>Direct two-way connections</Text>
+      {initialProvider !== 'device' && <>
+      <Text style={styles.sectionTitle}>Secure two-way connection</Text>
       <Text style={styles.meta}>Provider tokens stay encrypted on the server. Imported events keep their source and Coho detects simultaneous edits instead of silently overwriting them.</Text>
-      {(['google', 'outlook'] as CalendarProvider[]).map((provider) => {
+      {([initialProvider] as CalendarProvider[]).map((provider) => {
         const providerConnections = cloudConnections.filter((connection) =>
           connection.provider === provider && connection.status !== 'disconnected');
         if (!providerConnections.length) {
@@ -360,7 +386,8 @@ export function CalendarConnectionScreen({
           <Pressable disabled={busy} onPress={() => disconnectCloud(connection)} style={styles.secondaryButton}><Ionicons name="unlink-outline" size={17} color="#D34A3B" /><Text style={[styles.secondaryButtonText, { color: '#D34A3B' }]}>Disconnect this account</Text></Pressable>
         </View>);
       })}
-      {conflicts.length > 0 && <>
+      {conflicts.filter((conflict) => cloudConnections.some((connection) =>
+        connection.id === conflict.connection_id && connection.provider === initialProvider)).length > 0 && <>
         <View style={styles.conflictNotice}>
           <Ionicons name="git-compare-outline" size={20} color="#B46B12" />
           <View style={styles.flex}>
@@ -368,7 +395,8 @@ export function CalendarConnectionScreen({
             <Text style={styles.meta}>Both versions are safe. Pick the one the family should keep.</Text>
           </View>
         </View>
-        {conflicts.map((conflict) => {
+        {conflicts.filter((conflict) => cloudConnections.some((connection) =>
+          connection.id === conflict.connection_id && connection.provider === initialProvider)).map((conflict) => {
           const connection = cloudConnections.find((item) => item.id === conflict.connection_id);
           const providerName = connection?.provider === 'outlook' ? 'Outlook' : 'Google';
           const localVersion = calendarConflictVersion(conflict.local_payload, 'local');
@@ -408,8 +436,11 @@ export function CalendarConnectionScreen({
           </View>;
         })}
       </>}
+      </>}
 
-      <Text style={styles.sectionTitle}>This device</Text>
+      {initialProvider === 'device' && <>
+      <Text style={styles.sectionTitle}>Apple Calendar bridge</Text>
+      <Text style={styles.meta}>This local bridge can include iCloud, subscribed, CalDAV, Google, Microsoft, or other calendars already added to iPhone Settings. Direct Google or Microsoft connections are more reliable across family devices.</Text>
       {!granted ? (
         <Pressable disabled={busy} onPress={connect} style={styles.primaryButton}>
           {busy ? <ActivityIndicator color="#fff" /> : <>
@@ -418,20 +449,32 @@ export function CalendarConnectionScreen({
           </>}
         </Pressable>
       ) : <>
-        <Text style={styles.sectionTitle}>Read iPhone calendars into Coho</Text>
-        {calendars.map((calendar) => {
-          const selected = settings.selectedCalendarIds.includes(calendar.id);
-          return (
-            <Pressable key={calendar.id} onPress={() => toggleCalendar(calendar.id)} style={[styles.row, selected && styles.rowSelected]}>
-              <View style={[styles.colorDot, { backgroundColor: calendar.color }]} />
-              <View style={styles.flex}>
-                <Text style={styles.rowTitle}>{calendar.title}</Text>
-                <Text style={styles.meta}>{calendar.sourceName}</Text>
-              </View>
-              <Ionicons name={selected ? 'checkmark-circle' : 'ellipse-outline'} size={22} color={selected ? '#19A47B' : dark ? '#A8B1C4' : '#727D94'} />
-            </Pressable>
-          );
-        })}
+        <Pressable onPress={() => setDeviceExpanded((value) => !value)} style={styles.settingCard}>
+          <View style={styles.settingTop}>
+            <View style={[styles.roundIcon, { backgroundColor: '#2257F418' }]}><Ionicons name="list-outline" size={20} color="#2257F4" /></View>
+            <View style={styles.flex}>
+              <Text style={styles.rowTitle}>Included calendars</Text>
+              <Text style={styles.meta}>{settings.selectedCalendarIds.length} of {calendars.length} selected across {deviceGroups.length} account source{deviceGroups.length === 1 ? '' : 's'}</Text>
+            </View>
+            <Ionicons name={deviceExpanded ? 'chevron-up' : 'chevron-down'} size={19} color={styles.icon.color} />
+          </View>
+        </Pressable>
+        {deviceExpanded && deviceGroups.map(([sourceName, sourceCalendars]) => <View key={sourceName} style={styles.settingCard}>
+          <Text style={styles.label}>{sourceName.toUpperCase()}</Text>
+          {sourceCalendars.map((calendar) => {
+            const selected = settings.selectedCalendarIds.includes(calendar.id);
+            return (
+              <Pressable key={calendar.id} onPress={() => toggleCalendar(calendar.id)} style={[styles.row, selected && styles.rowSelected]}>
+                <View style={[styles.colorDot, { backgroundColor: calendar.color }]} />
+                <View style={styles.flex}>
+                  <Text style={styles.rowTitle}>{calendar.title}</Text>
+                  <Text style={styles.meta}>{calendar.allowsModifications ? 'Read and write' : 'Read only'}</Text>
+                </View>
+                <Ionicons name={selected ? 'checkmark-circle' : 'ellipse-outline'} size={22} color={selected ? '#19A47B' : dark ? '#A8B1C4' : '#727D94'} />
+              </Pressable>
+            );
+          })}
+        </View>)}
         <Pressable disabled={busy} onPress={sync} style={styles.primaryButton}>
           {busy ? <ActivityIndicator color="#fff" /> : <>
             <Ionicons name="sync" size={18} color="#fff" />
@@ -454,10 +497,11 @@ export function CalendarConnectionScreen({
           </Pressable>
         ))}
       </>}
+      </>}
       {!!error && <Text style={styles.error}>{error}</Text>}
       <View style={styles.privacyCard}>
         <Ionicons name="lock-closed" size={19} color="#19A47B" />
-        <Text style={styles.privacyText}>iPhone calendar choices stay on this phone. Direct provider grants are encrypted and revocable. Imported records keep their source label, and Coho does not import attendees or private event notes.</Text>
+        <Text style={styles.privacyText}>Your iPhone calendar selections stay on this phone; the events you import are shared with your Coho household. Direct provider grants are encrypted and revocable, and imported events retain their source label. Review the calendars and provider permissions you select before syncing.</Text>
       </View>
     </ScrollView>
   );

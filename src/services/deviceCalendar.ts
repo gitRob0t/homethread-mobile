@@ -125,10 +125,7 @@ export async function importSelectedDeviceCalendars(input: {
     }));
 
   if (rows.length) {
-    const { error } = await supabase
-      .from('events')
-      .upsert(rows, { onConflict: 'household_id,provider,provider_event_id' });
-    if (error) throw error;
+    await persistDeviceCalendarRows(input.householdId, rows);
   }
 
   const currentProviderIds = new Set(rows.map((row) => row.provider_event_id));
@@ -175,6 +172,38 @@ export async function importSelectedDeviceCalendars(input: {
   return { synced: rows.length, removed: removedIds.length };
 }
 
+async function persistDeviceCalendarRows(
+  householdId: string,
+  rows: Array<Record<string, any> & { provider_event_id: string }>,
+) {
+  const existingByProviderId = new Map<string, string>();
+  for (let offset = 0; offset < rows.length; offset += 100) {
+    const providerIds = rows.slice(offset, offset + 100).map((row) => row.provider_event_id);
+    const { data, error } = await supabase
+      .from('events')
+      .select('id, provider_event_id')
+      .eq('household_id', householdId)
+      .eq('provider', 'device-calendar')
+      .in('provider_event_id', providerIds);
+    if (error) throw error;
+    (data ?? []).forEach((event) => {
+      if (event.provider_event_id) existingByProviderId.set(event.provider_event_id, event.id);
+    });
+  }
+
+  const inserts = rows.filter((row) => !existingByProviderId.has(row.provider_event_id));
+  for (let offset = 0; offset < inserts.length; offset += 100) {
+    const { error } = await supabase.from('events').insert(inserts.slice(offset, offset + 100));
+    if (error) throw error;
+  }
+  const updates = rows.filter((row) => existingByProviderId.has(row.provider_event_id));
+  for (const row of updates) {
+    const id = existingByProviderId.get(row.provider_event_id);
+    const { error } = await supabase.from('events').update(row).eq('id', id!);
+    if (error) throw error;
+  }
+}
+
 function deviceCalendarEventKey(calendarId: string, eventId: string, startsAt: string) {
   return [calendarId, eventId, startsAt].join(':');
 }
@@ -194,9 +223,11 @@ export async function writeApprovedEventToDevice(input: {
   title: string;
   startsAt: string;
   endsAt?: string | null;
+  allDay?: boolean;
   location?: string | null;
   notes?: string | null;
   reminderMinutes?: number | null;
+  recurrenceRule?: string | Calendar.RecurrenceRule | null;
 }) {
   if (Platform.OS === 'web') return null;
   const settings = await getDeviceCalendarSettings();
@@ -205,20 +236,129 @@ export async function writeApprovedEventToDevice(input: {
   const dedupeKey = `coho-device-event:${input.id}`;
   if (await AsyncStorage.getItem(dedupeKey)) return null;
 
-  const startDate = new Date(input.startsAt);
-  const endDate = input.endsAt
-    ? new Date(input.endsAt)
-    : new Date(startDate.getTime() + 60 * 60 * 1000);
+  const { startDate, endDate } = deviceEventDateRange(
+    input.startsAt,
+    input.endsAt,
+    Boolean(input.allDay),
+  );
   const eventId = await Calendar.createEventAsync(settings.writeBackCalendarId, {
     title: input.title,
     startDate,
     endDate,
+    allDay: Boolean(input.allDay),
     location: input.location || undefined,
     notes: [input.notes, 'Created by Coho'].filter(Boolean).join('\n\n'),
     alarms: input.reminderMinutes
       ? [{ relativeOffset: -Math.abs(input.reminderMinutes) }]
       : undefined,
+    recurrenceRule: deviceRecurrenceRule(input.recurrenceRule),
   });
   await AsyncStorage.setItem(dedupeKey, eventId);
   return eventId;
+}
+
+function deviceEventDateRange(
+  startsAt: string,
+  endsAt: string | null | undefined,
+  allDay: boolean,
+) {
+  const startDate = new Date(startsAt);
+  if (!allDay) {
+    return {
+      startDate,
+      endDate: endsAt
+        ? new Date(endsAt)
+        : new Date(startDate.getTime() + 60 * 60 * 1000),
+    };
+  }
+
+  startDate.setHours(0, 0, 0, 0);
+  const endDate = endsAt ? new Date(endsAt) : new Date(startDate);
+  endDate.setHours(0, 0, 0, 0);
+  if (endDate <= startDate) endDate.setDate(startDate.getDate() + 1);
+  return { startDate, endDate };
+}
+
+function deviceRecurrenceRule(
+  value: string | Calendar.RecurrenceRule | null | undefined,
+): Calendar.RecurrenceRule | undefined {
+  if (!value) return undefined;
+  if (typeof value !== 'string') return value;
+
+  const fields = new Map(
+    value
+      .trim()
+      .replace(/^RRULE:/i, '')
+      .split(';')
+      .map((part) => {
+        const separator = part.indexOf('=');
+        return separator > 0
+          ? [part.slice(0, separator).toUpperCase(), part.slice(separator + 1)]
+          : ['', ''];
+      }),
+  );
+  const frequency = {
+    DAILY: Calendar.Frequency.DAILY,
+    WEEKLY: Calendar.Frequency.WEEKLY,
+    MONTHLY: Calendar.Frequency.MONTHLY,
+    YEARLY: Calendar.Frequency.YEARLY,
+  }[fields.get('FREQ')?.toUpperCase() ?? ''];
+  if (!frequency) return undefined;
+
+  const recurrence: Calendar.RecurrenceRule = { frequency };
+  const interval = Number(fields.get('INTERVAL'));
+  if (Number.isInteger(interval) && interval > 0) recurrence.interval = interval;
+
+  const occurrence = Number(fields.get('COUNT'));
+  if (Number.isInteger(occurrence) && occurrence > 0) recurrence.occurrence = occurrence;
+
+  const endDate = parseRecurrenceEndDate(fields.get('UNTIL'));
+  if (endDate) recurrence.endDate = endDate;
+
+  const weekdayMap: Record<string, Calendar.DayOfTheWeek> = {
+    SU: Calendar.DayOfTheWeek.Sunday,
+    MO: Calendar.DayOfTheWeek.Monday,
+    TU: Calendar.DayOfTheWeek.Tuesday,
+    WE: Calendar.DayOfTheWeek.Wednesday,
+    TH: Calendar.DayOfTheWeek.Thursday,
+    FR: Calendar.DayOfTheWeek.Friday,
+    SA: Calendar.DayOfTheWeek.Saturday,
+  };
+  const daysOfTheWeek = fields.get('BYDAY')
+    ?.split(',')
+    .map((day) => day.trim().toUpperCase())
+    .map((day) => {
+      const match = day.match(/^([+-]?\d+)?(SU|MO|TU|WE|TH|FR|SA)$/);
+      if (!match) return null;
+      const weekNumber = match[1] ? Number(match[1]) : undefined;
+      return {
+        dayOfTheWeek: weekdayMap[match[2]],
+        ...(weekNumber ? { weekNumber } : {}),
+      };
+    })
+    .filter((day): day is Calendar.DaysOfTheWeek => Boolean(day));
+  if (daysOfTheWeek?.length) recurrence.daysOfTheWeek = daysOfTheWeek;
+
+  return recurrence;
+}
+
+function parseRecurrenceEndDate(value: string | undefined) {
+  if (!value) return undefined;
+  const match = value.match(
+    /^(\d{4})(\d{2})(\d{2})(?:T(\d{2})(\d{2})(\d{2})(Z)?)?$/,
+  );
+  if (!match) return undefined;
+  const [, year, month, day, hour = '23', minute = '59', second = '59', utc] = match;
+  const components = [
+    Number(year),
+    Number(month) - 1,
+    Number(day),
+    Number(hour),
+    Number(minute),
+    Number(second),
+  ] as const;
+  const date = utc
+    ? new Date(Date.UTC(...components))
+    : new Date(...components);
+  return Number.isNaN(date.getTime()) ? undefined : date;
 }

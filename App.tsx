@@ -1,6 +1,7 @@
 import AuthGate from './src/components/AuthGate';
 import AppErrorBoundary from './src/components/AppErrorBoundary';
 import AutomationRulesScreen from './src/components/AutomationRules';
+import EmailConnectionsScreen from './src/components/EmailConnections';
 import FamilyInboxScreen from './src/components/FamilyInbox';
 import FamilyHub from './src/components/FamilyHub';
 import PrivacyDataScreen from './src/components/PrivacyData';
@@ -39,7 +40,8 @@ import {
   hasDeviceCalendarAccess,
   writeApprovedEventToDevice,
 } from './src/services/deviceCalendar';
-import { listCalendarConnections } from './src/services/calendarConnections';
+import { listCalendarConnections, type CalendarProvider } from './src/services/calendarConnections';
+import type { EmailSourceProvider } from './src/services/emailSources';
 import { supabase } from './src/lib/supabase';
 import {
   deleteHouseholdPerson,
@@ -56,8 +58,8 @@ import {
   type MoreMenuPreferences,
 } from './src/services/uiPreferences';
 import {
+  countInboundItemsForReview,
   getHouseholdInbox,
-  listInboundItems,
   subscribeToFamilyInbox,
 } from './src/services/familyInbox';
 import { getLocationSharingState } from './src/services/familyLocation';
@@ -126,13 +128,14 @@ type MoreView =
   | 'Automations'
   | 'Integrations'
   | 'Calendars'
-  | 'Inbox & Communication'
+  | 'Email'
   | 'Notifications'
   | 'Food & Dining'
   | 'Location & Safety'
   | 'Displays & Migration'
   | 'Notification Settings'
-  | 'Calendar Sync'
+  | 'Calendar Setup'
+  | 'Email Connections'
   | 'Family Places'
   | 'Meals & Groceries'
   | 'Family Inbox'
@@ -156,6 +159,7 @@ type BotEvent = {
   provider?: 'coho' | 'google' | 'outlook' | 'apple' | string;
   sourceCalendarId?: string;
   recurrenceRule?: string;
+  allDay?: boolean;
 };
 type ChoreRepeat = 'none' | 'daily' | 'weekdays' | 'weekly' | 'biweekly' | 'monthly';
 type Chore = {
@@ -188,6 +192,19 @@ type ChoreFormValue = {
   rewardValue: number;
   rewardLabel: string;
 };
+type EventEntryMode = 'calendar' | 'email' | 'manual' | 'coh';
+type EventFormValue = {
+  title: string;
+  details: string;
+  assignedPersonId: string | null;
+  startsAt: Date;
+  endsAt: Date;
+  allDay: boolean;
+  location: string;
+  recurrenceRule: string | null;
+  reminderMinutes: number | null;
+  writeToDevice: boolean;
+};
 type BotField = 'title' | 'day' | 'time' | 'meridiem' | 'place' | 'directions' | 'reminder' | 'confirm';
 type BotDraft = { title?: string; person?: string; day?: string; dateISO?: string; time?: string; meridiem?: 'AM' | 'PM'; place?: string; reminder?: number; directions?: boolean; awaiting: BotField };
 type ChiefPrefs = BriefingPreferences & { members: string[] };
@@ -217,11 +234,11 @@ type MoreMenuItem = {
 const moreMenuItems: MoreMenuItem[] = [
   { title: 'Chief of Home', icon: 'home-outline', color: '#7047EE', detail: 'Personal briefings, week ahead, and follow-ups' },
   { title: 'Family', icon: 'people-outline', color: '#2257F4', detail: 'Members, roles, and family invitations' },
-  { title: 'Family Inbox', icon: 'mail-unread-outline', color: '#FF7A2E', detail: 'One private address for school, appointments, and activities' },
+  { title: 'Calendars', icon: 'calendar-outline', color: '#2257F4', detail: 'Apple, Google, Outlook, and other calendar sources' },
+  { title: 'Email', icon: 'mail-unread-outline', color: '#FF7A2E', detail: 'Connect any address and review Coh event suggestions' },
   { title: 'Meals & Groceries', icon: 'restaurant-outline', color: '#D7550D', detail: 'Meal plans, shared groceries, and Coh Home Chef' },
   { title: 'Family Places', icon: 'location-outline', color: '#19A47B', detail: 'Opt-in location, arrivals, and departures' },
   { title: 'Trips', icon: 'airplane-outline', color: '#7047EE', detail: 'Private schedules with friends and other families' },
-  { title: 'Calendar Sync', icon: 'calendar-outline', color: '#2257F4', detail: 'Connect selected calendars on this iPhone' },
   { title: 'Notes', icon: 'document-text-outline', color: '#7C4DFF', detail: 'Lists, instructions, and family details' },
   { title: 'Recaps', icon: 'sparkles-outline', color: '#2257F4', detail: 'Daily summaries by push and email' },
   { title: 'Automations', icon: 'flash-outline', color: '#7047EE', detail: 'Real cloud rules, retries, and household follow-through' },
@@ -231,7 +248,7 @@ const moreMenuItems: MoreMenuItem[] = [
 
 type IntegrationCategoryView =
   | 'Calendars'
-  | 'Inbox & Communication'
+  | 'Email'
   | 'Notifications'
   | 'Food & Dining'
   | 'Location & Safety'
@@ -259,19 +276,24 @@ const integrationCategories: IntegrationCategory[] = [
     color: '#2257F4',
     detail: 'Bring every approved family calendar into one timeline.',
     providers: [
-      { name: 'Apple Calendar', icon: 'logo-apple', color: '#5A667A', detail: 'Select device calendars and sync changes both ways.' },
+      { name: 'Apple Calendar', icon: 'logo-apple', color: '#5A667A', detail: 'Choose calendars already available on this iPhone.' },
       { name: 'Google Calendar', icon: 'logo-google', color: '#4285F4', detail: 'Connect Google, then choose exactly which calendars Coho uses.' },
       { name: 'Outlook Calendar', icon: 'mail-outline', color: '#0078D4', detail: 'Connect Microsoft and choose work or personal calendars.' },
+      { name: 'Other calendar', icon: 'link-outline', color: '#19A47B', detail: 'Use an ICS, subscribed, or CalDAV calendar already added to this iPhone.' },
     ],
   },
   {
-    view: 'Inbox & Communication',
+    view: 'Email',
     icon: 'mail-unread-outline',
     color: '#FF7A2E',
     detail: 'Turn school, appointment, and activity email into approved actions.',
     providers: [
-      { name: 'Family Inbox', icon: 'mail-unread-outline', color: '#FF7A2E', detail: 'A private household inbox with extraction and review before action.' },
-      { name: 'Email forwarding', icon: 'arrow-redo-outline', color: '#7047EE', detail: 'Forward from Gmail, Outlook, school portals, or any email provider.' },
+      { name: 'Gmail / Google Workspace', icon: 'logo-google', color: '#4285F4', detail: 'Google-hosted personal or custom-domain email.' },
+      { name: 'Outlook / Microsoft 365', icon: 'logo-microsoft', color: '#0078D4', detail: 'Microsoft-hosted personal, work, or custom-domain email.' },
+      { name: 'iCloud Mail', icon: 'logo-apple', color: '#5A667A', detail: 'iCloud Mail, including iCloud+ custom domains.' },
+      { name: 'Yahoo Mail', icon: 'mail-outline', color: '#6F2DBD', detail: 'Yahoo-hosted email forwarded into the private Family Inbox.' },
+      { name: 'Custom email or domain', icon: 'globe-outline', color: '#FF7A2E', detail: 'Add any address and identify its real mailbox host.' },
+      { name: 'Family Inbox', icon: 'file-tray-full-outline', color: '#7047EE', detail: 'Review extracted suggestions before anything is added.' },
     ],
   },
   {
@@ -401,6 +423,9 @@ function CohoApp() {
   const [quickAddTitle, setQuickAddTitle] = useState('');
   const [quickAddDetails, setQuickAddDetails] = useState('');
   const [quickAddSaving, setQuickAddSaving] = useState(false);
+  const [manualEventOpen, setManualEventOpen] = useState(false);
+  const [calendarSetupProvider, setCalendarSetupProvider] = useState<CalendarProvider | 'device'>('device');
+  const [emailSetupProvider, setEmailSetupProvider] = useState<EmailSourceProvider>('custom');
   const [notice, setNotice] = useState<string | null>(null);
   const [chores, setChores] = useState<Chore[]>([]);
   const [rewardMember, setRewardMember] = useState('');
@@ -434,6 +459,7 @@ function CohoApp() {
   const [briefingSnapshots, setBriefingSnapshots] = useState<BriefingSnapshot[]>([]);
   const [inboxReviewCount, setInboxReviewCount] = useState(0);
   const [integrationReturnView, setIntegrationReturnView] = useState<IntegrationCategoryView | null>(null);
+  const [integrationCategoryBackView, setIntegrationCategoryBackView] = useState<'Menu' | 'Integrations'>('Menu');
   const [secondUserWelcomeOpen, setSecondUserWelcomeOpen] = useState(false);
 
   useEffect(() => {
@@ -558,7 +584,6 @@ function CohoApp() {
           'Google Calendar': activeCalendarProviders.has('google'),
           'Outlook Calendar': activeCalendarProviders.has('outlook'),
           'Family Inbox': inboxActive,
-          'Email forwarding': inboxActive,
           'Family Places': locationSharing?.sharing_enabled === true,
         }));
         if (notificationPermission.granted) {
@@ -589,26 +614,24 @@ function CohoApp() {
 
   async function reloadSharedData(targetHousehold = householdId, targetUser = currentUserId) {
     if (!targetHousehold || !targetUser) return;
-    const [sharedMessages, sharedEvents, sharedChores, sharedFollowUps, householdPeople, snapshots, inboxItems] = await Promise.all([
+    const [sharedMessages, sharedEvents, sharedChores, sharedFollowUps, householdPeople, snapshots, nextInboxReviewCount] = await Promise.all([
       listSharedMessages(targetHousehold),
       listSharedEvents(targetHousehold),
       listSharedChores(targetHousehold),
       listEventFollowUps(targetHousehold),
       listHouseholdPeople(targetHousehold),
       listBriefingSnapshots(targetHousehold),
-      listInboundItems(targetHousehold).catch(() => []),
+      countInboundItemsForReview(targetHousehold).catch(() => 0),
     ]);
     setMessages((current) => [
       ...current.filter((message) => messageChannel(message) === 'coh'),
       ...sharedMessages.map((message: any) => cloudMessage(message, targetUser)),
     ]);
-    setBotEvents(sharedEvents.map((event: any) => cloudEvent(event)));
+    setBotEvents(sharedEvents.flatMap((event: any) => expandCloudEvent(event)));
     setChores(sharedChores.map((chore: any, index: number) => cloudChore(chore, index)));
     setFollowUps(sharedFollowUps);
     setBriefingSnapshots(snapshots);
-    setInboxReviewCount(inboxItems.filter((item) =>
-      ['queued', 'processing', 'needs_review', 'needs_details', 'ready', 'failed'].includes(item.status),
-    ).length);
+    setInboxReviewCount(nextInboxReviewCount);
     const nextProfiles = householdPeople.map((person, index) => personToProfile(person, index));
     setProfiles(nextProfiles);
     setRewardMember((current) => nextProfiles.some((profile) => profile.name === current) ? current : nextProfiles[0]?.name ?? '');
@@ -715,6 +738,162 @@ function CohoApp() {
     setMessageDraft(prompt);
     setTab('Chat');
     showNotice('Coh will confirm the missing event details before saving');
+  }
+
+  function openEventEntry(mode: EventEntryMode) {
+    setQuickAddOpen(false);
+    setQuickAddTitle('');
+    setQuickAddDetails('');
+    if (mode === 'manual') {
+      setManualEventOpen(true);
+      return;
+    }
+    if (mode === 'coh') {
+      setChatMode('coh');
+      setMessageDraft('@coh Help me create a family calendar event.');
+      setTab('Chat');
+      showNotice('Tell Coh what you know. It will ask only for missing details.');
+      return;
+    }
+    if (mode === 'email') {
+      setEmailSetupProvider('custom');
+      setIntegrationCategoryBackView('Menu');
+      setIntegrationReturnView('Email');
+      setMoreView('Email Connections');
+      setTab('More');
+      return;
+    }
+    setIntegrationCategoryBackView('Menu');
+    setIntegrationReturnView(null);
+    setMoreView('Calendars');
+    setTab('More');
+  }
+
+  async function saveManualEvent(form: EventFormValue) {
+    if (!householdId || !currentUserId) {
+      showNotice('Join a Coho household before adding a family event.');
+      return;
+    }
+    if (!form.title.trim()) return;
+    setQuickAddSaving(true);
+    try {
+      const assignee = profiles.find((profile) => profile.id === form.assignedPersonId) ?? null;
+      const eventStart = form.allDay
+        ? new Date(form.startsAt.getFullYear(), form.startsAt.getMonth(), form.startsAt.getDate())
+        : form.startsAt;
+      const eventEnd = form.allDay
+        ? new Date(eventStart.getFullYear(), eventStart.getMonth(), eventStart.getDate() + 1)
+        : form.endsAt;
+      const startsAt = eventStart.toISOString();
+      const endsAt = eventEnd.toISOString();
+      const created = await createFamilyEvent({
+        householdId,
+        userId: currentUserId,
+        title: form.title.trim(),
+        startsAt,
+        endsAt,
+        allDay: form.allDay,
+        location: form.location.trim() || null,
+        details: JSON.stringify({
+          notes: form.details.trim() || null,
+          person: assignee?.name ?? 'Family',
+          reminder: form.reminderMinutes,
+          source: 'manual',
+        }),
+        assignedPersonId: assignee?.id ?? null,
+        provider: 'coho',
+        recurrenceRule: form.recurrenceRule,
+      });
+      const reminderScheduled = await scheduleManualEventReminder({
+        eventId: created.id,
+        title: form.title.trim(),
+        startsAt: eventStart,
+        reminderMinutes: form.reminderMinutes,
+        recurrenceRule: form.recurrenceRule,
+      });
+      let wroteToDevice = false;
+      if (form.writeToDevice) {
+        wroteToDevice = Boolean(await writeApprovedEventToDevice({
+          id: created.id,
+          title: form.title.trim(),
+          startsAt,
+          endsAt,
+          location: form.location.trim() || null,
+          notes: form.details.trim() || 'Added manually in Coho',
+          reminderMinutes: form.reminderMinutes,
+          allDay: form.allDay,
+          recurrenceRule: form.recurrenceRule,
+        }).catch(() => null));
+      }
+      setManualEventOpen(false);
+      setCalendarFocusDate(localDateKey(eventStart));
+      await reloadSharedData(householdId, currentUserId);
+      setTab('Calendar');
+      const eventNotice = form.writeToDevice && !wroteToDevice
+        ? 'Event added to Coho. Choose a write-back calendar to copy it to your phone.'
+        : wroteToDevice
+          ? 'Event added to Coho and your selected phone calendar'
+          : 'Event added to the shared family calendar';
+      showNotice(form.reminderMinutes && !reminderScheduled
+        ? `${eventNotice} Enable iOS notifications to receive its reminder.`
+        : eventNotice);
+    } catch (error) {
+      showNotice(error instanceof Error ? error.message : 'The event could not be added.');
+    } finally {
+      setQuickAddSaving(false);
+    }
+  }
+
+  async function scheduleManualEventReminder(input: {
+    eventId: string;
+    title: string;
+    startsAt: Date;
+    reminderMinutes: number | null;
+    recurrenceRule: string | null;
+  }) {
+    if (!input.reminderMinutes) return true;
+    let permission = await Notifications.getPermissionsAsync();
+    if (!permission.granted) permission = await Notifications.requestPermissionsAsync();
+    if (!permission.granted) return false;
+
+    const reminderAt = new Date(input.startsAt.getTime() - input.reminderMinutes * 60_000);
+    const content = {
+      title: input.title,
+      body: `Starts in ${formatReminderLead(input.reminderMinutes)}. Tap to open the family event.`,
+      sound: 'default' as const,
+      data: {
+        screen: 'Calendar',
+        eventId: input.eventId,
+        deepLink: `coho://event/${input.eventId}`,
+      },
+    };
+    const frequency = input.recurrenceRule?.match(/FREQ=(DAILY|WEEKLY|MONTHLY)/)?.[1];
+    if (frequency) {
+      const shared = {
+        type: Notifications.SchedulableTriggerInputTypes.CALENDAR,
+        repeats: true,
+        hour: reminderAt.getHours(),
+        minute: reminderAt.getMinutes(),
+      } as const;
+      await Notifications.scheduleNotificationAsync({
+        content,
+        trigger: frequency === 'WEEKLY'
+          ? { ...shared, weekday: reminderAt.getDay() + 1 }
+          : frequency === 'MONTHLY'
+            ? { ...shared, day: reminderAt.getDate() }
+            : shared,
+      });
+      return true;
+    }
+    if (reminderAt.getTime() <= Date.now()) return false;
+    await Notifications.scheduleNotificationAsync({
+      content,
+      trigger: {
+        type: Notifications.SchedulableTriggerInputTypes.DATE,
+        date: reminderAt,
+      },
+    });
+    return true;
   }
 
   function addBotMessage(text: string) {
@@ -1162,7 +1341,9 @@ function CohoApp() {
         ? 'Google Calendar'
         : 'Outlook';
       setConnected((current) => ({ ...current, [label]: true }));
-      setMoreView('Calendar Sync');
+      setCalendarSetupProvider(calendarConnection[1].toLowerCase() as CalendarProvider);
+      setIntegrationReturnView('Calendars');
+      setMoreView('Calendar Setup');
       setTab('More');
       showNotice(`${label} connected. Coho is completing the first sync.`);
       return;
@@ -1647,11 +1828,13 @@ function CohoApp() {
   };
   const openHouseholdOS = (view: MoreView) => {
     setIntegrationReturnView(null);
+    if (integrationCategoryViews.has(view)) setIntegrationCategoryBackView('Menu');
     setMoreView(view);
     setTab('More');
   };
   const openIntegrationCategory = (view: IntegrationCategoryView) => {
     setIntegrationReturnView(null);
+    setIntegrationCategoryBackView('Integrations');
     setMoreView(view);
     setTab('More');
   };
@@ -1662,8 +1845,24 @@ function CohoApp() {
       setTab('More');
       return;
     }
-    if (['Family Inbox', 'Email forwarding'].includes(name)) {
+    if (name === 'Family Inbox') {
       setMoreView('Family Inbox');
+      setTab('More');
+      return;
+    }
+    if (['Gmail / Google Workspace', 'Outlook / Microsoft 365', 'iCloud Mail', 'Yahoo Mail', 'Custom email or domain'].includes(name)) {
+      setEmailSetupProvider(
+        name === 'Gmail / Google Workspace'
+          ? 'google'
+          : name === 'Outlook / Microsoft 365'
+            ? 'microsoft'
+            : name === 'iCloud Mail'
+              ? 'icloud'
+              : name === 'Yahoo Mail'
+                ? 'yahoo'
+                : 'custom',
+      );
+      setMoreView('Email Connections');
       setTab('More');
       return;
     }
@@ -1672,8 +1871,15 @@ function CohoApp() {
       setTab('More');
       return;
     }
-    if (['Apple Calendar', 'Google Calendar', 'Outlook Calendar'].includes(name)) {
-      setMoreView('Calendar Sync');
+    if (['Apple Calendar', 'Google Calendar', 'Outlook Calendar', 'Other calendar'].includes(name)) {
+      setCalendarSetupProvider(
+        name === 'Google Calendar'
+          ? 'google'
+          : name === 'Outlook Calendar'
+            ? 'outlook'
+            : 'device',
+      );
+      setMoreView('Calendar Setup');
       setTab('More');
       return;
     }
@@ -1696,7 +1902,8 @@ function CohoApp() {
       return;
     }
     if (integrationCategoryViews.has(moreView)) {
-      setMoreView('Integrations');
+      setMoreView(integrationCategoryBackView);
+      setIntegrationCategoryBackView('Menu');
       return;
     }
     if (moreView !== 'Menu') {
@@ -1722,7 +1929,10 @@ function CohoApp() {
           householdName={householdName}
           onTheme={toggleTheme}
           onRecap={openRecaps}
-          onAdd={() => setQuickAddOpen(true)}
+          onAdd={() => {
+            if (tab === 'Calendar') setQuickAddType('Event');
+            setQuickAddOpen(true);
+          }}
           onBack={tab === 'More' ? handleMoreBack : undefined}
         />
 
@@ -1745,10 +1955,14 @@ function CohoApp() {
             onFamily={() => { setMoreView('Family'); setTab('More'); }}
             onNotifications={() => { setMoreView('Notification Settings'); setTab('More'); }}
           />}
-          {tab === 'Calendar' && <CalendarScreen theme={theme} styles={styles} botEvents={botEvents} profiles={profiles} focusDate={calendarFocusDate} onOpenEvent={setSelectedEvent} onAction={showNotice} onManage={() => { setMoreView('Integrations'); setTab('More'); }} />}
+          {tab === 'Calendar' && <CalendarScreen theme={theme} styles={styles} botEvents={botEvents} profiles={profiles} focusDate={calendarFocusDate} onOpenEvent={setSelectedEvent} onAction={showNotice} onManage={() => { setIntegrationReturnView(null); setIntegrationCategoryBackView('Menu'); setMoreView('Calendars'); setTab('More'); }} onAdd={() => { setQuickAddType('Event'); setQuickAddOpen(true); }} />}
           {tab === 'Chores' && <ChoresScreen styles={styles} chores={chores} memberNames={profiles.map((profile) => profile.name)} rewardMember={rewardMember} setRewardMember={setRewardMember} selectedRewards={selectedRewards} onConfigure={setEditingChore} onAdd={() => { setQuickAddType('Chore'); setQuickAddOpen(true); }} onSelectReward={(member: string, reward: string) => { const next = { ...selectedRewards, [member]: reward }; setSelectedRewards(next); AsyncStorage.setItem('coho-reward-goals', JSON.stringify(next)); showNotice(`${member} picked a new reward goal`); }} onToggle={toggleChore} />}
           {tab === 'Chat' && <ChatScreen styles={styles} messages={messages} mode={chatMode} setMode={setChatMode} draft={messageDraft} setDraft={setMessageDraft} onSend={sendMessage} onAdd={() => setQuickAddOpen(true)} onVoice={toggleVoiceRequest} voiceRecording={voiceRecorderState.isRecording} voiceSending={voiceSending} cohThinking={cohThinking} />}
-          {tab === 'More' && moreView === 'Menu' && <MoreMenu styles={styles} setView={setMoreView} userId={currentUserId} onNotice={showNotice} />}
+          {tab === 'More' && moreView === 'Menu' && <MoreMenu styles={styles} setView={(view) => {
+            setIntegrationReturnView(null);
+            if (integrationCategoryViews.has(view)) setIntegrationCategoryBackView('Menu');
+            setMoreView(view);
+          }} userId={currentUserId} onNotice={showNotice} />}
           {tab === 'More' && moreView === 'Chief of Home' && <ChiefOfHomeScreen styles={styles} prefs={chiefPrefs} memberNames={profiles.map((profile) => profile.name)} setPrefs={saveChiefPreferences} onActivate={activateChiefOfHome} />}
           {tab === 'More' && moreView === 'Family' && <FamilyProfilesScreen styles={styles} profiles={profiles} onInvite={() => setFamilyHubOpen(true)} onEdit={setEditingProfile} onAdd={() => setEditingProfile({ id: `new-${Date.now()}`, name: '', dob: '', bio: '', role: 'Family member', color: '#DCE7FF', ink: '#2257F4' })} />}
           {tab === 'More' && moreView === 'Notes' && <NotesScreen styles={styles} householdId={householdId} userId={currentUserId} onAction={showNotice} />}
@@ -1769,10 +1983,20 @@ function CohoApp() {
             onEnable={enableNotifications}
             onSave={activateChiefOfHome}
           />}
-          {tab === 'More' && moreView === 'Calendar Sync' && <CalendarConnectionScreen dark={dark} householdId={householdId} userId={currentUserId} onNotice={showNotice} onConnected={(source) => setConnected((current) => ({
+          {tab === 'More' && moreView === 'Calendar Setup' && <CalendarConnectionScreen dark={dark} householdId={householdId} userId={currentUserId} initialProvider={calendarSetupProvider} onNotice={showNotice} onConnected={(source) => setConnected((current) => ({
             ...current,
             [source === 'google' ? 'Google Calendar' : source === 'outlook' ? 'Outlook Calendar' : 'Apple Calendar']: true,
           }))} onSynced={() => reloadSharedData()} />}
+          {tab === 'More' && moreView === 'Email Connections' && <EmailConnectionsScreen
+            dark={dark}
+            householdId={householdId}
+            userId={currentUserId}
+            initialProvider={emailSetupProvider}
+            canManage={canManageFamily}
+            onNotice={showNotice}
+            onReviewInbox={() => { setInitialInboxItemId(null); setMoreView('Family Inbox'); setTab('More'); }}
+            onSetupInbox={() => { setInitialInboxItemId(null); setMoreView('Family Inbox'); setTab('More'); }}
+          />}
           {tab === 'More' && moreView === 'Family Inbox' && <FamilyInboxScreen dark={dark} householdId={householdId} householdName={householdName} userId={currentUserId} onNotice={showNotice} onAskCoh={openCohPrompt} onOpenAction={openActionTarget} initialItemId={initialInboxItemId} />}
           {tab === 'More' && moreView === 'Family Places' && <FamilyPlacesScreen dark={dark} householdId={householdId} userId={currentUserId} onNotice={showNotice} />}
           {tab === 'More' && moreView === 'Meals & Groceries' && <FoodHubScreen dark={dark} householdId={householdId} userId={currentUserId} onNotice={showNotice} onAskCoh={openCohPrompt} />}
@@ -1808,7 +2032,18 @@ function CohoApp() {
         currentUserId={currentUserId}
         saving={quickAddSaving}
         onSave={saveQuickAdd}
+        onEventSource={openEventEntry}
         dark={dark}
+      />
+      <ManualEventModal
+        visible={manualEventOpen}
+        profiles={profiles}
+        currentUserId={currentUserId}
+        styles={styles}
+        dark={dark}
+        saving={quickAddSaving}
+        onClose={() => setManualEventOpen(false)}
+        onSave={saveManualEvent}
       />
       <ShareToCohModal
         visible={sharePreviewOpen}
@@ -2050,7 +2285,7 @@ function addMonths(date: Date, count: number) {
   return startOfDay(next);
 }
 
-function CalendarScreen({ theme, styles, botEvents, profiles, focusDate, onOpenEvent, onAction, onManage }: any) {
+function CalendarScreen({ theme, styles, botEvents, profiles, focusDate, onOpenEvent, onAction, onManage, onAdd }: any) {
   const [selected, setSelected] = useState(startOfDay(new Date()));
   const [view, setView] = useState<CalendarViewMode>('month');
   const [personFilter, setPersonFilter] = useState<string | null>(null);
@@ -2242,7 +2477,10 @@ function CalendarScreen({ theme, styles, botEvents, profiles, focusDate, onOpenE
       {unscheduledEvents.length > 0 && <View style={styles.calendarDaySection}><View style={styles.calendarDayHeading}><View style={styles.calendarAgendaDate}><Ionicons name="help" size={17} color="#D7550D" /></View><View style={styles.flex}><Text style={styles.calendarDayTitle}>Needs a date</Text><Text style={styles.muted}>{unscheduledEvents.length} imported or incomplete item{unscheduledEvents.length === 1 ? '' : 's'}</Text></View></View>{unscheduledEvents.map((event) => renderEvent(event, true))}</View>}
     </View>}
 
-    <Pressable onPress={onManage} style={styles.syncCard}><Ionicons name="sync" size={18} color="#2257F4" /><View style={styles.flex}><Text style={styles.syncTitle}>Calendar connections</Text><Text style={styles.muted}>Apple, Google, Outlook, and imported family calendars</Text></View><Text style={styles.link}>Manage</Text></Pressable>
+    <View style={styles.calendarBottomActions}>
+      <Pressable onPress={onAdd} style={styles.calendarAddAction}><Ionicons name="add-circle" size={21} color="#fff" /><View style={styles.flex}><Text style={styles.calendarAddActionTitle}>Add to your family calendar</Text><Text style={styles.calendarAddActionDetail}>Manual · Coh · email suggestion · calendar import</Text></View><Ionicons name="chevron-forward" size={18} color="#fff" /></Pressable>
+      <Pressable onPress={onManage} style={styles.syncCard}><Ionicons name="sync" size={18} color="#2257F4" /><View style={styles.flex}><Text style={styles.syncTitle}>Calendar connections</Text><Text style={styles.muted}>Apple, Google, Outlook, and other sources</Text></View><Text style={styles.link}>Manage</Text></Pressable>
+    </View>
   </ScrollView>;
 }
 
@@ -2317,6 +2555,7 @@ function calendarSourceLabel(provider?: string) {
   if (provider === 'google') return 'Google';
   if (provider === 'outlook') return 'Outlook';
   if (provider === 'apple') return 'Apple';
+  if (provider === 'device-calendar') return 'iPhone calendar';
   return 'Coho';
 }
 
@@ -2324,6 +2563,7 @@ function calendarSourceColor(provider?: string) {
   if (provider === 'google') return '#4285F4';
   if (provider === 'outlook') return '#0078D4';
   if (provider === 'apple') return '#5A667A';
+  if (provider === 'device-calendar') return '#5A667A';
   return '#7047EE';
 }
 
@@ -2368,14 +2608,70 @@ function cloudEvent(row: any): BotEvent {
     personId: row.assigned_person_id || assignedPerson?.id || undefined,
     day: startsAt.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' }),
     dateISO: localDateKey(startsAt),
-    time: startsAt.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }),
+    time: row.all_day ? 'All day' : startsAt.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }),
     place: row.location || undefined,
     reminder: typeof metadata.reminder === 'number' ? metadata.reminder : undefined,
     directions: typeof metadata.directions === 'boolean' ? metadata.directions : undefined,
     provider: row.provider || 'coho',
     sourceCalendarId: row.source_calendar_id || undefined,
     recurrenceRule: row.recurrence_rule || undefined,
+    allDay: Boolean(row.all_day),
   };
+}
+
+function expandCloudEvent(row: any): BotEvent[] {
+  const base = cloudEvent(row);
+  const frequency = row.provider === 'coho'
+    ? String(row.recurrence_rule ?? '').match(/FREQ=(DAILY|WEEKLY|MONTHLY)/)?.[1]
+    : null;
+  if (!frequency) return [base];
+
+  const originalStart = new Date(row.starts_at);
+  if (Number.isNaN(originalStart.getTime())) return [base];
+  const originalEnd = row.ends_at ? new Date(row.ends_at) : null;
+  const duration = originalEnd && !Number.isNaN(originalEnd.getTime())
+    ? Math.max(0, originalEnd.getTime() - originalStart.getTime())
+    : null;
+  const windowStart = new Date();
+  windowStart.setHours(0, 0, 0, 0);
+  windowStart.setDate(windowStart.getDate() - 31);
+  const windowEnd = new Date(windowStart);
+  windowEnd.setDate(windowEnd.getDate() + 397);
+
+  const anchorDay = originalStart.getDate();
+  const occurrences: BotEvent[] = [];
+  let cursor = new Date(originalStart);
+  let guard = 0;
+  while (cursor <= windowEnd && guard < 5000) {
+    if (cursor >= windowStart) {
+      const startsAt = cursor.toISOString();
+      const event = cloudEvent({
+        ...row,
+        starts_at: startsAt,
+        ends_at: duration === null ? null : new Date(cursor.getTime() + duration).toISOString(),
+      });
+      event.id = `cloud-${row.id}-${startsAt}`;
+      occurrences.push(event);
+    }
+    cursor = nextRecurringDate(cursor, frequency, anchorDay);
+    guard += 1;
+  }
+  return occurrences.length ? occurrences : [base];
+}
+
+function nextRecurringDate(current: Date, frequency: string, anchorDay: number) {
+  const next = new Date(current);
+  if (frequency === 'DAILY') {
+    next.setDate(next.getDate() + 1);
+  } else if (frequency === 'WEEKLY') {
+    next.setDate(next.getDate() + 7);
+  } else {
+    next.setDate(1);
+    next.setMonth(next.getMonth() + 1);
+    const lastDay = new Date(next.getFullYear(), next.getMonth() + 1, 0).getDate();
+    next.setDate(Math.min(anchorDay, lastDay));
+  }
+  return next;
 }
 
 function cloudChore(row: any, index: number): Chore {
@@ -2446,6 +2742,12 @@ function formatChoreReward(chore: Pick<Chore, 'rewardId' | 'rewardValue' | 'rewa
   return `${value.toLocaleString()} points`;
 }
 
+function formatReminderLead(minutes: number) {
+  if (minutes % 1440 === 0) return `${minutes / 1440} day${minutes === 1440 ? '' : 's'}`;
+  if (minutes % 60 === 0) return `${minutes / 60} hour${minutes === 60 ? '' : 's'}`;
+  return `${minutes} minutes`;
+}
+
 function defaultChoreDue() {
   const due = new Date();
   due.setSeconds(0, 0);
@@ -2456,6 +2758,37 @@ function defaultChoreDue() {
     due.setHours(9, 0, 0, 0);
   }
   return due;
+}
+
+function defaultEventForm(profiles: FamilyProfile[], currentUserId: string | null): EventFormValue {
+  const startsAt = new Date();
+  startsAt.setSeconds(0, 0);
+  startsAt.setMinutes(Math.ceil(startsAt.getMinutes() / 30) * 30);
+  if (startsAt.getTime() < Date.now() + 30 * 60_000) startsAt.setTime(startsAt.getTime() + 30 * 60_000);
+  const endsAt = new Date(startsAt.getTime() + 60 * 60_000);
+  const currentPerson = profiles.find((profile) => profile.linkedUserId === currentUserId) ?? null;
+  return {
+    title: '',
+    details: '',
+    assignedPersonId: currentPerson?.id ?? null,
+    startsAt,
+    endsAt,
+    allDay: false,
+    location: '',
+    recurrenceRule: null,
+    reminderMinutes: 15,
+    writeToDevice: false,
+  };
+}
+
+function mergeEventDate(current: Date, next: Date, mode: 'date' | 'time') {
+  const merged = new Date(current);
+  if (mode === 'date') {
+    merged.setFullYear(next.getFullYear(), next.getMonth(), next.getDate());
+  } else {
+    merged.setHours(next.getHours(), next.getMinutes(), 0, 0);
+  }
+  return merged;
 }
 
 function defaultChoreForm(
@@ -2987,7 +3320,7 @@ function IntegrationCategoryScreen({
       const active = connected[provider.name] === true;
       const actionLabel = ['iOS Notifications', 'Email Briefings'].includes(provider.name)
         ? 'Configure'
-        : ['Family Inbox', 'Email forwarding', 'Instacart', 'OpenTable'].includes(provider.name)
+        : ['Family Inbox', 'Instacart', 'OpenTable'].includes(provider.name)
           ? 'Open'
           : active
             ? 'Manage'
@@ -3187,6 +3520,137 @@ function ChoreEditorModal({
   </Modal>;
 }
 
+function ManualEventModal({
+  visible,
+  profiles,
+  currentUserId,
+  styles,
+  dark,
+  saving,
+  onClose,
+  onSave,
+}: {
+  visible: boolean;
+  profiles: FamilyProfile[];
+  currentUserId: string | null;
+  styles: any;
+  dark: boolean;
+  saving: boolean;
+  onClose: () => void;
+  onSave: (value: EventFormValue) => Promise<void>;
+}) {
+  const [draft, setDraft] = useState<EventFormValue>(() => defaultEventForm(profiles, currentUserId));
+  useEffect(() => {
+    if (visible) setDraft(defaultEventForm(profiles, currentUserId));
+  }, [visible, currentUserId, profiles.length]);
+  const update = (patch: Partial<EventFormValue>) => setDraft((current) => ({ ...current, ...patch }));
+  const invalid = !draft.title.trim() || draft.endsAt.getTime() <= draft.startsAt.getTime();
+  const repeatOptions = [
+    { label: 'Does not repeat', rule: null },
+    { label: 'Daily', rule: 'FREQ=DAILY' },
+    { label: 'Weekly', rule: 'FREQ=WEEKLY' },
+    { label: 'Monthly', rule: 'FREQ=MONTHLY' },
+  ];
+  const reminderOptions: Array<{ label: string; value: number | null }> = [
+    { label: 'None', value: null },
+    { label: '15 min', value: 15 },
+    { label: '30 min', value: 30 },
+    { label: '1 hour', value: 60 },
+    { label: '1 day', value: 1440 },
+  ];
+  function changeStart(next: Date, mode: 'date' | 'time') {
+    const oldDuration = Math.max(30 * 60_000, draft.endsAt.getTime() - draft.startsAt.getTime());
+    const startsAt = mergeEventDate(draft.startsAt, next, mode);
+    const endsAt = mode === 'date'
+      ? mergeEventDate(draft.endsAt, next, 'date')
+      : new Date(startsAt.getTime() + oldDuration);
+    update({ startsAt, endsAt: endsAt > startsAt ? endsAt : new Date(startsAt.getTime() + oldDuration) });
+  }
+  return <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+    <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.modalBackdrop}>
+      <Pressable style={styles.modalDismiss} onPress={onClose} />
+      <View style={[styles.modalSheet, styles.choreModalSheet]}>
+        <View style={styles.modalHandle} />
+        <View style={styles.modalHead}>
+          <View style={styles.flex}>
+            <Text style={styles.eyebrow}>MANUAL EVENT</Text>
+            <Text style={styles.modalTitle}>Add to the family calendar</Text>
+            <Text style={styles.muted}>This works independently of Coh and saves directly to your shared calendar.</Text>
+          </View>
+          <Pressable onPress={onClose} style={styles.iconButton}><Ionicons name="close" size={21} color={styles.iconColor.color} /></Pressable>
+        </View>
+        <ScrollView keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false} contentContainerStyle={styles.choreFormContent}>
+          <Text style={styles.fieldLabel}>EVENT TITLE</Text>
+          <TextInput value={draft.title} onChangeText={(title) => update({ title })} autoFocus placeholder="What is happening?" placeholderTextColor="#8B93A5" style={styles.modalInput} />
+
+          <View style={styles.manualEventToggle}>
+            <View style={styles.flex}><Text style={styles.settingTitle}>All-day event</Text><Text style={styles.muted}>Hide start and end times</Text></View>
+            <Switch value={draft.allDay} onValueChange={(allDay) => update({ allDay })} trackColor={{ true: '#6687FF' }} />
+          </View>
+
+          <Text style={styles.fieldLabel}>DATE</Text>
+          <View style={styles.manualDateField}>
+            <Ionicons name="calendar-outline" size={18} color="#2257F4" />
+            <DateTimePicker value={draft.startsAt} mode="date" display={Platform.OS === 'ios' ? 'compact' : 'default'} themeVariant={dark ? 'dark' : 'light'} onChange={(_, next) => next && changeStart(next, 'date')} />
+          </View>
+
+          {!draft.allDay && <>
+            <Text style={styles.fieldLabel}>START & END</Text>
+            <View style={styles.choreDateRow}>
+              <View style={styles.choreDateField}><Text style={styles.timeFieldLabel}>START</Text><DateTimePicker value={draft.startsAt} mode="time" minuteInterval={5} display={Platform.OS === 'ios' ? 'compact' : 'default'} themeVariant={dark ? 'dark' : 'light'} onChange={(_, next) => next && changeStart(next, 'time')} /></View>
+              <View style={styles.choreDateField}><Text style={styles.timeFieldLabel}>END</Text><DateTimePicker value={draft.endsAt} mode="time" minuteInterval={5} display={Platform.OS === 'ios' ? 'compact' : 'default'} themeVariant={dark ? 'dark' : 'light'} onChange={(_, next) => next && update({ endsAt: mergeEventDate(draft.endsAt, next, 'time') })} /></View>
+            </View>
+            {draft.endsAt <= draft.startsAt && <Text style={styles.inlineError}>End time must be after the start time.</Text>}
+          </>}
+
+          <Text style={styles.fieldLabel}>WHO IS THIS FOR?</Text>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choreOwnerChoices}>
+            <Pressable onPress={() => update({ assignedPersonId: null })} style={[styles.choreOwnerChip, draft.assignedPersonId === null && styles.choreOwnerChipActive]}>
+              <Ionicons name="people-outline" size={16} color={draft.assignedPersonId === null ? '#fff' : styles.iconColor.color} />
+              <Text style={[styles.choreOwnerText, draft.assignedPersonId === null && styles.choreOwnerTextActive]}>Everyone</Text>
+            </Pressable>
+            {profiles.map((profile) => {
+              const active = draft.assignedPersonId === profile.id;
+              return <Pressable key={profile.id} onPress={() => update({ assignedPersonId: profile.id })} style={[styles.choreOwnerChip, active && styles.choreOwnerChipActive]}>
+                <View style={[styles.choreOwnerAvatar, { backgroundColor: active ? '#fff' : profile.color }]}><Text style={[styles.avatarText, { color: active ? '#2257F4' : profile.ink }]}>{initials(profile.name)}</Text></View>
+                <Text style={[styles.choreOwnerText, active && styles.choreOwnerTextActive]}>{profile.name}</Text>
+              </Pressable>;
+            })}
+          </ScrollView>
+
+          <Text style={styles.fieldLabel}>LOCATION</Text>
+          <TextInput value={draft.location} onChangeText={(location) => update({ location })} placeholder="Place or address" placeholderTextColor="#8B93A5" style={styles.modalInput} />
+
+          <Text style={styles.fieldLabel}>REPEAT</Text>
+          <View style={styles.choreOptionWrap}>{repeatOptions.map((option) => {
+            const active = draft.recurrenceRule === option.rule;
+            return <Pressable key={option.label} onPress={() => update({ recurrenceRule: option.rule })} style={[styles.choiceChip, active && styles.choiceChipActive]}><Text style={[styles.choiceChipText, active && styles.choiceChipTextActive]}>{option.label}</Text></Pressable>;
+          })}</View>
+
+          <Text style={styles.fieldLabel}>REMINDER</Text>
+          <View style={styles.choreOptionWrap}>{reminderOptions.map((option) => {
+            const active = draft.reminderMinutes === option.value;
+            return <Pressable key={option.label} onPress={() => update({ reminderMinutes: option.value })} style={[styles.choiceChip, active && styles.choiceChipActive]}><Text style={[styles.choiceChipText, active && styles.choiceChipTextActive]}>{option.label}</Text></Pressable>;
+          })}</View>
+
+          <Text style={styles.fieldLabel}>NOTES</Text>
+          <TextInput value={draft.details} onChangeText={(details) => update({ details })} multiline placeholder="Confirmation number, instructions, links, or preparation details" placeholderTextColor="#8B93A5" style={[styles.modalInput, styles.modalTextArea]} />
+
+          <View style={styles.manualEventToggle}>
+            <View style={styles.flex}><Text style={styles.settingTitle}>Also copy to my phone calendar</Text><Text style={styles.muted}>Uses the write-back calendar selected in Calendar connections</Text></View>
+            <Switch value={draft.writeToDevice} onValueChange={(writeToDevice) => update({ writeToDevice })} trackColor={{ true: '#6687FF' }} />
+          </View>
+
+          <Pressable disabled={invalid || saving} onPress={() => void onSave(draft)} style={[styles.saveButton, (invalid || saving) && styles.disabled]}>
+            <Text style={styles.saveButtonText}>{saving ? 'Adding event…' : 'Add event'}</Text>
+          </Pressable>
+        </ScrollView>
+      </View>
+      <StatusBar style={dark ? 'light' : 'dark'} />
+    </KeyboardAvoidingView>
+  </Modal>;
+}
+
 function QuickAddModal({
   visible,
   onClose,
@@ -3201,6 +3665,7 @@ function QuickAddModal({
   currentUserId,
   saving,
   onSave,
+  onEventSource,
   dark,
 }: any) {
   const [choreDraft, setChoreDraft] = useState<ChoreFormValue>(() => defaultChoreForm(profiles, currentUserId));
@@ -3218,14 +3683,26 @@ function QuickAddModal({
   return <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
     <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.modalBackdrop}>
       <Pressable style={styles.modalDismiss} onPress={onClose} />
-      <View style={[styles.modalSheet, type === 'Chore' && styles.choreModalSheet]}>
+      <View style={[styles.modalSheet, (type === 'Chore' || type === 'Event') && styles.choreModalSheet]}>
         <View style={styles.modalHandle} />
         <View style={styles.modalHead}>
           <View><Text style={styles.eyebrow}>QUICK ADD</Text><Text style={styles.modalTitle}>Share with the family</Text></View>
           <Pressable onPress={onClose} style={styles.iconButton}><Ionicons name="close" size={21} color={styles.iconColor.color} /></Pressable>
         </View>
         <View style={styles.typeTabs}>{['Event', 'Chore', 'Note', 'Message'].map((item) => <Pressable key={item} onPress={() => setType(item)} style={[styles.typeTab, type === item && styles.typeTabActive]}><Text style={[styles.typeTabText, type === item && styles.typeTabTextActive]}>{item}</Text></Pressable>)}</View>
-        {type === 'Chore' ? <ScrollView keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false} contentContainerStyle={styles.choreFormContent}>
+        {type === 'Event' ? <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.eventEntryContent}>
+          <Text style={styles.eventEntryGroupLabel}>CREATE</Text>
+          <View style={styles.eventEntryGrid}>
+            <EventEntryChoice styles={styles} icon="create-outline" color="#2257F4" title="Enter manually" detail="Date, time, people, repeat, place, and reminder" onPress={() => onEventSource('manual')} />
+            <EventEntryChoice styles={styles} icon="sparkles" color="#7047EE" title="Ask Coh" detail="Describe it naturally; Coh asks for missing details" onPress={() => onEventSource('coh')} />
+          </View>
+          <Text style={styles.eventEntryGroupLabel}>BRING INTO COHO</Text>
+          <View style={styles.eventEntryGrid}>
+            <EventEntryChoice styles={styles} icon="mail-unread-outline" color="#FF7A2E" title="Find in email" detail="Review and approve events found in Family Inbox" onPress={() => onEventSource('email')} />
+            <EventEntryChoice styles={styles} icon="calendar-outline" color="#19A47B" title="Import from calendar" detail="Connect a provider and choose calendars to sync" onPress={() => onEventSource('calendar')} />
+          </View>
+          <View style={styles.eventEntrySafety}><Ionicons name="shield-checkmark-outline" size={19} color="#19A47B" /><Text style={styles.eventEntrySafetyText}>Manual entry always works without Coh. Email suggestions never reach the family calendar until someone approves them.</Text></View>
+        </ScrollView> : type === 'Chore' ? <ScrollView keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false} contentContainerStyle={styles.choreFormContent}>
           <ChoreFormFields value={choreDraft} onChange={updateChore} profiles={profiles} styles={styles} dark={dark} autoFocus />
           <Pressable disabled={invalidChore || saving} onPress={() => void onSave(choreDraft)} style={[styles.saveButton, (invalidChore || saving) && styles.disabled]}>
             <Text style={styles.saveButtonText}>{saving ? 'Adding chore…' : 'Add chore'}</Text>
@@ -3235,12 +3712,37 @@ function QuickAddModal({
           <TextInput value={title} onChangeText={setTitle} autoFocus placeholder={`Add a ${type.toLowerCase()}…`} placeholderTextColor="#8B93A5" style={styles.modalInput} />
           <Text style={styles.fieldLabel}>Details</Text>
           <TextInput value={details} onChangeText={setDetails} multiline placeholder="Location, instructions, links, or anything the family should know" placeholderTextColor="#8B93A5" style={[styles.modalInput, styles.modalTextArea]} />
-          <Pressable disabled={!title.trim()} onPress={() => void onSave()} style={[styles.saveButton, !title.trim() && styles.disabled]}><Text style={styles.saveButtonText}>{type === 'Event' ? 'Continue with Coh' : `Add ${type.toLowerCase()}`}</Text></Pressable>
+          <Pressable disabled={!title.trim()} onPress={() => void onSave()} style={[styles.saveButton, !title.trim() && styles.disabled]}><Text style={styles.saveButtonText}>{`Add ${type.toLowerCase()}`}</Text></Pressable>
         </>}
       </View>
       <StatusBar style={dark ? 'light' : 'dark'} />
     </KeyboardAvoidingView>
   </Modal>;
+}
+
+function EventEntryChoice({
+  styles,
+  icon,
+  color,
+  title,
+  detail,
+  onPress,
+}: {
+  styles: any;
+  icon: string;
+  color: string;
+  title: string;
+  detail: string;
+  onPress: () => void;
+}) {
+  return <Pressable accessibilityRole="button" onPress={onPress} style={styles.eventEntryChoice}>
+    <View style={[styles.eventEntryIcon, { backgroundColor: `${color}18` }]}>
+      <Ionicons name={icon as any} size={22} color={color} />
+    </View>
+    <Text style={styles.eventEntryTitle}>{title}</Text>
+    <Text style={styles.eventEntryDetail}>{detail}</Text>
+    <Ionicons name="chevron-forward" size={17} color={color} />
+  </Pressable>;
 }
 
 function ChoreFormFields({
@@ -3389,6 +3891,10 @@ function createStyles(t: Theme) {
     toast: { position: 'absolute', left: 18, right: 18, bottom: 78, minHeight: 50, borderRadius: 16, paddingHorizontal: 14, backgroundColor: t.surfaceStrong, borderWidth: 1, borderColor: t.line, flexDirection: 'row', alignItems: 'center', gap: 8, shadowColor: '#000', shadowOpacity: .16, shadowRadius: 16, shadowOffset: { width: 0, height: 7 } }, toastText: { color: t.text, fontSize: 11, fontWeight: '700', flex: 1 },
     calendarTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 14 }, smallButton: { width: 38, height: 38, borderRadius: 12, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, alignItems: 'center', justifyContent: 'center' }, calendarPeriod: { color: t.text, fontWeight: '900', fontSize: 17, textAlign: 'center', letterSpacing: -.4 }, calendarTodayLink: { color: t.primary, fontSize: 8, fontWeight: '900', textAlign: 'center', marginTop: 3, letterSpacing: .7 }, weekRow: { flexDirection: 'row', justifyContent: 'space-between', backgroundColor: t.surface, borderRadius: 18, borderWidth: 1, borderColor: t.line, padding: 7 }, dayBubble: { width: 40, height: 58, borderRadius: 13, alignItems: 'center', justifyContent: 'center' }, dayBubbleActive: { backgroundColor: t.primary }, dayLabel: { color: t.muted, fontSize: 7, fontWeight: '800' }, dayNumber: { color: t.text, fontSize: 17, fontWeight: '800', marginTop: 3 }, dayTextActive: { color: '#fff' }, timelineRow: { minHeight: 76, borderRadius: 18, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, flexDirection: 'row', alignItems: 'center', padding: 12, gap: 10 }, timelineLine: { width: 4, height: 42, borderRadius: 3 }, timelineTime: { color: t.muted, fontSize: 10, width: 50, fontWeight: '700' }, timelineTitle: { color: t.text, fontSize: 13, fontWeight: '800', flexShrink: 1 }, eventSourceTitleRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 6 }, eventSourcePill: { borderRadius: 99, paddingHorizontal: 7, paddingVertical: 3 }, eventSourceText: { fontSize: 7, fontWeight: '900', letterSpacing: .3 }, eventDetailSource: { fontSize: 9, fontWeight: '800', marginTop: 4 }, syncCard: { minHeight: 67, borderRadius: 18, padding: 13, flexDirection: 'row', gap: 10, alignItems: 'center', backgroundColor: `${t.primary}0C`, borderWidth: 1, borderColor: `${t.primary}24` }, syncTitle: { color: t.text, fontSize: 11, fontWeight: '800' },
     calendarScrollContent: { padding: 14, paddingBottom: 34, gap: 12 },
+    calendarBottomActions: { gap: 10, marginTop: 4 },
+    calendarAddAction: { minHeight: 76, borderRadius: 20, paddingHorizontal: 15, flexDirection: 'row', alignItems: 'center', gap: 11, backgroundColor: t.primary, shadowColor: t.primary, shadowOpacity: .2, shadowRadius: 10, shadowOffset: { width: 0, height: 5 } },
+    calendarAddActionTitle: { color: '#fff', fontSize: 12, fontWeight: '900' },
+    calendarAddActionDetail: { color: '#FFFFFFC4', fontSize: 8, lineHeight: 12, fontWeight: '700', marginTop: 3 },
     calendarViewTabs: { minHeight: 48, padding: 4, borderRadius: 17, flexDirection: 'row', gap: 5, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line },
     calendarViewTab: { flex: 1, minHeight: 38, borderRadius: 13, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6 },
     calendarViewTabActive: { backgroundColor: t.primary, shadowColor: t.primary, shadowOpacity: .22, shadowRadius: 8, shadowOffset: { width: 0, height: 4 } },
@@ -3476,6 +3982,19 @@ function createStyles(t: Theme) {
     chiefHero: { minHeight: 210, borderRadius: 24, padding: 22, justifyContent: 'center' }, chiefBadge: { width: 48, height: 48, borderRadius: 16, backgroundColor: '#fff', alignItems: 'center', justifyContent: 'center', marginBottom: 14 }, chiefHeroTitle: { color: '#fff', fontSize: 28, lineHeight: 32, fontWeight: '800', letterSpacing: -1, marginTop: 5 }, chiefSettingCard: { borderRadius: 19, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, padding: 13, gap: 12 }, settingRowTop: { flexDirection: 'row', alignItems: 'center', gap: 10 }, chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 }, choiceChip: { minHeight: 34, borderRadius: 11, borderWidth: 1, borderColor: t.line, paddingHorizontal: 11, alignItems: 'center', justifyContent: 'center', backgroundColor: t.surfaceStrong }, choiceChipActive: { backgroundColor: t.primary, borderColor: t.primary }, choiceChipText: { color: t.text, fontSize: 9, fontWeight: '800' }, choiceChipTextActive: { color: '#fff' }, preferenceGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 9 }, preferenceTile: { width: '48.5%', minHeight: 58, borderRadius: 15, padding: 11, flexDirection: 'row', gap: 8, alignItems: 'center', backgroundColor: t.surface, borderWidth: 1, borderColor: t.line }, preferenceTileActive: { borderColor: '#19A47B55', backgroundColor: '#19A47B0D' }, preferenceText: { color: t.text, fontSize: 10, fontWeight: '700', flex: 1 }, memberChip: { minHeight: 36, borderRadius: 18, borderWidth: 1, borderColor: t.line, paddingHorizontal: 14, alignItems: 'center', justifyContent: 'center', backgroundColor: t.surface }, memberChipActive: { backgroundColor: t.primary, borderColor: t.primary }, followUpCard: { minHeight: 72, borderRadius: 18, padding: 12, flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line },
     personSetting: { minHeight: 65, borderRadius: 17, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, padding: 11, flexDirection: 'row', alignItems: 'center', gap: 10 }, settingRow: { minHeight: 70, borderRadius: 17, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, padding: 13, flexDirection: 'row', alignItems: 'center', gap: 11 }, settingTitle: { color: t.text, fontSize: 12, fontWeight: '800' },
     modalBackdrop: { flex: 1, backgroundColor: '#0C111D88', justifyContent: 'flex-end' }, modalDismiss: { flex: 1 }, modalSheet: { backgroundColor: t.surfaceStrong, borderTopLeftRadius: 28, borderTopRightRadius: 28, paddingHorizontal: 19, paddingTop: 9, paddingBottom: Platform.OS === 'ios' ? 28 : 18 }, choreModalSheet: { maxHeight: '94%', paddingBottom: Platform.OS === 'ios' ? 12 : 8 }, modalHandle: { width: 39, height: 4, borderRadius: 2, backgroundColor: t.line, alignSelf: 'center', marginBottom: 15 }, modalHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' }, modalTitle: { color: t.text, fontSize: 23, fontWeight: '800', letterSpacing: -.7 }, typeTabs: { flexDirection: 'row', borderRadius: 14, padding: 4, backgroundColor: t.canvas, marginTop: 19 }, typeTab: { flex: 1, minHeight: 38, borderRadius: 10, alignItems: 'center', justifyContent: 'center' }, typeTabActive: { backgroundColor: t.surfaceStrong }, typeTabText: { color: t.muted, fontSize: 10, fontWeight: '700' }, typeTabTextActive: { color: t.primary }, fieldLabel: { color: t.muted, fontSize: 9, fontWeight: '800', marginTop: 15, marginBottom: 6 }, modalInput: { minHeight: 46, borderRadius: 13, borderWidth: 1, borderColor: t.line, backgroundColor: t.surface, color: t.text, paddingHorizontal: 12 }, modalTextArea: { minHeight: 83, paddingTop: 12, textAlignVertical: 'top' }, saveButton: { minHeight: 48, borderRadius: 15, backgroundColor: t.primary, alignItems: 'center', justifyContent: 'center', marginTop: 18 }, saveButtonText: { color: '#fff', fontSize: 12, fontWeight: '800' }, disabled: { opacity: .45 },
+    eventEntryContent: { paddingTop: 16, paddingBottom: 8, gap: 10 },
+    eventEntryGroupLabel: { color: t.muted, fontSize: 8, fontWeight: '900', letterSpacing: 1.2, marginTop: 4 },
+    eventEntryGrid: { flexDirection: 'row', gap: 9 },
+    eventEntryChoice: { flex: 1, minHeight: 128, borderRadius: 19, padding: 13, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line },
+    eventEntryIcon: { width: 39, height: 39, borderRadius: 13, alignItems: 'center', justifyContent: 'center', marginBottom: 12 },
+    eventEntryTitle: { color: t.text, fontSize: 11, lineHeight: 14, fontWeight: '900' },
+    eventEntryDetail: { color: t.muted, fontSize: 8, lineHeight: 12, fontWeight: '700', marginTop: 5 },
+    eventEntrySafety: { minHeight: 62, borderRadius: 16, padding: 12, flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: '#19A47B10', borderWidth: 1, borderColor: '#19A47B35', marginTop: 2 },
+    eventEntrySafetyText: { flex: 1, color: t.text, fontSize: 9, lineHeight: 14, fontWeight: '700' },
+    manualEventToggle: { minHeight: 62, borderRadius: 16, marginTop: 14, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line },
+    manualDateField: { minHeight: 50, borderRadius: 14, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', backgroundColor: t.surface, borderWidth: 1, borderColor: t.line },
+    timeFieldLabel: { color: t.muted, fontSize: 7, fontWeight: '900', letterSpacing: .7 },
+    inlineError: { color: '#D64545', fontSize: 9, fontWeight: '700', marginTop: 6 },
     privacyCard: { minHeight: 66, borderRadius: 16, padding: 12, marginTop: 16, flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: '#19A47B12', borderWidth: 1, borderColor: '#19A47B35' }, privacyText: { color: t.text, fontSize: 10, lineHeight: 15, flex: 1, fontWeight: '600' }, sharedAttachment: { minHeight: 62, borderRadius: 15, padding: 12, marginTop: 10, flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line }, sharePreviewInput: { minHeight: 110, paddingTop: 12, textAlignVertical: 'top' }, shareError: { color: '#D64545', fontSize: 10, marginTop: 8 }, shareActions: { flexDirection: 'row', gap: 10, marginTop: 16 }, cancelButton: { flex: 1, minHeight: 48, borderRadius: 15, borderWidth: 1, borderColor: t.line, alignItems: 'center', justifyContent: 'center' }, cancelButtonText: { color: t.text, fontSize: 12, fontWeight: '800' }, approveButton: { flex: 1.4, minHeight: 48, borderRadius: 15, backgroundColor: t.primary, flexDirection: 'row', gap: 7, alignItems: 'center', justifyContent: 'center' },
     cohThinking: { alignSelf: 'flex-start', flexDirection: 'row', alignItems: 'center', gap: 8, marginLeft: 40, minHeight: 38, paddingHorizontal: 13, borderRadius: 16, backgroundColor: '#7047EE14', borderWidth: 1, borderColor: '#7047EE35' },
     chatModeTabs: { flexDirection: 'row', gap: 8, paddingHorizontal: 14, paddingVertical: 9, backgroundColor: t.surfaceStrong, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: t.line }, chatModeTab: { flex: 1, minHeight: 39, borderRadius: 13, flexDirection: 'row', gap: 7, alignItems: 'center', justifyContent: 'center', backgroundColor: t.surface, borderWidth: 1, borderColor: t.line }, chatModeTabActive: { backgroundColor: t.primary, borderColor: t.primary }, chatModeCohActive: { backgroundColor: '#7047EE', borderColor: '#7047EE' }, chatModeText: { color: t.text, fontSize: 10, fontWeight: '800' }, chatModeTextActive: { color: '#fff' }, emptyChat: { minHeight: 180, alignItems: 'center', justifyContent: 'center', gap: 10, opacity: .82 },

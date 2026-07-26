@@ -87,6 +87,16 @@ export async function listInboundItems(householdId: string) {
   return (data ?? []) as InboundItem[];
 }
 
+export async function countInboundItemsForReview(householdId: string) {
+  const { count, error } = await supabase
+    .from('inbound_items')
+    .select('id', { count: 'exact', head: true })
+    .eq('household_id', householdId)
+    .in('status', ['queued', 'processing', 'needs_review', 'needs_details', 'ready', 'failed']);
+  if (error) throw error;
+  return count ?? 0;
+}
+
 export async function reviewInboundItem(input: {
   itemId: string;
   userId: string;

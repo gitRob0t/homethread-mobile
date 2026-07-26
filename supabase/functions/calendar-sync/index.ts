@@ -391,7 +391,7 @@ async function applyProviderEvent(
     }).eq('id', eventId);
     if (error) throw error;
   } else {
-    const { data: event, error } = await admin.from('events').upsert({
+    const eventPayload = {
       household_id: connection.household_id,
       title: remote.title,
       details: remote.details,
@@ -409,7 +409,18 @@ async function applyProviderEvent(
       provider_etag: remote.etag,
       provider_updated_at: remote.updatedAt,
       updated_at: new Date().toISOString(),
-    }, { onConflict: 'household_id,provider,provider_event_id' }).select('id').single();
+    };
+    const { data: existingEvent, error: existingEventError } = await admin
+      .from('events')
+      .select('id')
+      .eq('household_id', connection.household_id)
+      .eq('provider', connection.provider)
+      .eq('provider_event_id', remote.id)
+      .maybeSingle();
+    if (existingEventError) throw existingEventError;
+    const { data: event, error } = existingEvent
+      ? await admin.from('events').update(eventPayload).eq('id', existingEvent.id).select('id').single()
+      : await admin.from('events').insert(eventPayload).select('id').single();
     if (error) throw error;
     eventId = event.id;
   }
@@ -713,16 +724,18 @@ async function deleteProviderEvent(
 }
 
 async function writeGoogleEvent(token: string, calendarId: string, event: any, link: any) {
+  const allDayStart = String(event.starts_at).slice(0, 10);
+  const allDayEnd = googleAllDayEndDate(allDayStart, event.ends_at);
   const body: Record<string, unknown> = {
     id: link ? undefined : `coho${String(event.id).replaceAll('-', '')}`,
     summary: event.title,
-    description: event.details || undefined,
+    description: calendarDescription(event.details) || undefined,
     location: event.location || undefined,
     start: event.all_day
-      ? { date: String(event.starts_at).slice(0, 10) }
+      ? { date: allDayStart }
       : { dateTime: event.starts_at },
     end: event.all_day
-      ? { date: String(event.ends_at || event.starts_at).slice(0, 10) }
+      ? { date: allDayEnd }
       : { dateTime: event.ends_at || new Date(new Date(event.starts_at).getTime() + 60 * 60_000).toISOString() },
     recurrence: event.recurrence_rule ? [`RRULE:${event.recurrence_rule}`] : undefined,
     extendedProperties: { private: { cohoEventId: event.id } },
@@ -748,7 +761,7 @@ async function writeGoogleEvent(token: string, calendarId: string, event: any, l
 async function writeOutlookEvent(token: string, calendarId: string, event: any, link: any) {
   const body: Record<string, unknown> = {
     subject: event.title,
-    body: { contentType: 'text', content: event.details || '' },
+    body: { contentType: 'text', content: calendarDescription(event.details) },
     start: outlookDate(event.starts_at),
     end: outlookDate(event.ends_at || new Date(new Date(event.starts_at).getTime() + 60 * 60_000).toISOString()),
     isAllDay: Boolean(event.all_day),
@@ -778,6 +791,24 @@ async function writeOutlookEvent(token: string, calendarId: string, event: any, 
     etag: payload.changeKey || link?.provider_etag || null,
     updatedAt: payload.lastModifiedDateTime || new Date().toISOString(),
   };
+}
+
+function calendarDescription(details: unknown) {
+  if (typeof details !== 'string' || !details.trim()) return '';
+  try {
+    const parsed = JSON.parse(details);
+    return typeof parsed?.notes === 'string' ? parsed.notes.slice(0, 20_000) : '';
+  } catch {
+    return details.slice(0, 20_000);
+  }
+}
+
+function googleAllDayEndDate(startDate: string, endsAt: unknown) {
+  const candidate = typeof endsAt === 'string' ? endsAt.slice(0, 10) : '';
+  if (candidate && candidate > startDate) return candidate;
+  const next = new Date(`${startDate}T00:00:00.000Z`);
+  next.setUTCDate(next.getUTCDate() + 1);
+  return next.toISOString().slice(0, 10);
 }
 
 function normalizeGoogleEvent(item: any): NormalizedEvent {
