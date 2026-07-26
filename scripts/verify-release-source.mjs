@@ -66,6 +66,8 @@ if (foundDemoContent.length) {
 const appSource = readFileSync('App.tsx', 'utf8');
 const requiredProductionContracts = [
   ['Command Center', 'the production Command Center'],
+  ['CalendarViewMode', 'the month, week, and agenda calendar foundation'],
+  ['stableCalendarColor', 'stable family-member calendar colors'],
   ['Family chat', 'the separate Family chat workspace'],
   ['Ask Coh', 'the separate Coh workspace'],
   ['integrationCategoryGrid', 'the categorized integrations hub'],
