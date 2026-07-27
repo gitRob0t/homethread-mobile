@@ -261,7 +261,7 @@ export default function FamilyInboxScreen({
         extracted_data: { ...(row.extracted_data ?? {}), sender_trusted: trusted },
       } : row));
       onNotice(trusted
-        ? 'Sender marked trusted. Future mail still requires review.'
+        ? 'Sender marked trusted. This improves Coh’s context; every proposed action still requires review.'
         : 'Sender removed from the trusted list.');
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : 'The sender rule could not be changed.');
@@ -345,7 +345,7 @@ export default function FamilyInboxScreen({
         {!!error && <Text style={styles.error}>{error}</Text>}
         <View style={styles.privacyCard}>
           <Ionicons name="lock-closed" size={18} color="#168866" />
-          <Text style={styles.privacyText}>Email is treated as untrusted. Supported attachments are size-limited, hashed, stored privately, and scanned only to prepare proposals. A person must approve every action.</Text>
+          <Text style={styles.privacyText}>Email is treated as untrusted. Supported attachments are size-limited, hashed, stored privately, and scanned only to prepare proposals. A household owner or adult admin must approve every calendar or task write.</Text>
         </View>
       </ScrollView>
 
@@ -365,7 +365,7 @@ export default function FamilyInboxScreen({
             {!!extraction?.summary && <View style={styles.summaryCard}><Text style={styles.eyebrow}>COH SUMMARY · {Math.round((extraction.confidence ?? 0) * 100)}% CONFIDENCE</Text><Text style={styles.summaryText}>{extraction.summary}</Text></View>}
             {!!extraction?.missing_questions?.length && <View style={styles.questionCard}><Ionicons name="help-circle" size={19} color="#FF9F1C" /><View style={styles.flex}><Text style={styles.cardTitle}>Coh needs a detail</Text>{extraction.missing_questions.map((question) => <Text key={question} style={styles.questionText}>• {question}</Text>)}</View></View>}
             {!!selected.sender && <View style={styles.trustRow}>
-              <View style={styles.flex}><Text style={styles.cardTitle}>Trusted sender</Text><Text style={styles.meta}>This adds context only. Future mail still requires review.</Text></View>
+              <View style={styles.flex}><Text style={styles.cardTitle}>Trusted sender</Text><Text style={styles.meta}>This improves Coh’s context only. It never authorizes an automatic calendar or task write.</Text></View>
               <Switch
                 disabled={busy}
                 value={selected.extracted_data?.sender_trusted === true}
