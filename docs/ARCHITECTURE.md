@@ -11,8 +11,10 @@ Expo/React Native provides the iOS application, Android portability, over-the-ai
 - Authentication: Supabase Auth, verified email, and household invitation tokens
 - Real-time updates: Supabase Realtime on household-scoped tables
 - AI: OpenAI Responses API behind a server-side structured-action boundary
-- Email: Resend receiving webhook, Received Emails API, and transactional email
-- Jobs: Supabase Cron invokes the idempotent briefing worker
+- Email: direct read-only Gmail and Outlook OAuth plus the separate Resend
+  household-forwarding address
+- Jobs: Supabase Cron invokes idempotent briefing, automation, notification,
+  calendar, and mailbox reconciliation workers
 - Notifications: Expo Push Service, with APNs credentials managed through EAS
 - Device integrations: EventKit and Core Location through permissioned Expo modules
 - Commerce handoff: Instacart Developer Platform shopping-list URLs
@@ -28,6 +30,8 @@ Expo/React Native provides the iOS application, Android portability, over-the-ai
 - Coh conversations, durable household actions, action history, and evaluation telemetry
 - notification preferences, devices, outbox, deliveries, and open receipts
 - household inboxes, inbound items, attachments, extraction results, and sender rules
+- mailbox connections, encrypted grants, OAuth state, folder/history cursors,
+  subscription state, and sync telemetry
 - location consent, family locations, and Places
 - grocery items and meal plans
 - trips, trip members, and itinerary items
@@ -47,12 +51,65 @@ The first integrations intentionally use supported public surfaces:
 - selected iOS calendars through EventKit;
 - direct Google and Outlook OAuth with encrypted refresh tokens and incremental
   two-way synchronization;
-- inbound family email through Resend;
+- direct read-only Gmail and Outlook mailbox connections;
+- inbound family forwarding addresses through Resend;
 - shopping-list handoff through Instacart;
 - restaurant discovery through OpenTable;
 - opt-in iPhone location through Core Location.
 
-Coho must not claim unsupported access to Find My, AirTags, Skylight, personal mailboxes, reservation inventory, retailer prices, or payment rails.
+Coho must not claim unsupported access to Find My, AirTags, Skylight,
+iCloud Mail or arbitrary IMAP accounts, reservation inventory, retailer prices,
+or payment rails.
+
+## Direct mailbox ingestion
+
+Direct mailbox connections are different from the household forwarding
+address. A user explicitly connects Gmail or Outlook through server-side OAuth;
+Coho then observes selected folders and turns likely family commitments into
+reviewable Family Inbox proposals.
+
+```text
+Connect Gmail/Outlook
+  -> state + PKCE OAuth callback
+  -> encrypted refresh grant (service role only)
+  -> bounded initial read
+  -> Gmail history / Outlook folder delta cursors
+  -> normalized inbound item + deduplicated attachments
+  -> deterministic and AI extraction
+  -> adult review
+  -> approved event, chore, note, or follow-up
+```
+
+The OAuth callback for both providers is
+`https://PROJECT.supabase.co/functions/v1/mailbox-oauth`. Gmail Pub/Sub pushes
+to `mailbox-webhook?provider=google&token=MAILBOX_WEBHOOK_SECRET`; Microsoft
+Graph posts to `mailbox-webhook` and is authenticated with per-subscription
+`clientState`. The webhook is only a wake-up signal. It never creates an event
+and does not treat email content as an instruction or authorization.
+
+Scopes are deliberately read-only:
+
+- Google: `openid email profile gmail.readonly`
+- Microsoft delegated: `openid email profile offline_access User.Read Mail.Read`
+
+Provider tokens, OAuth verifier state, cursors, and subscriptions are
+service-role-only. Mobile clients receive a sanitized connection summary, never
+access or refresh tokens. Disconnect deletes the stored grant and revokes it
+where the provider supports direct revocation.
+
+Gmail uses `historyId` and Outlook uses a separate delta link for every selected
+folder. Provider message IDs make ingestion idempotent. A ten-minute scheduled
+sync renews Gmail watches and Graph subscriptions, catches missed webhooks, and
+recovers an expired Gmail cursor with a bounded recent rescan. Sync runs record
+counts and errors so renewal and extraction failures can be alerted.
+
+Production availability is gated by Google restricted-scope verification (and
+any required assessment), Microsoft publisher/tenant-consent requirements,
+published privacy and deletion controls, verified webhook delivery,
+reconciliation monitoring, and staging tests for revocation, duplicates,
+attachments, and expired cursors. Until a provider passes those gates, its
+connection tile must remain visibly unavailable rather than simulating a
+connection.
 
 ## Coh trust boundary
 
@@ -67,7 +124,13 @@ are recorded rather than merely described.
 
 ## Delivery and review
 
-Inbound email is untrusted. The receiver verifies the provider signature, rejects stale or duplicate deliveries, fetches the body server-side, bounds retained content, and places it in a human review queue. Coh sees an inbound item only after an explicit review action.
+Inbound email is untrusted. The forwarding receiver verifies the provider
+signature; direct connectors validate OAuth grants and provider notification
+secrets. Both paths reject or deduplicate repeated deliveries, fetch bodies and
+allowed attachments server-side, bound retained content, and place candidates
+in a human review queue. Email text may propose an action but never authorize
+one. Coh sees an inbound item only after an explicit review action, and an adult
+must approve every calendar or task write.
 
 The briefing worker calculates each member's local schedule, honors independent push and email preferences, records provider results, and prevents duplicate deliveries for the same time window.
 
