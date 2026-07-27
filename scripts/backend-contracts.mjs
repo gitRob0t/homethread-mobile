@@ -5,7 +5,35 @@ import path from 'node:path';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const read = (relativePath) => readFile(path.join(root, relativePath), 'utf8');
-const [repair, choreScheduling, familyManagement, notificationProfiles, emailSourcesMigration, securityRelease, edgeClient, familyData, emailSources, deviceCalendar, calendarSync, pushNotifications, notificationDispatcher, householdOS, app, deploy, supabaseConfig, invitationFunction, assistant, extractor] = await Promise.all([
+const [
+  repair,
+  choreScheduling,
+  familyManagement,
+  notificationProfiles,
+  emailSourcesMigration,
+  securityRelease,
+  edgeClient,
+  familyData,
+  emailSources,
+  deviceCalendar,
+  calendarSync,
+  pushNotifications,
+  notificationDispatcher,
+  householdOS,
+  app,
+  deploy,
+  supabaseConfig,
+  invitationFunction,
+  assistant,
+  extractor,
+  mailboxMigration,
+  mailboxClient,
+  mailboxOauth,
+  mailboxSync,
+  mailboxWebhook,
+  deploymentDocs,
+  architectureDocs,
+] = await Promise.all([
   read('supabase/migrations/202607230008_edge_function_repairs.sql'),
   read('supabase/migrations/202607230009_chore_scheduling.sql'),
   read('supabase/migrations/202607250001_family_management.sql'),
@@ -26,6 +54,13 @@ const [repair, choreScheduling, familyManagement, notificationProfiles, emailSou
   read('supabase/functions/send-household-invite/index.ts'),
   read('supabase/functions/coh-assistant/index.ts'),
   read('supabase/functions/coh-extract/index.ts'),
+  read('supabase/migrations/202607270001_mailbox_connections.sql'),
+  read('src/services/mailboxConnections.ts'),
+  read('supabase/functions/mailbox-oauth/index.ts'),
+  read('supabase/functions/mailbox-sync/index.ts'),
+  read('supabase/functions/mailbox-webhook/index.ts'),
+  read('docs/DEPLOYMENT.md'),
+  read('docs/ARCHITECTURE.md'),
 ]);
 
 const contracts = [
@@ -81,6 +116,44 @@ const contracts = [
   ['invite deployment preserves its public landing page', deploy, /public_entry_functions=\([\s\S]*send-household-invite[\s\S]*\)/],
   ['invite creation still requires a user session', invitationFunction, /if \(!authorization\) return json\(\{ error: 'Authentication required\.' \}, 401\)/],
   ['invite POST validates the bearer token', invitationFunction, /client\.auth\.getUser\(\)/],
+  ['mailbox token tables are service-role-only', mailboxMigration, /revoke all on table public\.mailbox_connections from anon, authenticated/],
+  ['mailbox refresh grants are stored as ciphertext', mailboxMigration, /refresh_token_ciphertext text/],
+  ['mailbox clients receive only a sanitized RPC result', mailboxMigration, /list_mailbox_connections[\s\S]*connection\.updated_at[\s\S]*grant execute/],
+  ['mailbox message IDs deduplicate provider delivery', mailboxMigration, /inbound_items_mailbox_message_dedupe_idx/],
+  ['pending Family Inbox actions reject non-admin mutations', mailboxMigration, /guard_private_family_inbox_action[\s\S]*old\.source_kind = 'family_inbox'[\s\S]*old\.approved_at is null[\s\S]*is_household_admin/],
+  ['pending Family Inbox action history remains admin-only', mailboxMigration, /members read visible action history[\s\S]*household_action_events\.action_id[\s\S]*action\.approved_at is not null[\s\S]*is_household_admin/],
+  ['mailbox OAuth start is authenticated', mailboxOauth, /client\.auth\.getUser\(\)/],
+  ['mailbox OAuth uses state and PKCE S256', mailboxOauth, /state_hash: await sha256Hex\(state\)[\s\S]*code_challenge_method: 'S256'/],
+  ['mailbox OAuth uses the hosted callback', mailboxOauth, /`\$\{supabaseUrl\}\/functions\/v1\/mailbox-oauth`/],
+  ['Gmail uses its read-only mailbox scope', mailboxOauth, /https:\/\/www\.googleapis\.com\/auth\/gmail\.readonly/],
+  ['Outlook uses delegated read-only mail access', mailboxOauth, /'offline_access', 'User\.Read', 'Mail\.Read'/],
+  ['mailbox disconnect disables future sync', mailboxOauth, /action === 'disconnect'[\s\S]*sync_enabled: false/],
+  ['mailbox sync supports a dedicated scheduler secret', mailboxSync, /x-coho-scheduler-secret[\s\S]*MAILBOX_SYNC_SECRET/],
+  ['Gmail sync uses an incremental history cursor', mailboxSync, /startHistoryId: historyId[\s\S]*messagesAdded/],
+  ['expired Gmail history derives a bounded rescan from the last checkpoint', mailboxSync, /GMAIL_HISTORY_RECOVERY_MIN_DAYS = 7[\s\S]*GMAIL_HISTORY_RECOVERY_MAX_DAYS = 30[\s\S]*last_incremental_sync_at[\s\S]*elapsedDays > GMAIL_HISTORY_RECOVERY_MAX_DAYS[\s\S]*recoveryLookbackDays = Math\.max/],
+  ['malformed Gmail cursors stop instead of silently reseeding', mailboxSync, /cursorBefore\?\.startsWith\('\{'\) && !cursorState[\s\S]*stopped without advancing the mailbox cursor/],
+  ['Gmail watch uses a configured PubSub topic', mailboxSync, /GMAIL_PUBSUB_TOPIC[\s\S]*users\/me\/watch/],
+  ['Outlook sync persists a resumable per-folder delta link', mailboxSync, /@odata\.deltaLink[\s\S]*provider_folder_id: input\.folderId[\s\S]*cursor:\s*failed\s*\?\s*cursorBefore\s*:\s*deltaLink\s*\|\|\s*url\s*\|\|\s*cursorBefore/],
+  ['Outlook attachment listing fetches metadata before bounded downloads', mailboxSync, /\$select': 'id,name,contentType,size,isInline'[\s\S]*attachments\?\$\{attachmentQuery\}[\s\S]*readResponseBytesBounded/],
+  ['mailbox retries reconcile missing as well as failed attachment rows', mailboxSync, /retryIncompleteAttachments[\s\S]*select\('provider_attachment_id, status'\)[\s\S]*completeIds[\s\S]*incomplete/],
+  ['mailbox cursors wait for in-flight extraction leases', mailboxSync, /extractionStatus === 'processing'[\s\S]*Coh extraction is still processing[\s\S]*mailbox cursor was preserved/],
+  ['mailbox cursors do not advance on asynchronous extraction responses', mailboxSync, /extractionResponse\.status === 202[\s\S]*mailbox cursor was preserved/],
+  ['Outlook subscriptions carry derived client state', mailboxSync, /MAILBOX_WEBHOOK_SECRET[\s\S]*clientState[\s\S]*lifecycleNotificationUrl/],
+  ['mailbox ingestion always starts in review', mailboxSync, /status: 'needs_review'[\s\S]*extraction_status: 'queued'/],
+  ['Microsoft Graph validation returns plain text', mailboxWebhook, /validationToken[\s\S]*'Content-Type': 'text\/plain(?:; charset=utf-8)?'/],
+  ['Outlook webhook notifications validate client state', mailboxWebhook, /clientState[\s\S]*expectedState[\s\S]*mismatch/],
+  ['Gmail webhook notifications require the URL secret', mailboxWebhook, /provider === 'google'[\s\S]*searchParams\.get\('token'\) !== webhookSecret/],
+  ['mailbox client calls authenticated OAuth and sync functions', mailboxClient, /invokeEdgeFunction[\s\S]*mailbox-oauth[\s\S]*mailbox-sync/],
+  ['mailbox public entry functions deploy without gateway JWT', deploy, /public_entry_functions=\([\s\S]*mailbox-oauth[\s\S]*mailbox-sync[\s\S]*mailbox-webhook/],
+  ['mailbox deployment validates activation secrets', deploy, /ENABLE_DIRECT_MAILBOX[\s\S]*require_env MAILBOX_TOKEN_ENCRYPTION_KEY[\s\S]*require_env MAILBOX_SYNC_SECRET[\s\S]*require_env MAILBOX_WEBHOOK_SECRET/],
+  ['mailbox OAuth callback is public in Supabase config', supabaseConfig, /\[functions\.mailbox-oauth\][\s\S]*verify_jwt = false/],
+  ['mailbox scheduler validates requests inside its function', supabaseConfig, /\[functions\.mailbox-sync\][\s\S]*verify_jwt = false/],
+  ['mailbox provider webhook is public in Supabase config', supabaseConfig, /\[functions\.mailbox-webhook\][\s\S]*verify_jwt = false/],
+  ['deployment documents the exact shared mailbox callback', deploymentDocs, /https:\/\/YOUR_PROJECT\.supabase\.co\/functions\/v1\/mailbox-oauth/],
+  ['deployment documents Gmail webhook authentication', deploymentDocs, /mailbox-webhook\?provider=google&token=MAILBOX_WEBHOOK_SECRET/],
+  ['deployment documents mailbox reconciliation cadence', deploymentDocs, /mailbox-sync`: every 10 minutes/],
+  ['deployment gates direct mailbox provider availability', deploymentDocs, /Activation gates[\s\S]*least-privilege scopes[\s\S]*Family Inbox review/],
+  ['architecture separates mailbox notifications from authorization', architectureDocs, /webhook is only a wake-up signal[\s\S]*never creates an event/],
 ];
 
 for (const [name, source, pattern] of contracts) {
@@ -97,6 +170,16 @@ assert.doesNotMatch(
   `${deviceCalendar}\n${calendarSync}`,
   /onConflict:\s*['"]household_id,provider,provider_event_id['"]/,
   'Provider imports must not target the local-event partial unique index through an unqualified upsert.',
+);
+assert.doesNotMatch(
+  `${mailboxOauth}\n${mailboxSync}`,
+  /gmail\.(?:modify|send)|mail\.google\.com|Mail\.ReadWrite|Mail\.Send/i,
+  'Direct mailbox OAuth must remain read-only and least privilege.',
+);
+assert.doesNotMatch(
+  mailboxMigration,
+  /status text,\s*status text,/,
+  'Sanitized mailbox connection RPC must not declare duplicate output columns.',
 );
 
 console.log(`✓ ${contracts.length} backend reliability contracts passed`);
