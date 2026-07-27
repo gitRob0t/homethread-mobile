@@ -228,8 +228,8 @@ Deno.serve(async (request) => {
         .eq('household_id', item.household_id)
         .eq('user_id', callerId)
         .maybeSingle();
-      if (!membership || membership.role === 'child') {
-        return json({ error: 'An adult household member must review inbox items.' }, 403);
+      if (!membership || !['owner', 'admin'].includes(String(membership.role))) {
+        return json({ error: 'A household owner or adult admin must review inbox items.' }, 403);
       }
     }
 
@@ -532,7 +532,7 @@ ${JSON.stringify((people ?? []).map((person: any) => ({ name: person.display_nam
       .from('household_members')
       .select('user_id, role')
       .eq('household_id', item.household_id)
-      .neq('role', 'child');
+      .in('role', ['owner', 'admin']);
     if (createdActions.length || result.missing_questions?.length) {
       const notificationRows = (recipients ?? []).map((recipient) => ({
         household_id: item.household_id,
