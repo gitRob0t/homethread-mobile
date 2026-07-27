@@ -458,6 +458,7 @@ function CohoApp() {
   const [initialRecapId, setInitialRecapId] = useState<string | null>(null);
   const [briefingSnapshots, setBriefingSnapshots] = useState<BriefingSnapshot[]>([]);
   const [inboxReviewCount, setInboxReviewCount] = useState(0);
+  const [mailboxConnectionRefreshToken, setMailboxConnectionRefreshToken] = useState(0);
   const [integrationReturnView, setIntegrationReturnView] = useState<IntegrationCategoryView | null>(null);
   const [integrationCategoryBackView, setIntegrationCategoryBackView] = useState<'Menu' | 'Integrations'>('Menu');
   const [secondUserWelcomeOpen, setSecondUserWelcomeOpen] = useState(false);
@@ -1333,6 +1334,23 @@ function CohoApp() {
   }
 
   async function openDeepLink(url: string) {
+    const mailboxConnection = url.match(
+      /^(?:coho|homethread):\/\/mail-connected\/(google|outlook)(?:[/?#]|$)/i,
+    );
+    if (mailboxConnection) {
+      const provider = mailboxConnection[1].toLowerCase() as 'google' | 'outlook';
+      const label = provider === 'google' ? 'Gmail' : 'Outlook';
+      const connectionId = url.match(/[?&]connectionId=([^&#]+)/i)?.[1];
+      setEmailSetupProvider(provider === 'google' ? 'google' : 'microsoft');
+      setMailboxConnectionRefreshToken((current) => current + 1);
+      setIntegrationReturnView('Email');
+      setMoreView('Email Connections');
+      setTab('More');
+      showNotice(connectionId
+        ? `${label} authorization returned. Coho is verifying the connection and first sync.`
+        : `${label} authorization was not completed. Nothing new was connected.`);
+      return;
+    }
     const calendarConnection = url.match(
       /^(?:coho|homethread):\/\/calendar-connected\/(google|outlook)(?:[/?#]|$)/i,
     );
@@ -1812,7 +1830,9 @@ function CohoApp() {
   const title = tab === 'Today'
     ? 'Command Center'
     : tab === 'More' && moreView !== 'Menu'
-      ? moreView
+      ? moreView === 'Email Connections'
+        ? 'Email'
+        : moreView
       : tab;
   const currentMembershipRole = profiles.find(
     (profile) => profile.linkedUserId === currentUserId,
@@ -1993,7 +2013,12 @@ function CohoApp() {
             userId={currentUserId}
             initialProvider={emailSetupProvider}
             canManage={canManageFamily}
+            refreshToken={mailboxConnectionRefreshToken}
             onNotice={showNotice}
+            onConnectionStateChange={(provider, isConnected) => setConnected((current) => ({
+              ...current,
+              [provider === 'google' ? 'Gmail / Google Workspace' : 'Outlook / Microsoft 365']: isConnected,
+            }))}
             onReviewInbox={() => { setInitialInboxItemId(null); setMoreView('Family Inbox'); setTab('More'); }}
             onSetupInbox={() => { setInitialInboxItemId(null); setMoreView('Family Inbox'); setTab('More'); }}
           />}
