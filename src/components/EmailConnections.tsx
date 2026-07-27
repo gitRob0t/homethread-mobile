@@ -1,12 +1,14 @@
 import { Ionicons } from '@expo/vector-icons';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  Linking,
   Pressable,
   ScrollView,
   Share,
   StyleSheet,
+  Switch,
   Text,
   TextInput,
   View,
@@ -21,6 +23,17 @@ import {
   suggestedEmailProvider,
 } from '../services/emailSources';
 import {
+  disconnectMailboxConnection,
+  getMailboxCapabilities,
+  listMailboxConnections,
+  type MailboxCapabilities,
+  type MailboxConnection,
+  type MailboxProvider,
+  saveMailboxConnectionSettings,
+  startMailboxConnection,
+  syncMailboxConnection,
+} from '../services/mailboxConnections';
+import {
   countInboundItemsForReview,
   type HouseholdInbox,
   getHouseholdInbox,
@@ -33,14 +46,17 @@ type Props = {
   userId: string | null;
   initialProvider?: EmailSourceProvider;
   canManage: boolean;
+  refreshToken?: number;
   onNotice: (message: string) => void;
+  onConnectionStateChange?: (provider: MailboxProvider, connected: boolean) => void;
   onReviewInbox: () => void;
   onSetupInbox: () => void;
 };
 
-const providers: Array<{
-  id: EmailSourceProvider;
+const directProviders: Array<{
+  id: MailboxProvider;
   title: string;
+  shortTitle: string;
   detail: string;
   icon: string;
   color: string;
@@ -48,21 +64,34 @@ const providers: Array<{
   {
     id: 'google',
     title: 'Gmail or Google Workspace',
-    detail: 'Includes custom-domain mail hosted by Google.',
+    shortTitle: 'Gmail',
+    detail: 'Securely read selected Gmail labels with Google authorization.',
     icon: 'logo-google',
     color: '#4285F4',
   },
   {
-    id: 'microsoft',
+    id: 'outlook',
     title: 'Outlook or Microsoft 365',
-    detail: 'Personal Outlook and custom-domain Microsoft mail.',
+    shortTitle: 'Outlook',
+    detail: 'Securely read selected Outlook folders with Microsoft authorization.',
     icon: 'logo-microsoft',
     color: '#0078D4',
   },
+];
+
+type ForwardingProvider = 'icloud' | 'yahoo' | 'custom';
+
+const fallbackProviders: Array<{
+  id: ForwardingProvider;
+  title: string;
+  detail: string;
+  icon: string;
+  color: string;
+}> = [
   {
     id: 'icloud',
     title: 'iCloud Mail',
-    detail: 'Includes custom domains hosted by iCloud+.',
+    detail: 'Forward selected messages from iCloud or an iCloud+ custom domain.',
     icon: 'logo-apple',
     color: '#5A667A',
   },
@@ -82,13 +111,23 @@ const providers: Array<{
   },
 ];
 
+const providerMetadata = [
+  ...directProviders.map((provider) => ({
+    ...provider,
+    legacyId: provider.id === 'outlook' ? 'microsoft' : provider.id,
+  })),
+  ...fallbackProviders.map((provider) => ({ ...provider, legacyId: provider.id })),
+];
+
 export default function EmailConnectionsScreen({
   dark,
   householdId,
   userId,
   initialProvider = 'custom',
   canManage,
+  refreshToken = 0,
   onNotice,
+  onConnectionStateChange,
   onReviewInbox,
   onSetupInbox,
 }: Props) {
@@ -97,44 +136,243 @@ export default function EmailConnectionsScreen({
   const placeholderColor = dark ? '#7F8AA0' : '#8B93A5';
   const [inbox, setInbox] = useState<HouseholdInbox | null>(null);
   const [sources, setSources] = useState<HouseholdEmailSource[]>([]);
+  const [mailboxConnections, setMailboxConnections] = useState<MailboxConnection[]>([]);
+  const [mailboxCapabilities, setMailboxCapabilities] = useState<MailboxCapabilities | null>(null);
   const [reviewCount, setReviewCount] = useState(0);
   const [email, setEmail] = useState('');
-  const [provider, setProvider] = useState<EmailSourceProvider>(initialProvider);
-  const [providerOverridden, setProviderOverridden] = useState(initialProvider !== 'custom');
-  const [busy, setBusy] = useState(false);
+  const [provider, setProvider] = useState<ForwardingProvider>(
+    isForwardingProvider(initialProvider) ? initialProvider : 'custom',
+  );
+  const [providerOverridden, setProviderOverridden] = useState(
+    isForwardingProvider(initialProvider) && initialProvider !== 'custom',
+  );
+  const [busyAction, setBusyAction] = useState<string | null>(null);
   const [error, setError] = useState('');
+  const loadSequence = useRef(0);
+  const requestedHouseholdId = useRef<string | null | undefined>(undefined);
 
-  async function load() {
-    if (!householdId) {
+  async function load(options: { preserveError?: boolean } = {}) {
+    const loadId = ++loadSequence.current;
+    const targetHouseholdId = householdId;
+    if (requestedHouseholdId.current !== targetHouseholdId) {
+      requestedHouseholdId.current = targetHouseholdId;
       setInbox(null);
       setSources([]);
+      setMailboxConnections([]);
+      setMailboxCapabilities(null);
       setReviewCount(0);
+      onConnectionStateChange?.('google', false);
+      onConnectionStateChange?.('outlook', false);
+    }
+    if (!targetHouseholdId) {
+      try {
+        const capabilities = await getMailboxCapabilities();
+        if (loadId !== loadSequence.current) return;
+        setMailboxCapabilities(capabilities);
+        if (!options.preserveError) setError('');
+      } catch (nextError) {
+        if (loadId !== loadSequence.current) return;
+        setMailboxCapabilities(null);
+        if (!options.preserveError) {
+          setError(errorMessage(nextError, 'Direct mailbox setup status could not be checked.'));
+        }
+      }
       return;
     }
-    const [nextInbox, nextSources, nextReviewCount] = await Promise.all([
-      getHouseholdInbox(householdId),
-      listHouseholdEmailSources(householdId),
-      countInboundItemsForReview(householdId).catch(() => 0),
+    const [
+      inboxResult,
+      sourcesResult,
+      reviewResult,
+      connectionsResult,
+      capabilitiesResult,
+    ] = await Promise.allSettled([
+      getHouseholdInbox(targetHouseholdId),
+      listHouseholdEmailSources(targetHouseholdId),
+      countInboundItemsForReview(targetHouseholdId),
+      listMailboxConnections(targetHouseholdId),
+      getMailboxCapabilities(),
     ]);
-    setInbox(nextInbox);
-    setSources(nextSources);
-    setReviewCount(nextReviewCount);
+    if (loadId !== loadSequence.current) return;
+
+    if (inboxResult.status === 'fulfilled') setInbox(inboxResult.value);
+    if (sourcesResult.status === 'fulfilled') setSources(sourcesResult.value);
+    if (reviewResult.status === 'fulfilled') setReviewCount(reviewResult.value);
+    const capabilities = capabilitiesResult.status === 'fulfilled'
+      ? capabilitiesResult.value
+      : null;
+    setMailboxCapabilities(capabilities);
+    if (connectionsResult.status === 'fulfilled') {
+      setMailboxConnections(connectionsResult.value);
+      for (const providerId of ['google', 'outlook'] as const) {
+        onConnectionStateChange?.(
+          providerId,
+          capabilities?.enabled === true
+          && capabilities.providers[providerId] === true
+          && connectionsResult.value.some((connection) =>
+            connection.provider === providerId
+            && ['active', 'syncing', 'paused'].includes(connection.status)),
+        );
+      }
+    }
+
+    const failure = [capabilitiesResult, connectionsResult, inboxResult, sourcesResult, reviewResult]
+      .find((result) => result.status === 'rejected');
+    if (failure?.status === 'rejected') {
+      if (!options.preserveError) {
+        setError(errorMessage(failure.reason, 'Some email connection details could not be loaded.'));
+      }
+    } else if (!options.preserveError) {
+      setError('');
+    }
   }
 
   useEffect(() => {
-    void load().catch((nextError) => {
-      setError(nextError instanceof Error ? nextError.message : 'Email connections could not be loaded.');
-    });
-  }, [householdId]);
+    void load();
+  }, [householdId, refreshToken]);
 
   useEffect(() => {
-    setProvider(initialProvider);
-    setProviderOverridden(initialProvider !== 'custom');
+    if (isForwardingProvider(initialProvider)) {
+      setProvider(initialProvider);
+      setProviderOverridden(initialProvider !== 'custom');
+    }
   }, [initialProvider]);
 
   function updateEmail(value: string) {
     setEmail(value);
-    if (!providerOverridden) setProvider(suggestedEmailProvider(value));
+    if (!providerOverridden) {
+      const suggested = suggestedEmailProvider(value);
+      setProvider(isForwardingProvider(suggested) ? suggested : 'custom');
+    }
+  }
+
+  async function connectMailbox(providerId: MailboxProvider) {
+    if (!canManage) {
+      setError('Ask a household owner or adult admin to connect this mailbox.');
+      return;
+    }
+    if (!householdId) {
+      setError('Join a Coho household before connecting a mailbox.');
+      return;
+    }
+    if (!inbox) {
+      setError('Create the Family Inbox first so Coh has a private review queue.');
+      return;
+    }
+    if (
+      mailboxCapabilities?.enabled !== true
+      || mailboxCapabilities.providers[providerId] !== true
+    ) {
+      setError(`${providerName(providerId)} direct connection setup is not available yet. Use forwarding below for now.`);
+      return;
+    }
+    setBusyAction(`connect:${providerId}`);
+    setError('');
+    try {
+      const authorizationUrl = await startMailboxConnection(householdId, providerId);
+      onNotice(`Opening ${providerName(providerId)} authorization`);
+      await Linking.openURL(authorizationUrl);
+    } catch (nextError) {
+      setError(errorMessage(nextError, 'The mailbox connection could not start.'));
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function syncMailbox(connection: MailboxConnection) {
+    setBusyAction(`sync:${connection.id}`);
+    setError('');
+    try {
+      const result = await syncMailboxConnection(connection.id);
+      const connectionResult = Array.isArray(result.results)
+        ? result.results.find((item) => item.connectionId === connection.id)
+        : undefined;
+      if (!connectionResult) {
+        throw new Error('The mailbox sync finished without a result for this account. Retry safely.');
+      }
+      if (!result.ok || connectionResult.ok === false) {
+        throw new Error(connectionResult?.error || 'The mailbox sync needs attention.');
+      }
+      if (connectionResult.skipped) {
+        onNotice(`${providerName(connection.provider)} is already syncing`);
+      } else {
+        const imported = connectionResult.imported ?? 0;
+        onNotice(
+          imported
+            ? `${imported} new email ${imported === 1 ? 'item is' : 'items are'} ready for review`
+            : `${providerName(connection.provider)} is up to date`,
+        );
+      }
+      await load();
+    } catch (nextError) {
+      setError(errorMessage(nextError, 'The mailbox could not sync.'));
+      await load({ preserveError: true });
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function saveMailboxSettings(connection: MailboxConnection) {
+    const selectedFolderIds = connection.selected_folders
+      .filter((folder) => folder.selected)
+      .map((folder) => folder.id);
+    if (connection.sync_policy.mode === 'selected_folders' && selectedFolderIds.length === 0) {
+      setError('Choose at least one label or folder, or use Inbox only.');
+      return;
+    }
+    setBusyAction(`settings:${connection.id}`);
+    setError('');
+    try {
+      await saveMailboxConnectionSettings({
+        connectionId: connection.id,
+        mode: connection.sync_policy.mode,
+        lookbackDays: connection.sync_policy.lookbackDays,
+        selectedFolderIds,
+        syncEnabled: connection.sync_enabled,
+      });
+      onNotice('Mailbox settings saved');
+      await load();
+    } catch (nextError) {
+      setError(errorMessage(nextError, 'Mailbox settings could not be saved.'));
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  function disconnectMailbox(connection: MailboxConnection) {
+    Alert.alert(
+      `Disconnect ${providerName(connection.provider)}?`,
+      'Coho will stop reading new email from this account. Existing Family Inbox items and approved events remain.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Disconnect',
+          style: 'destructive',
+          onPress: () => {
+            void (async () => {
+              setBusyAction(`disconnect:${connection.id}`);
+              setError('');
+              try {
+                await disconnectMailboxConnection(connection.id);
+                await load();
+                onNotice(`${providerName(connection.provider)} disconnected`);
+              } catch (nextError) {
+                setError(errorMessage(nextError, 'The mailbox could not be disconnected.'));
+              } finally {
+                setBusyAction(null);
+              }
+            })();
+          },
+        },
+      ],
+    );
+  }
+
+  function patchMailboxConnection(
+    connectionId: string,
+    patch: (connection: MailboxConnection) => MailboxConnection,
+  ) {
+    setMailboxConnections((current) => current.map((connection) =>
+      connection.id === connectionId ? patch(connection) : connection));
   }
 
   async function registerSource() {
@@ -151,7 +389,7 @@ export default function EmailConnectionsScreen({
       onSetupInbox();
       return;
     }
-    setBusy(true);
+    setBusyAction('forwarding:add');
     setError('');
     try {
       const source = await registerForwardingEmailSource({
@@ -161,14 +399,14 @@ export default function EmailConnectionsScreen({
         provider,
       });
       setEmail('');
-      setProviderOverridden(initialProvider !== 'custom');
+      setProviderOverridden(isForwardingProvider(initialProvider) && initialProvider !== 'custom');
       await load();
       onNotice(`${source.email_address} is ready for forwarding setup`);
       await shareForwardingSteps(source);
     } catch (nextError) {
-      setError(nextError instanceof Error ? nextError.message : 'That email source could not be added.');
+      setError(errorMessage(nextError, 'That email source could not be added.'));
     } finally {
-      setBusy(false);
+      setBusyAction(null);
     }
   }
 
@@ -178,11 +416,15 @@ export default function EmailConnectionsScreen({
       return;
     }
     const destination = inboxAddress(inbox);
-    await Share.share({
-      message:
-        `Set ${source.email_address} to forward important school, appointment, travel, ticket, and activity email to ${destination}.\n\n`
-        + 'Coho keeps each message private, suggests calendar or task details, and waits for family approval before creating anything.',
-    });
+    try {
+      await Share.share({
+        message:
+          `Set ${source.email_address} to forward important school, appointment, travel, ticket, and activity email to ${destination}.\n\n`
+          + 'Coho keeps each message private, suggests calendar or task details, and waits for family approval before creating anything.',
+      });
+    } catch {
+      setError(`The forwarding source is saved, but sharing did not open. Forward selected email to ${destination}.`);
+    }
   }
 
   function removeSource(source: HouseholdEmailSource) {
@@ -196,16 +438,16 @@ export default function EmailConnectionsScreen({
           style: 'destructive',
           onPress: () => {
             void (async () => {
-              setBusy(true);
+              setBusyAction(`forwarding:remove:${source.id}`);
               setError('');
               try {
                 await removeHouseholdEmailSource(source.id);
                 await load();
                 onNotice(`${source.email_address} was removed`);
               } catch (nextError) {
-                setError(nextError instanceof Error ? nextError.message : 'The email source could not be removed.');
+                setError(errorMessage(nextError, 'The email source could not be removed.'));
               } finally {
-                setBusy(false);
+                setBusyAction(null);
               }
             })();
           },
@@ -220,10 +462,10 @@ export default function EmailConnectionsScreen({
       <View style={styles.hero}>
         <View style={styles.heroIcon}><Ionicons name="mail-unread" size={24} color="#fff" /></View>
         <Text style={styles.eyebrow}>EMAIL INTELLIGENCE</Text>
-        <Text style={styles.heroTitle}>Email becomes a suggestion—not an automatic action.</Text>
+        <Text style={styles.heroTitle}>Connect email. Let Coh find what matters.</Text>
         <Text style={styles.heroText}>
-          Coh reviews forwarded messages for dates, times, people, places, reminders, updates, and cancellations.
-          A family member approves every event before it reaches the shared calendar.
+          Coh securely reads the Gmail or Outlook scope you choose, extracts dates, people, places, tasks, updates,
+          and cancellations, then prepares actions for family review.
         </Text>
       </View>
 
@@ -247,7 +489,7 @@ export default function EmailConnectionsScreen({
             <Text style={styles.muted}>
               {destination
                 ? `${destination} · ${reviewCount} waiting for review`
-                : 'Create one private destination for forwarded family email.'}
+                : 'Create one private review queue for connected and forwarded family email.'}
             </Text>
           </View>
           {reviewCount > 0 && <View style={styles.badge}><Text style={styles.badgeText}>{reviewCount}</Text></View>}
@@ -262,18 +504,243 @@ export default function EmailConnectionsScreen({
         </View>
       </View>
 
-      <Text style={styles.sectionTitle}>Add any email address</Text>
+      <Text style={styles.sectionTitle}>Connect a mailbox</Text>
       <Text style={styles.sectionCopy}>
-        Enter the address first, then choose the company that hosts its mailbox. A custom domain such as
-        {' '}chad@cragles.net may still be Google Workspace, Microsoft 365, iCloud, or another provider.
+        Sign in with Google or Microsoft, choose the smallest email scope your family needs, and let Coh
+        continuously extract event suggestions. Coho never receives your mailbox password.
+      </Text>
+      {!canManage && <View style={styles.recommendedCard}>
+        <Ionicons name="people-outline" size={19} color="#7047EE" />
+        <Text style={styles.recommendedText}>
+          A household owner or adult admin manages mailbox connections. You can still review approved family events and actions.
+        </Text>
+      </View>}
+      {directProviders.map((meta) => {
+        const providerConnections = mailboxConnections.filter((connection) =>
+          connection.provider === meta.id);
+        const providerAvailable = mailboxCapabilities
+          ? mailboxCapabilities.enabled && mailboxCapabilities.providers[meta.id]
+          : null;
+        return <View key={meta.id} style={styles.formCard}>
+          <View style={styles.cardTop}>
+            <View style={[styles.iconBox, { backgroundColor: `${meta.color}18` }]}>
+              <Ionicons name={meta.icon as any} size={22} color={meta.color} />
+            </View>
+            <View style={styles.flex}>
+              <Text style={styles.cardTitle}>{meta.title}</Text>
+              <Text style={styles.muted}>{meta.detail}</Text>
+            </View>
+          </View>
+          {providerAvailable !== true && <View style={styles.setupPendingCard}>
+            <Ionicons
+              name={providerAvailable === null ? 'hourglass-outline' : 'construct-outline'}
+              size={18}
+              color="#A96013"
+            />
+            <Text style={styles.setupPendingText}>
+              {providerAvailable === null
+                ? `${meta.shortTitle} connection availability could not be verified. Retry when Coho is online.`
+                : `${meta.shortTitle} direct connection setup is pending. Use forwarding below until the provider is enabled.`}
+            </Text>
+          </View>}
+
+          {providerConnections.length === 0 ? <Pressable
+            disabled={!canManage || busyAction !== null || providerAvailable !== true}
+            onPress={() => void connectMailbox(meta.id)}
+            style={[
+              styles.saveButton,
+              (!canManage || busyAction !== null || providerAvailable !== true) && styles.disabled,
+            ]}
+          >
+            {busyAction === `connect:${meta.id}` ? <ActivityIndicator color="#fff" /> : <>
+              <Ionicons name="lock-closed-outline" size={17} color="#fff" />
+              <Text style={styles.saveButtonText}>Connect {meta.shortTitle}</Text>
+            </>}
+          </Pressable> : providerConnections.map((connection) => {
+            const status = mailboxStatus(connection, providerAvailable);
+            const canConfigure = ['active', 'syncing', 'paused', 'error'].includes(connection.status);
+            const controlsDisabled = !canManage
+              || busyAction !== null
+              || providerAvailable !== true
+              || connection.status === 'syncing';
+            return <View key={connection.id} style={styles.connectionPanel}>
+              <View style={styles.cardTop}>
+                <View style={styles.flex}>
+                  <Text style={styles.connectionEmail}>{connection.provider_email || connection.display_name || meta.shortTitle}</Text>
+                  <Text style={styles.muted}>
+                    {connection.last_synced_at
+                      ? `Last synced ${relativeTime(connection.last_synced_at)}`
+                      : connection.status === 'active'
+                        ? 'Authorized; the first successful sync has not finished yet.'
+                        : 'No successful mailbox sync yet.'}
+                  </Text>
+                </View>
+                <View style={[styles.statusPill, { backgroundColor: `${status.color}16` }]}>
+                  <Text style={[styles.statusText, { color: status.color }]}>{status.label}</Text>
+                </View>
+              </View>
+
+              {!!connection.last_error && <Text style={styles.connectionError}>{connection.last_error}</Text>}
+
+              {canConfigure && <>
+                <Text style={styles.label}>EMAIL SCOPE</Text>
+                <View style={styles.choiceRow}>
+                  {([
+                    ['inbox', 'Inbox only'],
+                    ['selected_folders', 'Choose folders'],
+                  ] as const).map(([mode, label]) => <Pressable
+                    key={mode}
+                    disabled={controlsDisabled}
+                    onPress={() => patchMailboxConnection(connection.id, (current) => ({
+                      ...current,
+                      sync_policy: { ...current.sync_policy, mode },
+                    }))}
+                    style={[
+                      styles.choiceChip,
+                      connection.sync_policy.mode === mode && styles.choiceChipActive,
+                      controlsDisabled && styles.disabled,
+                    ]}
+                  >
+                    <Text style={[styles.choiceChipText, connection.sync_policy.mode === mode && styles.choiceChipTextActive]}>{label}</Text>
+                  </Pressable>)}
+                </View>
+                {connection.sync_policy.mode === 'selected_folders' && <View style={styles.folderChoices}>
+                  {connection.selected_folders.map((folder) => <Pressable
+                    key={folder.id}
+                    disabled={controlsDisabled}
+                    onPress={() => patchMailboxConnection(connection.id, (current) => ({
+                      ...current,
+                      selected_folders: current.selected_folders.map((item) =>
+                        item.id === folder.id ? { ...item, selected: !item.selected } : item),
+                    }))}
+                    style={[
+                      styles.folderChip,
+                      folder.selected && styles.folderChipActive,
+                      controlsDisabled && styles.disabled,
+                    ]}
+                  >
+                    <Ionicons name={folder.selected ? 'checkmark-circle' : 'ellipse-outline'} size={15} color={folder.selected ? '#2257F4' : mutedColor} />
+                    <Text style={[styles.folderChipText, folder.selected && styles.folderChipTextActive]}>{folder.name}</Text>
+                  </Pressable>)}
+                </View>}
+
+                <Text style={styles.label}>RECENT EMAIL TO CHECK ON FIRST SYNC</Text>
+                <View style={styles.choiceRow}>
+                  {([
+                    [0, 'New mail only'],
+                    [7, 'Past 7 days'],
+                    [30, 'Past 30 days'],
+                  ] as const).map(([days, label]) => <Pressable
+                    key={days}
+                    disabled={controlsDisabled}
+                    onPress={() => patchMailboxConnection(connection.id, (current) => ({
+                      ...current,
+                      sync_policy: { ...current.sync_policy, lookbackDays: days },
+                    }))}
+                    style={[
+                      styles.choiceChip,
+                      connection.sync_policy.lookbackDays === days && styles.choiceChipActive,
+                      controlsDisabled && styles.disabled,
+                    ]}
+                  >
+                    <Text style={[styles.choiceChipText, connection.sync_policy.lookbackDays === days && styles.choiceChipTextActive]}>{label}</Text>
+                  </Pressable>)}
+                </View>
+
+                <Text style={styles.label}>WHAT COH DOES WITH A COMPLETE EVENT</Text>
+                <View style={[styles.behaviorChoice, styles.behaviorChoiceActive]}>
+                  <Ionicons name="checkmark-circle" size={18} color="#7047EE" />
+                  <View style={styles.flex}>
+                    <Text style={styles.providerTitle}>Prepare it for approval</Text>
+                    <Text style={styles.muted}>
+                      Coh extracts the event, cancellation, change, or task and puts a one-tap action in Family Inbox.
+                      Calendar writing stays human-approved so your family controls every change.
+                    </Text>
+                  </View>
+                </View>
+
+                <View style={styles.switchRow}>
+                  <View style={styles.flex}>
+                    <Text style={styles.providerTitle}>Keep this mailbox syncing</Text>
+                    <Text style={styles.muted}>Turn off to pause new email without disconnecting.</Text>
+                  </View>
+                  <Switch
+                    disabled={controlsDisabled}
+                    value={connection.sync_enabled}
+                    onValueChange={(syncEnabled) => patchMailboxConnection(connection.id, (current) => ({
+                      ...current,
+                      sync_enabled: syncEnabled,
+                    }))}
+                    trackColor={{ false: '#9BA4B6', true: '#2257F4' }}
+                  />
+                </View>
+
+                <Pressable
+                  disabled={controlsDisabled}
+                  onPress={() => void saveMailboxSettings(connection)}
+                  style={[styles.primaryButton, styles.fullButton, controlsDisabled && styles.disabled]}
+                >
+                  {busyAction === `settings:${connection.id}`
+                    ? <ActivityIndicator color="#fff" />
+                    : <Text style={styles.primaryButtonText}>Save mailbox settings</Text>}
+                </Pressable>
+              </>}
+
+              <View style={styles.actionRow}>
+                {connection.sync_enabled && ['active', 'error'].includes(connection.status) && <Pressable
+                  disabled={controlsDisabled}
+                  onPress={() => void syncMailbox(connection)}
+                  style={[styles.secondaryButton, controlsDisabled && styles.disabled]}
+                >
+                  {busyAction === `sync:${connection.id}`
+                    ? <ActivityIndicator color="#2257F4" />
+                    : <Text style={styles.secondaryButtonText}>Sync now</Text>}
+                </Pressable>}
+                {['reauthorize', 'disconnected'].includes(connection.status) && <Pressable
+                  disabled={!canManage || busyAction !== null || providerAvailable !== true}
+                  onPress={() => void connectMailbox(connection.provider)}
+                  style={[
+                    styles.secondaryButton,
+                    (!canManage || busyAction !== null || providerAvailable !== true) && styles.disabled,
+                  ]}
+                >
+                  <Text style={styles.secondaryButtonText}>Reconnect</Text>
+                </Pressable>}
+                {connection.status !== 'disconnected' && canManage && <Pressable
+                  disabled={controlsDisabled}
+                  onPress={() => disconnectMailbox(connection)}
+                  style={[styles.removeButton, controlsDisabled && styles.disabled]}
+                >
+                  {busyAction === `disconnect:${connection.id}`
+                    ? <ActivityIndicator color="#D34A3B" />
+                    : <><Ionicons name="unlink-outline" size={17} color="#D34A3B" /><Text style={styles.removeText}>Disconnect</Text></>}
+                </Pressable>}
+              </View>
+            </View>;
+          })}
+
+          {providerConnections.length > 0 && <Pressable
+            disabled={!canManage || busyAction !== null || providerAvailable !== true}
+            onPress={() => void connectMailbox(meta.id)}
+            style={[
+              styles.addAccountButton,
+              (!canManage || busyAction !== null || providerAvailable !== true) && styles.disabled,
+            ]}
+          >
+            <Ionicons name="add-circle-outline" size={17} color={meta.color} />
+            <Text style={[styles.secondaryButtonText, { color: meta.color }]}>Connect another {meta.shortTitle} account</Text>
+          </Pressable>}
+        </View>;
+      })}
+
+      {!!error && <Text style={styles.error}>{error}</Text>}
+
+      <Text style={styles.sectionTitle}>Forwarding fallback</Text>
+      <Text style={styles.sectionCopy}>
+        For iCloud, Yahoo, and other providers without direct Coho authorization, forward only selected family email
+        to the private Family Inbox. Forwarding is not a connected mailbox and does not scan your account.
       </Text>
       <View style={styles.formCard}>
-        {!canManage && <View style={styles.recommendedCard}>
-          <Ionicons name="people-outline" size={19} color="#7047EE" />
-          <Text style={styles.recommendedText}>
-            A household owner or adult admin manages email sources. You can still review approved family events and actions.
-          </Text>
-        </View>}
         <Text style={styles.label}>EMAIL ADDRESS</Text>
         <TextInput
           editable={canManage}
@@ -286,9 +753,9 @@ export default function EmailConnectionsScreen({
           placeholderTextColor={placeholderColor}
           style={styles.input}
         />
-        <Text style={styles.label}>WHO HOSTS THIS MAILBOX?</Text>
+        <Text style={styles.label}>FORWARDING PROVIDER</Text>
         <View style={styles.providerChoices}>
-          {providers.map((item) => {
+          {fallbackProviders.map((item) => {
             const active = provider === item.id;
             return <Pressable key={item.id} disabled={!canManage} onPress={() => {
               setProvider(item.id);
@@ -302,31 +769,28 @@ export default function EmailConnectionsScreen({
             </Pressable>;
           })}
         </View>
-        <View style={styles.recommendedCard}>
-          <Ionicons name="shield-checkmark-outline" size={19} color="#19A47B" />
-          <Text style={styles.recommendedText}>
-            Secure forwarding is available now and never gives Coho your mailbox password. Direct Gmail and
-            Microsoft scanning will appear only after provider OAuth and privacy verification are complete.
-          </Text>
-        </View>
-        {!!error && <Text style={styles.error}>{error}</Text>}
-        <Pressable disabled={!canManage || busy || !email.trim()} onPress={() => void registerSource()} style={[styles.saveButton, (!canManage || busy || !email.trim()) && styles.disabled]}>
-          {busy ? <ActivityIndicator color="#fff" /> : <>
+        <Pressable
+          disabled={!canManage || busyAction !== null || !email.trim()}
+          onPress={() => void registerSource()}
+          style={[styles.saveButton, (!canManage || busyAction !== null || !email.trim()) && styles.disabled]}
+        >
+          {busyAction === 'forwarding:add' ? <ActivityIndicator color="#fff" /> : <>
             <Ionicons name="arrow-redo-outline" size={18} color="#fff" />
-            <Text style={styles.saveButtonText}>Add source & get forwarding steps</Text>
+            <Text style={styles.saveButtonText}>Get forwarding steps</Text>
           </>}
         </Pressable>
       </View>
 
-      <Text style={styles.sectionTitle}>Configured sources</Text>
-      {sources.length === 0 ? (
+      <Text style={styles.sectionTitle}>Forwarding sources</Text>
+      {sources.filter((source) => source.connection_method === 'forwarding').length === 0 ? (
         <View style={styles.emptyCard}>
-          <Ionicons name="mail-open-outline" size={28} color="#7047EE" />
-          <Text style={styles.cardTitle}>No email sources yet</Text>
-          <Text style={styles.muted}>Add the accounts that receive school, appointment, travel, ticket, or activity email.</Text>
+          <Ionicons name="arrow-redo-outline" size={28} color="#7047EE" />
+          <Text style={styles.cardTitle}>No forwarding fallbacks</Text>
+          <Text style={styles.muted}>Use this only when direct Gmail or Outlook authorization is not available.</Text>
         </View>
-      ) : sources.map((source) => {
-        const meta = providers.find((item) => item.id === source.provider) ?? providers[providers.length - 1];
+      ) : sources.filter((source) => source.connection_method === 'forwarding').map((source) => {
+        const meta = providerMetadata.find((item) => item.legacyId === source.provider)
+          ?? providerMetadata[providerMetadata.length - 1];
         const active = source.status === 'active';
         return <View key={source.id} style={styles.sourceCard}>
           <View style={styles.cardTop}>
@@ -335,18 +799,18 @@ export default function EmailConnectionsScreen({
             </View>
             <View style={styles.flex}>
               <Text style={styles.cardTitle}>{source.email_address}</Text>
-              <Text style={styles.muted}>{meta.title} · Forwarding</Text>
+              <Text style={styles.muted}>{meta.title} · Forwarding fallback</Text>
             </View>
             <View style={[styles.statusPill, active && styles.statusActive]}>
               <Text style={[styles.statusText, active && styles.statusTextActive]}>
-                {active ? 'ACTIVE' : 'FORWARDING READY'}
+                {active ? 'MAIL RECEIVED' : 'STEPS READY'}
               </Text>
             </View>
           </View>
           <Text style={styles.sourceStatus}>
             {active
-              ? `Mail received${source.last_received_at ? ` ${relativeTime(source.last_received_at)}` : ''}. Coh can suggest events from this source.`
-              : `Forwarding is ready in Coho. Send selected mail to ${destination ?? 'your Family Inbox'} so it can enter the approval queue.`}
+              ? `Forwarded mail received${source.last_received_at ? ` ${relativeTime(source.last_received_at)}` : ''}.`
+              : `Forward selected mail to ${destination ?? 'your Family Inbox'}. This source is not connected until mail is received.`}
           </Text>
           <View style={styles.actionRow}>
             <Pressable onPress={() => void shareForwardingSteps(source)} style={styles.secondaryButton}>
@@ -383,6 +847,30 @@ const workflowStyles = StyleSheet.create({
   label: { color: '#7047EE', fontSize: 8, fontWeight: '900' },
 });
 
+function isForwardingProvider(provider: EmailSourceProvider): provider is ForwardingProvider {
+  return provider === 'icloud' || provider === 'yahoo' || provider === 'custom';
+}
+
+function providerName(provider: MailboxProvider) {
+  return provider === 'google' ? 'Gmail' : 'Outlook';
+}
+
+function mailboxStatus(connection: MailboxConnection, providerAvailable: boolean | null) {
+  if (providerAvailable === null) return { label: 'CHECKING', color: '#A96013' };
+  if (!providerAvailable) return { label: 'SETUP PENDING', color: '#A96013' };
+  if (connection.status === 'active' && connection.sync_enabled) {
+    return { label: 'CONNECTED', color: '#168866' };
+  }
+  if (connection.status === 'syncing') return { label: 'SYNCING', color: '#2257F4' };
+  if (connection.status === 'pending') return { label: 'CONNECTING', color: '#A96013' };
+  if (connection.status === 'reauthorize') return { label: 'RECONNECT', color: '#D34A3B' };
+  if (connection.status === 'error') return { label: 'NEEDS ATTENTION', color: '#D34A3B' };
+  if (connection.status === 'paused' || !connection.sync_enabled) {
+    return { label: 'PAUSED', color: '#A96013' };
+  }
+  return { label: 'DISCONNECTED', color: '#727D94' };
+}
+
 function relativeTime(value: string) {
   const diff = Date.now() - new Date(value).getTime();
   if (!Number.isFinite(diff)) return '';
@@ -390,6 +878,15 @@ function relativeTime(value: string) {
   if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`;
   if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h ago`;
   return `${Math.floor(diff / 86_400_000)}d ago`;
+}
+
+function errorMessage(error: unknown, fallback: string) {
+  if (error instanceof Error && error.message.trim()) return error.message;
+  if (error && typeof error === 'object' && 'message' in error) {
+    const message = (error as { message?: unknown }).message;
+    if (typeof message === 'string' && message.trim()) return message.trim();
+  }
+  return fallback;
 }
 
 function createStyles(dark: boolean) {
@@ -407,6 +904,9 @@ function createStyles(dark: boolean) {
     inboxCard: { borderRadius: 22, padding: 15, gap: 13, backgroundColor: palette.surface, borderWidth: 1, borderColor: palette.line },
     formCard: { borderRadius: 22, padding: 15, gap: 9, backgroundColor: palette.surface, borderWidth: 1, borderColor: palette.line },
     sourceCard: { borderRadius: 20, padding: 14, gap: 11, backgroundColor: palette.surface, borderWidth: 1, borderColor: palette.line },
+    connectionPanel: { borderRadius: 18, padding: 13, gap: 10, backgroundColor: palette.surface2, borderWidth: 1, borderColor: palette.line },
+    connectionEmail: { color: palette.text, fontSize: 12, fontWeight: '900' },
+    connectionError: { color: '#D34A3B', fontSize: 9, lineHeight: 14, fontWeight: '700' },
     cardTop: { flexDirection: 'row', alignItems: 'center', gap: 11 },
     iconBox: { width: 44, height: 44, borderRadius: 15, alignItems: 'center', justifyContent: 'center' },
     flex: { flex: 1 },
@@ -423,13 +923,31 @@ function createStyles(dark: boolean) {
     providerTitle: { color: palette.text, fontSize: 11, fontWeight: '800' },
     recommendedCard: { borderRadius: 16, padding: 12, flexDirection: 'row', alignItems: 'flex-start', gap: 9, backgroundColor: '#19A47B10', borderWidth: 1, borderColor: '#19A47B35' },
     recommendedText: { flex: 1, color: palette.text, fontSize: 9, lineHeight: 14, fontWeight: '600' },
+    setupPendingCard: { borderRadius: 15, padding: 11, flexDirection: 'row', alignItems: 'flex-start', gap: 9, backgroundColor: '#A9601310', borderWidth: 1, borderColor: '#A9601335' },
+    setupPendingText: { flex: 1, color: palette.text, fontSize: 9, lineHeight: 14, fontWeight: '600' },
     saveButton: { minHeight: 49, borderRadius: 15, flexDirection: 'row', gap: 8, alignItems: 'center', justifyContent: 'center', backgroundColor: '#2257F4' },
     saveButtonText: { color: '#fff', fontSize: 10, fontWeight: '900' },
     primaryButton: { flex: 1, minHeight: 44, borderRadius: 14, alignItems: 'center', justifyContent: 'center', backgroundColor: '#2257F4', paddingHorizontal: 12 },
     primaryButtonText: { color: '#fff', fontSize: 10, fontWeight: '900' },
     secondaryButton: { flex: 1, minHeight: 44, borderRadius: 14, alignItems: 'center', justifyContent: 'center', backgroundColor: '#2257F410', borderWidth: 1, borderColor: '#2257F455', paddingHorizontal: 10 },
     secondaryButtonText: { color: '#2257F4', fontSize: 9, fontWeight: '900' },
+    fullButton: { flex: 0, width: '100%' },
     actionRow: { flexDirection: 'row', gap: 9 },
+    choiceRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 7 },
+    choiceChip: { minHeight: 35, borderRadius: 12, justifyContent: 'center', paddingHorizontal: 11, backgroundColor: palette.surface, borderWidth: 1, borderColor: palette.line },
+    choiceChipActive: { backgroundColor: '#2257F414', borderColor: '#2257F4' },
+    choiceChipText: { color: palette.muted, fontSize: 8, fontWeight: '800' },
+    choiceChipTextActive: { color: '#2257F4' },
+    folderChoices: { flexDirection: 'row', flexWrap: 'wrap', gap: 7 },
+    folderChip: { minHeight: 35, maxWidth: '100%', borderRadius: 12, flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 10, backgroundColor: palette.surface, borderWidth: 1, borderColor: palette.line },
+    folderChipActive: { backgroundColor: '#2257F410', borderColor: '#2257F466' },
+    folderChipText: { color: palette.muted, maxWidth: 210, fontSize: 8, fontWeight: '700' },
+    folderChipTextActive: { color: palette.text },
+    behaviorChoices: { gap: 7 },
+    behaviorChoice: { minHeight: 58, borderRadius: 15, padding: 10, flexDirection: 'row', alignItems: 'center', gap: 9, backgroundColor: palette.surface, borderWidth: 1, borderColor: palette.line },
+    behaviorChoiceActive: { backgroundColor: '#7047EE0D', borderColor: '#7047EE66' },
+    switchRow: { minHeight: 54, borderRadius: 15, padding: 10, flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: palette.surface, borderWidth: 1, borderColor: palette.line },
+    addAccountButton: { minHeight: 40, borderRadius: 13, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7, borderWidth: 1, borderStyle: 'dashed', borderColor: palette.line },
     badge: { minWidth: 28, height: 28, borderRadius: 14, alignItems: 'center', justifyContent: 'center', backgroundColor: '#FF7A2E' },
     badgeText: { color: '#fff', fontSize: 10, fontWeight: '900' },
     statusPill: { borderRadius: 12, paddingHorizontal: 9, paddingVertical: 7, backgroundColor: '#FF7A2E14' },
