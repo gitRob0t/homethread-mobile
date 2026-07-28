@@ -17,7 +17,10 @@ const responseSchemaSource = source.slice(
 const offlineContracts = [
   ['actionable facts never get a capabilities menu', /Never respond with a generic list of capabilities/],
   ['haircut starts an event flow', /If the user says “I have a haircut,” immediately begin the event flow/],
-  ['one missing question per turn', /Ask exactly one highest-priority missing-detail question at a time/],
+  ['compact useful questions', /Ask one compact, useful question at a time/],
+  ['travel fragments begin planning', /Treat fragments such as "lake"[\s\S]*likely travel planning/],
+  ['assistant history uses valid string content', /assistant history as input_text caused Responses API invalid_value/],
+  ['travel remains collecting without a write action', /result\.intent === 'travel'[\s\S]*planningMissing[\s\S]*'collecting'/],
   ['model is proposal-only', /You may only propose or correct work\. You can never confirm, cancel, or execute it/],
   ['server validates event date and time', /missing\.add\('date and time'\)/],
   ['server replaces capability fallbacks', /soundsLikeCapabilityFallback/],

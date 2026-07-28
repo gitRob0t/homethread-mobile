@@ -6,7 +6,7 @@ const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
-const PROMPT_VERSION = 'coh-v4';
+const PROMPT_VERSION = 'coh-v5';
 const MAX_ATTACHMENT_BYTES = 6 * 1024 * 1024;
 const OPENAI_ATTEMPT_TIMEOUT_MS = 12_000;
 const REQUEST_LEASE_SECONDS = 180;
@@ -49,6 +49,12 @@ const responseSchema = {
         'reward_label',
         'grocery_items',
         'meals',
+        'destination',
+        'departure_date',
+        'return_date',
+        'duration_days',
+        'travelers',
+        'preferences',
       ],
       properties: {
         title: { type: ['string', 'null'] },
@@ -112,6 +118,12 @@ const responseSchema = {
             },
           },
         },
+        destination: { type: ['string', 'null'] },
+        departure_date: { type: ['string', 'null'] },
+        return_date: { type: ['string', 'null'] },
+        duration_days: { type: ['integer', 'null'] },
+        travelers: { type: 'array', items: { type: 'string' } },
+        preferences: { type: 'array', items: { type: 'string' } },
       },
     },
     proposed_action: {
@@ -362,6 +374,12 @@ function blankDraft() {
     reward_label: null,
     grocery_items: [],
     meals: [],
+    destination: null,
+    departure_date: null,
+    return_date: null,
+    duration_days: null,
+    travelers: [],
+    preferences: [],
   };
 }
 
@@ -398,8 +416,14 @@ function terminalReceiptFromAction(
 }
 
 function fallbackIntent(message: string, state: any) {
-  if (['event', 'chore', 'note'].includes(state?.intent)) return state.intent;
+  if (['event', 'chore', 'note', 'travel', 'restaurant'].includes(state?.intent)) return state.intent;
   const value = message.toLowerCase();
+  if (/\b(lake|trip|travel|vacation|flight|hotel|resort|road\s*trip|camping|cruise|beach)\b/.test(value)) {
+    return 'travel';
+  }
+  if (/\b(restaurant|dinner reservation|lunch reservation|brunch reservation)\b/.test(value)) {
+    return 'restaurant';
+  }
   if (/\b(note|remember|save this|write down)\b/.test(value)) return 'note';
   if (/\b(chore|clean|wash|trash|recycl|vacuum|laundry|dishes|homework|take out)\b/.test(value)) {
     return 'chore';
@@ -428,7 +452,34 @@ function fallbackTitle(intent: string, message: string, existing: unknown) {
       .trim();
     return title ? title.slice(0, 80) : 'Family note';
   }
+  if (intent === 'travel') {
+    return /\blake\b/i.test(value) ? 'Lake trip' : (value.slice(0, 240) || 'Family trip');
+  }
   return null;
+}
+
+function travelMissing(draft: any) {
+  const missing: string[] = [];
+  if (!draft.destination) missing.push('destination');
+  if (!draft.departure_date) missing.push('departure_date');
+  if (!draft.return_date && !draft.duration_days) missing.push('return_date_or_duration');
+  if (!Array.isArray(draft.travelers) || draft.travelers.length === 0) missing.push('travelers');
+  return missing;
+}
+
+function travelQuestion(missing: string[], message: string) {
+  if (missing.length >= 3) {
+    return `${/\blake\b/i.test(message) ? 'Sounds like a lake trip.' : 'Sounds like a trip.'} Which ${
+      /\blake\b/i.test(message) ? 'lake' : 'destination'
+    }, when are you leaving, how long are you staying, and who’s going?`;
+  }
+  if (missing.includes('destination')) return 'Sounds like a trip. Where are you going?';
+  if (missing.includes('departure_date')) return 'Got it. When are you leaving?';
+  if (missing.includes('return_date_or_duration')) {
+    return 'How long are you staying, or when will you return?';
+  }
+  if (missing.includes('travelers')) return 'Who’s going on the trip?';
+  return 'I have the trip details. Want me to organize the itinerary and family calendar next?';
 }
 
 function deterministicFallback(message: string, previousState: any, peopleCount: number) {
@@ -441,6 +492,17 @@ function deterministicFallback(message: string, previousState: any, peopleCount:
       .replace(/^\s*(?:save|add|create|make|remember)\s+(?:a\s+)?(?:this\s+)?note\s*(?:that|to|:)?\s*/i, '')
       .trim();
     if (noteText && noteText.toLowerCase() !== 'note') draft.notes = noteText.slice(0, 8_000);
+  }
+  if (intent === 'travel') {
+    const missing = travelMissing(draft);
+    return {
+      reply: travelQuestion(missing, message),
+      intent,
+      status: missing.length ? 'collecting' : 'answered',
+      missing_fields: missing,
+      draft,
+      proposed_action: { type: 'none', requires_confirmation: false },
+    };
   }
 
   const proposedType = intent === 'event'
@@ -462,7 +524,7 @@ function deterministicFallback(message: string, previousState: any, peopleCount:
     },
   };
   if (proposedType === 'none') {
-    result.reply = 'I saved your message, but I need a little more detail. Is this an event, chore, or note?';
+    result.reply = 'What would you like Coh to help you work out from that?';
     return result;
   }
   result.missing_fields = serverMissing(result, null, peopleCount);
@@ -1214,10 +1276,15 @@ Deno.serve(async (request) => {
 Today is ${today}. Current ISO time is ${new Date().toISOString()}. The user's timezone is ${timezone}.
 
 Conversation behavior:
-- Be warm, direct, and brief. Ask exactly one highest-priority missing-detail question at a time.
+- Be warm, direct, and brief. Ask one compact, useful question at a time. For a broad goal, bundle tightly related setup details so the conversation does not become an interrogation.
 - Never respond with a generic list of capabilities when the user supplied an actionable fact.
+- Never ask the user to classify a message as an event, chore, or note when you can infer the likely goal.
 - Preserve the working draft across turns. Understand short answers and corrections.
 - If the user says “I have a haircut,” immediately begin the event flow and ask the most useful missing detail.
+- Treat fragments such as "lake", "vacation", "flight", "hotel", or "road trip" as likely travel planning, not as notes to save.
+- For travel, acknowledge the likely trip and collect destination, departure date, return date or duration, and travelers. Ask only for preferences that materially improve the plan.
+- For "Lake", say it sounds like a lake trip and ask which lake, when they are leaving, how long they are staying, and who is going.
+- Do not say something was saved unless an actual write action succeeded.
 - Resolve relative dates using today and the supplied timezone.
 - Use household context as read-only data. Never invent family members or household facts.
 
@@ -1245,13 +1312,17 @@ Current household context:
 ${JSON.stringify(householdContext)}`;
 
     const modelInput = [
-      ...history.map((item: any) => ({
+      ...history.slice(-12).map((item: any) => ({
         role: item.role,
-        content: [{ type: 'input_text', text: String(item.content).slice(0, 4_000) }],
+        // String content is valid for both user and assistant turns. Marking
+        // assistant history as input_text caused Responses API invalid_value.
+        content: String(item.content).slice(0, 4_000),
       })),
       { role: 'user', content: userContent },
     ];
-    const model = Deno.env.get('OPENAI_MODEL') || 'gpt-5.6-sol';
+    // Keep conversational turns capable and affordable; extraction/OCR may
+    // continue using a separately configured frontier model.
+    const model = Deno.env.get('COH_CHAT_MODEL') || 'gpt-5.6-terra';
     let result: any = null;
     let responseId: string | null = null;
     let providerMode = 'openai';
@@ -1265,7 +1336,8 @@ ${JSON.stringify(householdContext)}`;
             model,
             instructions,
             input: modelInput,
-            reasoning: { effort: 'medium' },
+            reasoning: { effort: 'low' },
+            max_output_tokens: 1400,
             text: {
               verbosity: 'low',
               format: { type: 'json_schema', name: 'coh_response', strict: true, schema: responseSchema },
@@ -1321,6 +1393,9 @@ ${JSON.stringify(householdContext)}`;
       });
     }
     result.draft = { ...blankDraft(), ...(result.draft ?? {}) };
+    if (result.intent === 'travel' && !result.draft.destination && result.draft.location) {
+      result.draft.destination = result.draft.location;
+    }
 
     let durableAction: any = null;
     const actionKind = kindForAction(result.proposed_action?.type);
@@ -1399,6 +1474,18 @@ ${JSON.stringify(householdContext)}`;
         result.reply = questionForMissing(result.missing_fields[0], result.draft);
       } else if (proposalReplay || soundsLikeCapabilityFallback(result.reply)) {
         result.reply = `I have ${durableAction.title} ready. Review it before confirming.`;
+      }
+    } else if (result.intent === 'travel') {
+      const planningMissing = travelMissing(result.draft);
+      result.status = planningMissing.length ? 'collecting' : 'answered';
+      result.missing_fields = planningMissing;
+      result.proposed_action = { type: 'none', requires_confirmation: false };
+      if (
+        planningMissing.length &&
+        (!result.reply?.includes('?') ||
+          /saved your message|event, chore, or note|I can add events/i.test(result.reply))
+      ) {
+        result.reply = travelQuestion(planningMissing, message);
       }
     } else {
       result.status = 'answered';

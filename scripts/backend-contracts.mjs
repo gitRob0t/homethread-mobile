@@ -74,7 +74,7 @@ const contracts = [
   ['expired Edge sessions refresh once', edgeClient, /supabase\.auth\.refreshSession\(\)/],
   ['Edge error bodies are surfaced safely', edgeClient, /response\.clone\(\)\.json\(\)/],
   ['deployment pins the supported Coh model', deploy, /gpt-5\.6-sol/],
-  ['assistant defaults to the supported Coh model', assistant, /'gpt-5\.6-sol'/],
+  ['assistant defaults to the cost-balanced Coh chat model', assistant, /'gpt-5\.6-terra'/],
   ['Coh requests have a durable idempotency ledger', cohHardening, /create table if not exists public\.assistant_requests[\s\S]*unique \(user_id, request_id\)/],
   ['Coh request claims reject changed payloads', cohHardening, /request_row\.payload_hash <> target_payload_hash[\s\S]*request ID cannot be reused/],
   ['anonymous callers cannot execute Coh mutation RPCs', cohRpcPermissions, /revoke all on function public\.claim_assistant_request[\s\S]*from public, anon[\s\S]*revoke all on function public\.confirm_coh_action[\s\S]*from public, anon/],
@@ -204,7 +204,6 @@ const contracts = [
 for (const [name, source, pattern] of contracts) {
   assert.match(source, pattern, `Missing backend contract: ${name}`);
 }
-assert.doesNotMatch(assistant, /gpt-5\.6-terra/, 'Assistant uses an unsupported model default.');
 assert.doesNotMatch(extractor, /gpt-5\.6-terra/, 'Inbox extraction uses an unsupported model default.');
 assert.doesNotMatch(
   securityRelease,
