@@ -44,6 +44,7 @@
     "eval:backend": "node scripts/backend-contracts.mjs",
     "verify:source": "node scripts/verify-release-source.mjs",
     "release:check": "bash scripts/release-check.sh",
+    "publish:coh": "bash scripts/publish-coh.sh",
     "build:internal": "bash scripts/build-internal.sh",
     "deploy:supabase": "bash scripts/deploy-supabase.sh"
   }
