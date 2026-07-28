@@ -5,21 +5,86 @@ import path from 'node:path';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const source = await readFile(path.join(root, 'supabase/functions/coh-assistant/index.ts'), 'utf8');
+const hardening = await readFile(
+  path.join(root, 'supabase/migrations/202607270002_coh_agent_hardening.sql'),
+  'utf8',
+);
+const responseSchemaSource = source.slice(
+  source.indexOf('const responseSchema'),
+  source.indexOf('type CohAttachment'),
+);
 
 const offlineContracts = [
   ['actionable facts never get a capabilities menu', /Never respond with a generic list of capabilities/],
   ['haircut starts an event flow', /If the user says “I have a haircut,” immediately begin the event flow/],
   ['one missing question per turn', /Ask exactly one highest-priority missing-detail question at a time/],
-  ['writes require confirmation', /Before a write, summarize the exact proposal and ask for explicit confirmation/],
+  ['model is proposal-only', /You may only propose or correct work\. You can never confirm, cancel, or execute it/],
   ['server validates event date and time', /missing\.add\('date and time'\)/],
   ['server replaces capability fallbacks', /soundsLikeCapabilityFallback/],
-  ['requests are retried safely', /fetchWithRetry/],
+  ['requests use a durable idempotency claim', /claim_assistant_request/],
+  ['provider attempts have bounded timeouts', /OPENAI_ATTEMPT_TIMEOUT_MS[\s\S]*AbortController/],
+  ['provider failure has deterministic behavior', /deterministicFallback/],
+  ['conversation recovery returns durable turns', /operation === 'resume'[\s\S]*activeAction/],
+  ['recovery distinguishes message and action requests', /operation: reconciledRequestState\?\.operation[\s\S]*rawRequestState\?\.operation[\s\S]*requestState: reconciledRequestState\?\.status[\s\S]*retryable:/],
+  ['recovery preserves attachment and timezone retry metadata', /attachmentCount: turn\.role === 'user'[\s\S]*timezone: turn\.role === 'user'[\s\S]*attachment_count: attachments\.length[\s\S]*timezone: body\?\.timezone \?\? null/],
+  ['recovery exposes requests that have no durable turn', /outstandingRequests[\s\S]*hasProcessingRequests[\s\S]*requestRow\.status === 'processing'/],
+  ['recovery returns recent terminal receipts', /terminalReceiptCutoff[\s\S]*terminal conversation query[\s\S]*\['confirm', 'cancel'\][\s\S]*reconciledStatus[\s\S]*response:/],
+  ['closed receipt history never becomes the active conversation', /conversationId: requestRow\.conversation_id[\s\S]*conversationId: conversation\.closed_at \? null : conversation\.id/],
+  ['newer terminal receipts outrank stale unfinished work', /Compare unfinished work with recent terminal receipts by updated[\s\S]*Date\.parse\(right\.updated_at\) - Date\.parse\(left\.updated_at\)/],
+  ['recovery keeps the newest bounded history', /Keep the newest bounded window[\s\S]*order\('created_at', \{ ascending: false \}\)[\s\S]*\.reverse\(\)/],
+  ['recovery is not masked by another open conversation', /unfinished request recovery query[\s\S]*terminal request recovery query[\s\S]*Reconciliation is household-wide rather than tied/],
+  ['committed actions recover a terminal receipt without executing again', /terminalReceiptFromAction[\s\S]*request-specific marker is authoritative proof[\s\S]*reconciledStatus/],
+  ['durable terminal markers outrank stale worker errors', /durable action markers outrank that stale[\s\S]*recoveredTerminalResponse \?\? requestRow\.response_payload/],
+  ['terminal recovery reconciles request-backed turns', /reconciledRequestById[\s\S]*requestState: reconciledRequestState\?\.status/],
+  ['proposals use the protected database RPC', /rpc\('propose_coh_action'/],
+  ['confirmation requires identity version and digest', /actionId, expectedVersion, and proposalHash/],
+  ['confirmation uses the protected database RPC', /operation === 'confirm' \? 'confirm_coh_action' : 'cancel_coh_action'/],
   ['model responses emit latency telemetry', /coh_response_completed/],
 ];
 
 for (const [name, pattern] of offlineContracts) {
   assert.match(source, pattern, `Missing Coh contract: ${name}`);
 }
+assert.match(
+  responseSchemaSource,
+  /enum: \['collecting', 'ready_for_confirmation', 'answered'\]/,
+  'The model status schema must remain proposal-only.',
+);
+assert.doesNotMatch(
+  responseSchemaSource,
+  /confirmed|canceled/,
+  'The model must not be able to emit terminal action statuses.',
+);
+assert.doesNotMatch(
+  source,
+  /supabase\.rpc\('approve_and_execute_household_action'/,
+  'The Edge Function must not execute an action outside the protected confirmation RPC.',
+);
+assert.match(
+  hardening,
+  /confirm_coh_action[\s\S]*expected_version integer[\s\S]*expected_proposal_hash text/,
+  'Confirmation must be versioned and bound to the proposal digest.',
+);
+assert.match(
+  hardening,
+  /confirmation_request_id = target_request[\s\S]*approve_and_execute_household_action/,
+  'Confirmation must persist its replay marker atomically with execution.',
+);
+assert.match(
+  hardening,
+  /proposal_action_id = updated_action\.id[\s\S]*proposal_snapshot = to_jsonb\(updated_action\)[\s\S]*proposal_action_id is null/,
+  'A proposal request must persist its immutable result before returning.',
+);
+assert.match(
+  hardening,
+  /request_row\.proposal_action_id is not null[\s\S]*request_row\.proposal_action_version[\s\S]*request_row\.proposal_hash[\s\S]*superseded\. Resume/,
+  'A replayed proposal request must never overwrite a newer correction.',
+);
+assert.match(
+  hardening,
+  /input_proposed_payload jsonb[\s\S]*proposed_payload = coalesce\(input_proposed_payload/,
+  'Proposal corrections must not use an ambiguous payload parameter.',
+);
 console.log(`✓ ${offlineContracts.length} offline Coh contracts passed`);
 
 const accessToken = process.env.COHO_EVAL_ACCESS_TOKEN;
@@ -37,9 +102,9 @@ assert.ok(
 );
 const timezone = process.env.COHO_EVAL_TIMEZONE || 'America/New_York';
 const endpoint = `${supabaseUrl.replace(/\/$/, '')}/functions/v1/coh-assistant`;
-const conversations = new Set();
+const openProposals = new Map();
 
-async function ask(message, conversationId = null) {
+async function invoke(body) {
   const started = Date.now();
   const response = await fetch(endpoint, {
     method: 'POST',
@@ -49,19 +114,44 @@ async function ask(message, conversationId = null) {
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      message,
-      conversationId,
       householdId,
       timezone,
-      history: [],
+      ...body,
     }),
   });
   const payload = await response.json();
   assert.equal(response.ok, true, `Coh HTTP ${response.status}: ${payload?.error || 'unknown error'}`);
-  assert.ok(payload.conversationId, 'Coh must return a conversation ID.');
-  conversations.add(payload.conversationId);
   assert.ok(payload.reply?.trim(), 'Coh must return a user-facing reply.');
   assert.ok(Date.now() - started < 45_000, 'Coh exceeded the 45-second evaluation budget.');
+  return payload;
+}
+
+async function ask(message, conversationId = crypto.randomUUID()) {
+  const payload = await invoke({
+    operation: 'message',
+    requestId: crypto.randomUUID(),
+    conversationId,
+    message,
+  });
+  assert.ok(payload.conversationId, 'Coh must return a conversation ID.');
+  assert.ok(payload.requestId, 'Coh must return the stable request ID.');
+  if (payload.action) openProposals.set(payload.conversationId, payload);
+  return payload;
+}
+
+async function finishProposal(operation, proposal) {
+  assert.ok(proposal?.action?.id, `Cannot ${operation} without an action ID.`);
+  assert.ok(Number.isInteger(proposal.action.version), `Cannot ${operation} without a version.`);
+  assert.match(proposal.action.proposalHash, /^[0-9a-f]{64}$/);
+  const payload = await invoke({
+    operation,
+    requestId: crypto.randomUUID(),
+    conversationId: proposal.conversationId,
+    actionId: proposal.action.id,
+    expectedVersion: proposal.action.version,
+    proposalHash: proposal.action.proposalHash,
+  });
+  openProposals.delete(proposal.conversationId);
   return payload;
 }
 
@@ -92,7 +182,11 @@ try {
   );
   assert.equal(enriched.draft.location, 'Brass Barber');
   assert.equal(enriched.draft.reminder_minutes, 15);
+  assert.equal(enriched.status, 'ready_for_confirmation');
   assertInteractive(enriched);
+  const confirmed = await finishProposal('confirm', enriched);
+  assert.equal(confirmed.status, 'confirmed');
+  assert.ok(confirmed.action.targetId, 'Confirmed Coh event must have a durable destination.');
 
   const chore = await ask(
     '[EVAL] Take out the trash tomorrow at 6 PM and earn 20 minutes of game time.',
@@ -103,9 +197,11 @@ try {
   assert.ok(chore.draft.due_at, 'Coh did not resolve the chore due time.');
   assertInteractive(chore);
 
-  console.log('✓ 4 live Coh scenarios passed');
+  console.log('✓ 5 live Coh scenarios passed');
 } finally {
-  await Promise.all([...conversations].map((conversationId) =>
-    ask('Cancel this evaluation request.', conversationId).catch(() => undefined),
-  ));
+  await Promise.all(
+    [...openProposals.values()].map((proposal) =>
+      finishProposal('cancel', proposal).catch(() => undefined),
+    ),
+  );
 }

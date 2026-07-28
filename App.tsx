@@ -27,14 +27,20 @@ import * as Notifications from 'expo-notifications';
 import * as Speech from 'expo-speech';
 import { StatusBar } from 'expo-status-bar';
 import { ShareIntentProvider, useShareIntentContext } from 'expo-share-intent';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   askCoh,
   attachmentFromUri,
+  cancelCohAction,
+  confirmCohAction,
+  createCohConversationId,
+  createCohRequestId,
+  resumeCoh,
   type CohAttachment,
   type CohDraft,
-  type CohHistoryItem,
+  type CohResponse,
 } from './src/services/cohAssistant';
+import { CohoEdgeFunctionError } from './src/services/edgeFunctions';
 import {
   getDeviceCalendarSettings,
   hasDeviceCalendarAccess,
@@ -63,7 +69,6 @@ import {
   subscribeToFamilyInbox,
 } from './src/services/familyInbox';
 import { getLocationSharingState } from './src/services/familyLocation';
-import { addGroceryItems, upsertMealPlans } from './src/services/householdOperations';
 import {
   loadBriefingPreferences,
   registerPushDevice,
@@ -143,7 +148,23 @@ type MoreView =
   | 'Privacy'
   | 'Settings';
 type ChatChannel = 'family' | 'coh';
-type ChatMessage = { id: string; mine: boolean; author: string; text: string; bot?: boolean; channel?: ChatChannel };
+type ChatMessage = {
+  id: string;
+  mine: boolean;
+  author: string;
+  text: string;
+  bot?: boolean;
+  channel?: ChatChannel;
+  delivery?: 'sending' | 'sent' | 'failed';
+  requestId?: string;
+  retryable?: boolean;
+  attachments?: CohAttachment[];
+  attachmentCount?: number;
+  timezone?: string;
+  conversationId?: string;
+  cohPrompt?: string;
+  cohResponse?: CohResponse;
+};
 type BotEvent = {
   id: string;
   sourceId?: string;
@@ -192,6 +213,48 @@ type ChoreFormValue = {
   rewardValue: number;
   rewardLabel: string;
 };
+
+function deviceTimezone() {
+  return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+}
+
+function cohActionRequestKey(
+  operation: 'confirm' | 'cancel',
+  conversationId: string | null,
+  action: CohResponse['action'],
+) {
+  return [
+    operation,
+    conversationId ?? 'no-conversation',
+    action?.id ?? 'no-action',
+    action?.version ?? 'no-version',
+    action?.proposalHash ?? 'no-hash',
+  ].join(':');
+}
+
+function cohActionOperationKey(
+  operation: 'confirm' | 'cancel',
+  response: CohResponse,
+) {
+  return cohActionRequestKey(operation, response.conversationId, response.action);
+}
+
+async function retryRequestInProgress<T>(
+  request: () => Promise<T>,
+  maxPolls = 6,
+): Promise<T> {
+  for (let poll = 0; ; poll += 1) {
+    try {
+      return await request();
+    } catch (error) {
+      const inProgress = error instanceof CohoEdgeFunctionError
+        && error.code === 'REQUEST_IN_PROGRESS';
+      if (!inProgress || poll >= maxPolls) throw error;
+      const delay = Math.min(5_000, Math.max(1_000, error.retryAfterMs ?? 1_500));
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+}
 type EventEntryMode = 'calendar' | 'email' | 'manual' | 'coh';
 type EventFormValue = {
   title: string;
@@ -205,8 +268,6 @@ type EventFormValue = {
   reminderMinutes: number | null;
   writeToDevice: boolean;
 };
-type BotField = 'title' | 'day' | 'time' | 'meridiem' | 'place' | 'directions' | 'reminder' | 'confirm';
-type BotDraft = { title?: string; person?: string; day?: string; dateISO?: string; time?: string; meridiem?: 'AM' | 'PM'; place?: string; reminder?: number; directions?: boolean; awaiting: BotField };
 type ChiefPrefs = BriefingPreferences & { members: string[] };
 type RewardGoal = { id: string; title: string; detail: string; cost: number; icon: string; color: string };
 type FamilyProfile = {
@@ -435,16 +496,17 @@ function CohoApp() {
   const [familyHubOpen, setFamilyHubOpen] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [chatMode, setChatMode] = useState<ChatChannel>('family');
-  const [messageDraft, setMessageDraft] = useState('');
-  const [botDraft, setBotDraft] = useState<BotDraft | null>(null);
+  const [familyMessageDraft, setFamilyMessageDraft] = useState('');
+  const [cohMessageDraft, setCohMessageDraft] = useState('');
   const [botEvents, setBotEvents] = useState<BotEvent[]>([]);
   const [followUps, setFollowUps] = useState<SharedFollowUp[]>([]);
   const [calendarFocusDate, setCalendarFocusDate] = useState<string | null>(null);
   const [selectedEvent, setSelectedEvent] = useState<BotEvent | null>(null);
   const [editingChore, setEditingChore] = useState<Chore | null>(null);
   const [cohConversationId, setCohConversationId] = useState<string | null>(null);
-  const [cohHistory, setCohHistory] = useState<CohHistoryItem[]>([]);
   const [cohThinking, setCohThinking] = useState(false);
+  const [cohRestoring, setCohRestoring] = useState(false);
+  const [cohResumeNonce, setCohResumeNonce] = useState(0);
   const [voiceSending, setVoiceSending] = useState(false);
   const [connected, setConnected] = useState<Record<string, boolean>>({});
   const [sharePreviewOpen, setSharePreviewOpen] = useState(false);
@@ -462,10 +524,24 @@ function CohoApp() {
   const [integrationReturnView, setIntegrationReturnView] = useState<IntegrationCategoryView | null>(null);
   const [integrationCategoryBackView, setIntegrationCategoryBackView] = useState<'Menu' | 'Integrations'>('Menu');
   const [secondUserWelcomeOpen, setSecondUserWelcomeOpen] = useState(false);
+  const familySendLockRef = useRef(false);
+  const cohRequestLockRef = useRef(false);
+  const voiceToggleLockRef = useRef(false);
+  const cohRemoteBusyRef = useRef(false);
+  const cohActionRequestIdsRef = useRef(new Map<string, {
+    requestId: string;
+    timezone: string;
+  }>());
+  const cohActionReplayStorageKeyRef = useRef<string | null>(null);
+  const cohActionReplayLoadRef = useRef<Promise<void>>(Promise.resolve());
 
   useEffect(() => {
     if (tab !== 'More') setLastPrimaryTab(tab);
   }, [tab]);
+
+  useEffect(() => {
+    void ensureCohActionRequestIdsLoaded();
+  }, [currentUserId, householdId]);
 
   useEffect(() => {
     AsyncStorage.getItem('homethread-theme').then((saved) => {
@@ -508,7 +584,14 @@ function CohoApp() {
     Notifications.getLastNotificationResponseAsync().then(openNotification).catch(() => undefined);
     const subscription = Notifications.addNotificationResponseReceivedListener(openNotification);
     Linking.getInitialURL().then((url) => {
-      if (url && /^(coho|homethread):\/\//i.test(url) && !/\/invite\//i.test(url)) {
+      if (
+        url
+        && !/\/invite\//i.test(url)
+        && (
+          /^(coho|homethread):\/\//i.test(url)
+          || /^https:\/\/(?:app\.)?coho\.ai\//i.test(url)
+        )
+      ) {
         void openDeepLink(url);
       }
     }).catch(() => undefined);
@@ -613,6 +696,237 @@ function CohoApp() {
     };
   }, [localDataReady]);
 
+  useEffect(() => {
+    if (!householdId || !currentUserId) return;
+    let active = true;
+    let pollTimer: ReturnType<typeof setTimeout> | null = null;
+    let resumeFailureCount = 0;
+    cohRemoteBusyRef.current = true;
+    setCohRestoring(true);
+
+    async function restoreSession() {
+      try {
+        const session = await resumeCoh({
+          householdId: householdId!,
+          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+        });
+        if (!active) return;
+        resumeFailureCount = 0;
+        const now = Date.now();
+        const outstandingRequests = session.outstandingRequests ?? [];
+        // Edge returns null when the history being reconciled is closed, while
+        // still exposing that request's own conversation ID in the ledger.
+        setCohConversationId(session.conversationId);
+
+        await ensureCohActionRequestIdsLoaded();
+        const pendingReplayRequestIds = new Set(
+          [...cohActionRequestIdsRef.current.values()].map((replay) => replay.requestId),
+        );
+        let replayLedgerChanged = false;
+        for (const request of outstandingRequests) {
+          if (
+            (request.operation !== 'confirm' && request.operation !== 'cancel')
+            || (
+              request.status !== 'completed'
+              && !(request.status === 'failed' && !request.retryable)
+            )
+          ) continue;
+          // The action version advances when it is confirmed or canceled, so
+          // reconstructing the original map key from the terminal response is
+          // unsafe. The request ID is the durable idempotency identity.
+          for (const [operationKey, replay] of cohActionRequestIdsRef.current) {
+            if (replay.requestId !== request.requestId) continue;
+            cohActionRequestIdsRef.current.delete(operationKey);
+            replayLedgerChanged = true;
+          }
+        }
+        if (replayLedgerChanged) {
+          await persistCohActionRequestIds().catch(() => undefined);
+        }
+
+        const restored = (session.turns ?? []).map((turn) => {
+          const leaseExpiresAt = turn.leaseExpiresAt
+            ? new Date(turn.leaseExpiresAt).getTime()
+            : Number.NaN;
+          const leaseExpired = turn.requestState === 'processing'
+            && Boolean(turn.leaseExpiresAt)
+            && (!Number.isFinite(leaseExpiresAt) || leaseExpiresAt <= now);
+          const failedMessage = turn.role === 'user'
+            && turn.operation === 'message'
+            && (turn.requestState === 'failed' || leaseExpired);
+          const processingMessage = turn.role === 'user'
+            && turn.operation === 'message'
+            && turn.requestState === 'processing'
+            && !leaseExpired;
+          return {
+            id: `coh-turn-${turn.id}`,
+            mine: turn.role === 'user',
+            author: turn.role === 'user' ? 'You' : 'Coh',
+            text: turn.content,
+            bot: turn.role === 'assistant',
+            channel: 'coh' as const,
+            delivery: failedMessage
+              ? 'failed' as const
+              : processingMessage
+                ? 'sending' as const
+                : 'sent' as const,
+            requestId: turn.requestId ?? undefined,
+            retryable: failedMessage
+              ? (leaseExpired || turn.retryable)
+              : false,
+            attachmentCount: turn.attachmentCount,
+            timezone: turn.timezone ?? undefined,
+            conversationId: session.conversationId ?? undefined,
+            cohPrompt: turn.role === 'user' && turn.operation === 'message'
+              ? turn.content
+              : undefined,
+            cohResponse: normalizeRestoredCohResponse(
+              turn.response ?? undefined,
+              session.activeAction,
+            ),
+          };
+        });
+        const restoredResponseRequestIds = new Set(
+          restored
+            .filter((message) => !message.mine && Boolean(message.cohResponse))
+            .map((message) => message.requestId)
+            .filter((requestId): requestId is string => Boolean(requestId)),
+        );
+        const receiptMessages: ChatMessage[] = outstandingRequests
+          .filter((request) =>
+            request.status === 'completed'
+            && Boolean(request.response)
+            && !restoredResponseRequestIds.has(request.requestId)
+            && pendingReplayRequestIds.has(request.requestId),
+          )
+          .map((request) => ({
+            id: `coh-receipt-${request.requestId}`,
+            mine: false,
+            author: 'Coh',
+            text: request.response!.reply,
+            bot: true,
+            channel: 'coh',
+            delivery: 'sent',
+            requestId: request.requestId,
+            conversationId: request.response!.conversationId ?? undefined,
+            cohResponse: request.response!,
+          }));
+        const durableMessages = [...restored, ...receiptMessages];
+
+        setMessages((current) => {
+          const localByRequestId = new Map(
+            current
+              .filter((message) =>
+                messageChannel(message) === 'coh' && Boolean(message.requestId),
+              )
+              .map((message) => [message.requestId!, message]),
+          );
+          const hydratedMessages = durableMessages.map((message) => {
+            const local = message.requestId
+              ? localByRequestId.get(message.requestId)
+              : undefined;
+            if (!message.mine || !local) return message;
+            return {
+              ...message,
+              // Durable turns intentionally do not return attachment bytes.
+              // Keep the in-memory envelope so an exact same-process retry can
+              // still resend the original voice note, screenshot, or PDF.
+              attachments: local.attachments,
+              attachmentCount: Math.max(
+                message.attachmentCount ?? 0,
+                local.attachmentCount ?? local.attachments?.length ?? 0,
+              ),
+              timezone: message.timezone ?? local.timezone,
+              conversationId: message.conversationId ?? local.conversationId,
+              cohPrompt: message.cohPrompt ?? local.cohPrompt,
+            };
+          });
+          const durableIds = new Set(hydratedMessages.map((message) => message.id));
+          const durableRequestIds = new Set(
+            hydratedMessages
+              .map((message) => message.requestId)
+              .filter((requestId): requestId is string => Boolean(requestId)),
+          );
+          const outstandingByRequestId = new Map(
+            outstandingRequests.map((request) => [request.requestId, request]),
+          );
+          const localCoh = current
+            .filter((message) =>
+              messageChannel(message) === 'coh'
+              && !durableIds.has(message.id)
+              && (!message.requestId || !durableRequestIds.has(message.requestId))
+              && (message.delivery === 'sending' || message.delivery === 'failed'),
+            )
+            .map((message) => {
+              const request = message.requestId
+                ? outstandingByRequestId.get(message.requestId)
+                : undefined;
+              if (!request || request.operation !== 'message') return message;
+              const leaseExpiresAt = request.leaseExpiresAt
+                ? new Date(request.leaseExpiresAt).getTime()
+                : Number.NaN;
+              const leaseExpired = request.status === 'processing'
+                && Boolean(request.leaseExpiresAt)
+                && (!Number.isFinite(leaseExpiresAt) || leaseExpiresAt <= now);
+              if (request.status !== 'failed' && !leaseExpired) {
+                return { ...message, delivery: 'sending' as const };
+              }
+              return {
+                ...message,
+                delivery: 'failed' as const,
+                retryable: leaseExpired || request.retryable,
+              };
+            });
+          const family = current.filter((message) => messageChannel(message) === 'family');
+          return [...hydratedMessages, ...localCoh, ...family];
+        });
+
+        const hasProcessingTurn = session.turns.some((turn) =>
+          turn.requestState === 'processing'
+          && (!turn.leaseExpiresAt || new Date(turn.leaseExpiresAt).getTime() > now),
+        );
+        const hasProcessingLedgerRequest = outstandingRequests.some((request) =>
+          request.status === 'processing'
+          && (
+            !request.leaseExpiresAt
+            || new Date(request.leaseExpiresAt).getTime() > now
+          ),
+        );
+        const hasProcessingRequest = hasProcessingTurn
+          || hasProcessingLedgerRequest
+          || (
+            !Array.isArray(session.outstandingRequests)
+            && session.hasProcessingRequests === true
+          );
+        if (hasProcessingRequest) {
+          cohRemoteBusyRef.current = true;
+          pollTimer = setTimeout(() => void restoreSession(), 2_000);
+          return;
+        }
+      } catch {
+        // Recovery is safety-critical: keep retrying after a transient fetch or
+        // relay failure instead of leaving an in-flight request stuck forever.
+        resumeFailureCount += 1;
+        if (active) {
+          const retryDelay = Math.min(30_000, 1_000 * (2 ** Math.min(resumeFailureCount, 5)));
+          pollTimer = setTimeout(() => void restoreSession(), retryDelay);
+        }
+        return;
+      }
+      if (active) {
+        cohRemoteBusyRef.current = false;
+        setCohRestoring(false);
+      }
+    }
+
+    void restoreSession();
+    return () => {
+      active = false;
+      cohRemoteBusyRef.current = false;
+      if (pollTimer) clearTimeout(pollTimer);
+    };
+  }, [householdId, currentUserId, cohResumeNonce]);
+
   async function reloadSharedData(targetHousehold = householdId, targetUser = currentUserId) {
     if (!targetHousehold || !targetUser) return;
     const [sharedMessages, sharedEvents, sharedChores, sharedFollowUps, householdPeople, snapshots, nextInboxReviewCount] = await Promise.all([
@@ -648,6 +962,65 @@ function CohoApp() {
 
   const theme = useMemo(() => createTheme(dark), [dark]);
   const styles = useMemo(() => createStyles(theme), [theme]);
+
+  async function ensureCohActionRequestIdsLoaded() {
+    const storageKey = currentUserId && householdId
+      ? `coho-coh-action-replays-v1:${currentUserId}:${householdId}`
+      : null;
+    if (!storageKey) {
+      cohActionReplayStorageKeyRef.current = null;
+      cohActionRequestIdsRef.current.clear();
+      cohActionReplayLoadRef.current = Promise.resolve();
+      return;
+    }
+    if (cohActionReplayStorageKeyRef.current === storageKey) {
+      await cohActionReplayLoadRef.current;
+      return;
+    }
+
+    cohActionReplayStorageKeyRef.current = storageKey;
+    cohActionRequestIdsRef.current.clear();
+    const load = AsyncStorage.getItem(storageKey)
+      .then((saved) => {
+        if (!saved || cohActionReplayStorageKeyRef.current !== storageKey) return;
+        const parsed: unknown = JSON.parse(saved);
+        if (!Array.isArray(parsed)) return;
+        for (const entry of parsed) {
+          if (!Array.isArray(entry) || entry.length !== 2) continue;
+          const [key, value] = entry;
+          if (
+            typeof key === 'string'
+            && value
+            && typeof value === 'object'
+            && typeof (value as any).requestId === 'string'
+            && typeof (value as any).timezone === 'string'
+          ) {
+            cohActionRequestIdsRef.current.set(key, {
+              requestId: (value as any).requestId,
+              timezone: (value as any).timezone,
+            });
+          }
+        }
+      })
+      .catch(() => undefined);
+    cohActionReplayLoadRef.current = load;
+    await load;
+  }
+
+  async function persistCohActionRequestIds() {
+    await ensureCohActionRequestIdsLoaded();
+    const storageKey = cohActionReplayStorageKeyRef.current;
+    if (!storageKey) return;
+    await AsyncStorage.setItem(
+      storageKey,
+      JSON.stringify([...cohActionRequestIdsRef.current.entries()]),
+    );
+  }
+
+  async function forgetCohActionRequestId(operationKey: string) {
+    cohActionRequestIdsRef.current.delete(operationKey);
+    await persistCohActionRequestIds().catch(() => undefined);
+  }
 
   async function toggleTheme() {
     const next = !dark;
@@ -711,7 +1084,7 @@ function CohoApp() {
     if (quickAddType === 'Message') {
       setChatMode('family');
       setTab('Chat');
-      setMessageDraft([title, details].filter(Boolean).join('\n'));
+      setFamilyMessageDraft([title, details].filter(Boolean).join('\n'));
       showNotice('Review your family message, then send it');
       return;
     }
@@ -736,7 +1109,7 @@ function CohoApp() {
     }
     const prompt = `@coh Add an event: ${title}${details ? `. Details: ${details}` : ''}`;
     setChatMode('coh');
-    setMessageDraft(prompt);
+    setCohMessageDraft(prompt);
     setTab('Chat');
     showNotice('Coh will confirm the missing event details before saving');
   }
@@ -751,7 +1124,7 @@ function CohoApp() {
     }
     if (mode === 'coh') {
       setChatMode('coh');
-      setMessageDraft('@coh Help me create a family calendar event.');
+      setCohMessageDraft('@coh Help me create a family calendar event.');
       setTab('Chat');
       showNotice('Tell Coh what you know. It will ask only for missing details.');
       return;
@@ -897,30 +1270,83 @@ function CohoApp() {
     return true;
   }
 
-  function addBotMessage(text: string) {
-    setTimeout(() => setMessages((current) => [...current, { id: `bot-${Date.now()}`, mine: false, author: 'Coh', text, bot: true, channel: 'coh' }]), 250);
+  function addBotMessage(text: string, response?: CohResponse) {
+    setMessages((current) => [...current, {
+      id: `bot-${response?.requestId ?? createCohRequestId()}`,
+      mine: false,
+      author: 'Coh',
+      text,
+      bot: true,
+      channel: 'coh',
+      cohResponse: response,
+    }]);
   }
 
   async function sendMessage() {
-    const text = messageDraft.trim();
+    const mode = chatMode;
+    const lock = mode === 'coh' ? cohRequestLockRef : familySendLockRef;
+    if (mode === 'coh' && cohRemoteBusyRef.current) {
+      showNotice('Coh is still reconciling the previous request. Family chat remains available.');
+      return;
+    }
+    if (lock.current) return;
+    const text = (mode === 'coh' ? cohMessageDraft : familyMessageDraft).trim();
     if (!text) return;
-    const optimistic = { id: `pending-${Date.now()}`, mine: true, author: 'You', text, channel: chatMode } as ChatMessage;
+    lock.current = true;
+    const requestId = createCohRequestId();
+    const timezone = deviceTimezone();
+    const prompt = text.match(/^\s*(@coh|hey coh)/i) ? text : `@coh ${text}`;
+    const conversationId = mode === 'coh'
+      ? (cohConversationId ?? createCohConversationId())
+      : undefined;
+    const optimistic = {
+      id: `pending-${requestId}`,
+      mine: true,
+      author: 'You',
+      text,
+      channel: mode,
+      requestId: mode === 'coh' ? requestId : undefined,
+      attachmentCount: 0,
+      timezone: mode === 'coh' ? timezone : undefined,
+      conversationId,
+      cohPrompt: mode === 'coh' ? prompt : undefined,
+      delivery: 'sending',
+    } as ChatMessage;
     setMessages((current) => [...current, optimistic]);
-    setMessageDraft('');
-    if (chatMode === 'coh') {
-      void handleBotMessage(text.match(/^\s*(@coh|hey coh)/i) ? text : `@coh ${text}`);
+    if (mode === 'coh') setCohMessageDraft('');
+    else setFamilyMessageDraft('');
+    if (mode === 'coh') {
+      void handleBotMessage(
+        prompt,
+        [],
+        requestId,
+        optimistic.id,
+        timezone,
+        conversationId,
+      )
+        .finally(() => {
+          cohRequestLockRef.current = false;
+        });
       return;
     }
     if (!householdId || !currentUserId) {
+      setMessages((current) => current.filter((message) => message.id !== optimistic.id));
+      setFamilyMessageDraft(text);
       showNotice('Family chat is offline. Reconnect before sending this message.');
+      familySendLockRef.current = false;
       return;
     }
     try {
       await sendFamilyMessage(householdId, currentUserId, text);
+      setMessages((current) => current.map((message) =>
+        message.id === optimistic.id ? { ...message, delivery: 'sent' } : message,
+      ));
     } catch {
       setMessages((current) => current.filter((message) => message.id !== optimistic.id));
-      setMessageDraft(text);
+      setFamilyMessageDraft(text);
       showNotice('Message was not sent. Your text is back in the composer.');
+    } finally {
+      familySendLockRef.current = false;
     }
   }
 
@@ -931,6 +1357,11 @@ function CohoApp() {
   }
 
   async function sendSharedItemToCoh() {
+    if (cohRequestLockRef.current || cohRemoteBusyRef.current) {
+      showNotice('Coh is finishing another request. Try sharing again in a moment.');
+      return;
+    }
+    cohRequestLockRef.current = true;
     const incoming = shareIntent as any;
     const sharedFiles = Array.isArray(incoming?.files) ? incoming.files.slice(0, 4) : [];
     const text = sharedDraft.trim();
@@ -957,14 +1388,32 @@ function CohoApp() {
       const prompt = promptText.match(/^\s*(@coh|hey coh|@bot|hey bot)/i)
         ? promptText
         : `@coh ${promptText}`;
+      const requestId = createCohRequestId();
+      const optimisticId = `pending-${requestId}`;
+      const timezone = deviceTimezone();
+      const conversationId = cohConversationId ?? createCohConversationId();
       setMessages((current) => [...current, {
-        id: `shared-${Date.now()}`,
+        id: optimisticId,
         mine: true,
         author: 'You',
         text: attachments.length ? `${prompt}\n📎 ${attachments.map((item) => item.name).join(', ')}` : prompt,
         channel: 'coh',
+        requestId,
+        attachments,
+        attachmentCount: attachments.length,
+        timezone,
+        conversationId,
+        cohPrompt: prompt,
+        delivery: 'sending',
       }]);
-      await handleBotMessage(prompt, attachments);
+      await handleBotMessage(
+        prompt,
+        attachments,
+        requestId,
+        optimisticId,
+        timezone,
+        conversationId,
+      );
       setSharedDraft('');
     } catch (nextError) {
       addBotMessage(nextError instanceof Error
@@ -973,156 +1422,359 @@ function CohoApp() {
     } finally {
       resetShareIntent();
       setCohThinking(false);
+      cohRequestLockRef.current = false;
     }
   }
 
-  async function handleBotMessage(text: string, attachments: CohAttachment[] = []) {
+  async function handleBotMessage(
+    text: string,
+    attachments: CohAttachment[] = [],
+    requestId = createCohRequestId(),
+    optimisticId?: string,
+    requestTimezone = deviceTimezone(),
+    requestedConversationId?: string,
+  ) {
     const normalized = text.trim().toLowerCase();
     const directlyInvoked = normalized.startsWith('@coh') || normalized.startsWith('hey coh') || normalized.startsWith('@bot') || normalized.startsWith('hey bot');
-    if (!directlyInvoked && !botDraft && !cohConversationId) return;
+    if (!directlyInvoked && !cohConversationId) return;
 
+    const conversationId = requestedConversationId
+      ?? cohConversationId
+      ?? createCohConversationId();
+    if (!cohConversationId) setCohConversationId(conversationId);
     setCohThinking(true);
     try {
-      const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
-      const response = await askCoh({
+      const response = await retryRequestInProgress(() => askCoh({
         message: text,
-        conversationId: cohConversationId,
+        requestId,
+        conversationId,
         householdId,
-        timezone,
-        history: cohHistory,
+        timezone: requestTimezone,
         attachments,
-      });
+      }));
       setCohConversationId(response.conversationId);
-      setCohHistory((current) => [...current, { role: 'user' as const, content: text }, { role: 'assistant' as const, content: response.reply }].slice(-16));
-      addBotMessage(response.reply);
+      setMessages((current) => {
+        const updated = current.map((message) =>
+          message.id === optimisticId
+            || (message.mine && message.requestId === requestId)
+            ? { ...message, delivery: 'sent' as const, conversationId }
+            : response.action?.id
+              && message.cohResponse?.action?.id === response.action.id
+              ? {
+                ...message,
+                cohResponse: supersedeCohResponse(message.cohResponse),
+              }
+              : message,
+        );
+        const assistantMessage: ChatMessage = {
+          id: `bot-${requestId}`,
+          mine: false,
+          author: 'Coh',
+          text: response.reply,
+          bot: true,
+          channel: 'coh',
+          cohResponse: response,
+        };
+        const existingAssistant = updated.findIndex((message) =>
+          message.bot && message.cohResponse?.requestId === requestId,
+        );
+        if (existingAssistant >= 0) {
+          updated[existingAssistant] = assistantMessage;
+          return updated;
+        }
+        return [...updated, assistantMessage];
+      });
 
-      if (response.status === 'confirmed' && response.action?.targetId) {
-        if (householdId && currentUserId) {
-          await reloadSharedData(householdId, currentUserId);
-        }
-        const targetLabel = response.action.targetTable === 'events'
-          ? 'the family calendar'
-          : response.action.targetTable === 'chores'
-            ? 'shared chores'
-            : response.action.targetTable === 'notes'
-              ? 'family notes'
-              : response.action.targetTable === 'grocery_items'
-                ? 'the grocery list'
-                : response.action.targetTable === 'meal_plans'
-                  ? 'the family meal plan'
-                  : 'Coho';
-        addBotMessage(`Done — it’s now in ${targetLabel}.`);
-        if (response.action.targetTable === 'events') setTab('Calendar');
-        if (response.action.targetTable === 'chores') setTab('Chores');
-        if (response.action.targetTable === 'notes') { setMoreView('Notes'); setTab('More'); }
-        if (response.action.targetTable === 'grocery_items' || response.action.targetTable === 'meal_plans') {
-          setMoreView('Meals & Groceries');
-          setTab('More');
-        }
+      if (response.action?.targetId) {
+        if (householdId && currentUserId) await reloadSharedData(householdId, currentUserId);
         setCohConversationId(null);
-        setCohHistory([]);
-      } else if (response.status === 'confirmed' && response.proposed_action.type === 'create_event') {
-        const event = eventFromCohDraft(response.draft);
-        if (event) {
-          const result = await persistApprovedEvent(event);
-          addBotMessage(eventSaveReply(event, result));
-        }
-        setCohConversationId(null);
-        setCohHistory([]);
-      } else if (response.status === 'confirmed' && response.proposed_action.type === 'create_chore') {
-        if (!householdId || !currentUserId || !response.draft.title) {
-          addBotMessage('I could not save that chore because the shared household or title is missing.');
-        } else {
-          const assignee = response.draft.person
-            ? profiles.find((profile) =>
-              profile.name.localeCompare(response.draft.person ?? '', undefined, { sensitivity: 'base' }) === 0,
-            )
-            : null;
-          await createFamilyChore({
-            householdId,
-            userId: currentUserId,
-            title: response.draft.title,
-            details: response.draft.notes ?? '',
-            assignedPersonId: assignee?.id ?? null,
-            assignedUserId: assignee?.linkedUserId ?? null,
-            dueAt: response.draft.due_at,
-            recurrenceRule: response.draft.recurrence_rule,
-            reminderMinutes: response.draft.reminder_minutes,
-            rewardType: response.draft.reward_type ?? 'points',
-            rewardValue: response.draft.reward_value ?? 10,
-            rewardLabel: response.draft.reward_label,
-          });
-          addBotMessage(`Done — “${response.draft.title}” is now a shared chore${assignee ? ` for ${assignee.name}` : ''}. Open Chores to choose what it earns.`);
-          showNotice('Coh added the chore to the household');
-        }
-        setCohConversationId(null);
-        setCohHistory([]);
-      } else if (response.status === 'confirmed' && response.proposed_action.type === 'create_note') {
-        if (!householdId || !currentUserId || !response.draft.title) {
-          addBotMessage('I could not save that note because the shared household or title is missing.');
-        } else {
-          await saveFamilyNote({
-            householdId,
-            userId: currentUserId,
-            title: response.draft.title,
-            body: response.draft.notes ?? '',
-            pinned: false,
-          });
-          addBotMessage(`Done — “${response.draft.title}” is in the shared family notes.`);
-          showNotice('Coh added the note to the household');
-        }
-        setCohConversationId(null);
-        setCohHistory([]);
-      } else if (response.status === 'confirmed' && response.proposed_action.type === 'add_grocery_items') {
-        if (!householdId || !currentUserId) {
-          addBotMessage('Join a Coho household first so I can add those items to a shared grocery list.');
-        } else {
-          await addGroceryItems({
-            householdId,
-            userId: currentUserId,
-            items: response.draft.grocery_items,
-          });
-          showNotice(`${response.draft.grocery_items.length} grocery item${response.draft.grocery_items.length === 1 ? '' : 's'} added`);
-        }
-        setCohConversationId(null);
-        setCohHistory([]);
-      } else if (response.status === 'confirmed' && response.proposed_action.type === 'create_meal_plan') {
-        if (!householdId || !currentUserId) {
-          addBotMessage('Join a Coho household first so I can save the meal plan for everyone.');
-        } else {
-          await upsertMealPlans({
-            householdId,
-            userId: currentUserId,
-            meals: response.draft.meals.map((meal) => ({
-              date: meal.date,
-              mealType: meal.meal_type,
-              title: meal.title,
-              notes: meal.notes,
-            })),
-          });
-          showNotice(`${response.draft.meals.length} meal${response.draft.meals.length === 1 ? '' : 's'} added to the family week`);
-        }
-        setCohConversationId(null);
-        setCohHistory([]);
       } else if (response.status === 'canceled') {
         setCohConversationId(null);
-        setCohHistory([]);
       }
       return;
     } catch (error) {
-      const detail = error instanceof Error && error.message
-        ? ` (${error.message})`
-        : '';
-      addBotMessage(`I couldn’t reach the secure Coh service, so I did not create anything. Your request is still here—try again in a moment.${detail}`);
+      if (
+        error instanceof CohoEdgeFunctionError
+        && error.code === 'REQUEST_IN_PROGRESS'
+      ) {
+        if (optimisticId) {
+          setMessages((current) => current.map((message) =>
+            message.id === optimisticId
+              ? {
+                ...message,
+                delivery: 'sending',
+                requestId,
+                attachments,
+                attachmentCount: attachments.length,
+                timezone: requestTimezone,
+                conversationId,
+                retryable: true,
+              }
+              : message,
+          ));
+        }
+        cohRemoteBusyRef.current = true;
+        setCohResumeNonce((current) => current + 1);
+        showNotice('Coh is still working. This request will reconcile automatically; no need to send it again.');
+        return;
+      }
+      if (optimisticId) {
+        const retryable = error instanceof CohoEdgeFunctionError ? error.retryable : true;
+        setMessages((current) => current.map((message) =>
+          message.id === optimisticId
+            ? {
+              ...message,
+              delivery: 'failed',
+              requestId,
+              attachments,
+              attachmentCount: attachments.length,
+              timezone: requestTimezone,
+              conversationId,
+              retryable,
+            }
+            : message,
+        ));
+      }
+      const detail = error instanceof CohoEdgeFunctionError
+        ? error.message
+        : 'Coh could not finish that request.';
+      const retryable = error instanceof CohoEdgeFunctionError ? error.retryable : true;
+      showNotice(retryable
+        ? `${detail} Your request is preserved—tap Retry.`
+        : detail);
       return;
     } finally {
       setCohThinking(false);
     }
   }
 
+  async function retryCohMessage(message: ChatMessage) {
+    if (
+      !message.requestId
+      || message.retryable === false
+      || cohRequestLockRef.current
+      || cohRemoteBusyRef.current
+    ) return;
+    if (!message.timezone) {
+      setCohMessageDraft(message.cohPrompt ?? message.text);
+      showNotice('This older request is missing its original timezone. It is back in the composer so you can send it as a new request.');
+      return;
+    }
+    if (!message.conversationId) {
+      setCohMessageDraft(message.cohPrompt ?? message.text);
+      showNotice('This older request is missing its original conversation. It is back in the composer so you can send it as a new request.');
+      return;
+    }
+    const attachmentCount = message.attachmentCount ?? message.attachments?.length ?? 0;
+    if (attachmentCount > 0 && (message.attachments?.length ?? 0) !== attachmentCount) {
+      setCohMessageDraft(message.cohPrompt ?? message.text);
+      showNotice('Reattach the original file or voice note, then send this as a new request. Coh will not retry a different payload under the old request ID.');
+      return;
+    }
+    cohRequestLockRef.current = true;
+    setMessages((current) => current.map((item) =>
+      item.id === message.id ? { ...item, delivery: 'sending' } : item,
+    ));
+    try {
+      await handleBotMessage(
+        message.cohPrompt
+          ?? (message.text.match(/^\s*(@coh|hey coh)/i) ? message.text : `@coh ${message.text}`),
+        message.attachments ?? [],
+        message.requestId,
+        message.id,
+        message.timezone,
+        message.conversationId,
+      );
+    } finally {
+      cohRequestLockRef.current = false;
+    }
+  }
+
+  async function confirmCohProposal(response: CohResponse) {
+    const conversationId = response.conversationId;
+    const action = response.action;
+    if (
+      !householdId
+      || !conversationId
+      || !action
+      || cohRequestLockRef.current
+      || cohRemoteBusyRef.current
+    ) return;
+    cohRequestLockRef.current = true;
+    await ensureCohActionRequestIdsLoaded();
+    const operationKey = cohActionOperationKey('confirm', response);
+    const replay = cohActionRequestIdsRef.current.get(operationKey) ?? {
+      requestId: createCohRequestId(),
+      timezone: deviceTimezone(),
+    };
+    cohActionRequestIdsRef.current.set(operationKey, replay);
+    try {
+      await persistCohActionRequestIds();
+    } catch {
+      cohActionRequestIdsRef.current.delete(operationKey);
+      cohRequestLockRef.current = false;
+      showNotice('Coho could not secure this confirmation for safe replay. Nothing was created; try again.');
+      return;
+    }
+    const { requestId, timezone } = replay;
+    const optimisticId = `pending-${requestId}`;
+    setMessages((current) => [...current, {
+      id: optimisticId,
+      mine: true,
+      author: 'You',
+      text: 'Confirm & create',
+      channel: 'coh',
+      requestId,
+      delivery: 'sending',
+    }]);
+    setCohThinking(true);
+    try {
+      const result = await retryRequestInProgress(() => confirmCohAction({
+        requestId,
+        conversationId,
+        householdId,
+        timezone,
+        actionId: action.id,
+        expectedVersion: action.version,
+        proposalHash: action.proposalHash,
+      }));
+      await forgetCohActionRequestId(operationKey);
+      applyCohActionResult(action.id, optimisticId, result);
+      if (result.action?.targetId && currentUserId) {
+        await reloadSharedData(householdId, currentUserId);
+        setCohConversationId(null);
+      }
+    } catch (error) {
+      // Confirmation is a distinct server operation. Do not leave a generic
+      // "Retry safely" message behind because retrying that message would send
+      // it through the normal conversation endpoint instead of re-validating
+      // the proposal version and hash. Keep the proposal card actionable so
+      // the user can explicitly confirm it again.
+      setMessages((current) => current.filter((message) => message.id !== optimisticId));
+      const retryable = !(error instanceof CohoEdgeFunctionError) || error.retryable;
+      if (!retryable) await forgetCohActionRequestId(operationKey);
+      const detail = error instanceof Error
+        ? error.message
+        : 'Coh could not confirm that action. Nothing new was claimed.';
+      showNotice(retryable
+        ? `${detail} Tap Confirm & create again to retry the exact same operation safely.`
+        : detail);
+    } finally {
+      setCohThinking(false);
+      cohRequestLockRef.current = false;
+    }
+  }
+
+  async function cancelCohProposal(response: CohResponse) {
+    const conversationId = response.conversationId;
+    const action = response.action;
+    if (
+      !householdId
+      || !conversationId
+      || !action
+      || cohRequestLockRef.current
+      || cohRemoteBusyRef.current
+    ) return;
+    cohRequestLockRef.current = true;
+    await ensureCohActionRequestIdsLoaded();
+    const operationKey = cohActionOperationKey('cancel', response);
+    const replay = cohActionRequestIdsRef.current.get(operationKey) ?? {
+      requestId: createCohRequestId(),
+      timezone: deviceTimezone(),
+    };
+    cohActionRequestIdsRef.current.set(operationKey, replay);
+    try {
+      await persistCohActionRequestIds();
+    } catch {
+      cohActionRequestIdsRef.current.delete(operationKey);
+      cohRequestLockRef.current = false;
+      showNotice('Coho could not secure this cancellation for safe replay. Nothing changed; try again.');
+      return;
+    }
+    const { requestId, timezone } = replay;
+    setCohThinking(true);
+    try {
+      const result = await retryRequestInProgress(() => cancelCohAction({
+        requestId,
+        conversationId,
+        householdId,
+        timezone,
+        actionId: action.id,
+        expectedVersion: action.version,
+        proposalHash: action.proposalHash,
+      }));
+      await forgetCohActionRequestId(operationKey);
+      applyCohActionResult(action.id, null, result);
+      setCohConversationId(null);
+    } catch (error) {
+      const retryable = !(error instanceof CohoEdgeFunctionError) || error.retryable;
+      if (!retryable) await forgetCohActionRequestId(operationKey);
+      const detail = error instanceof Error ? error.message : 'Coh could not cancel that proposal.';
+      showNotice(retryable
+        ? `${detail} Tap Cancel again to retry the exact same operation safely.`
+        : detail);
+    } finally {
+      setCohThinking(false);
+      cohRequestLockRef.current = false;
+    }
+  }
+
+  function applyCohActionResult(actionId: string, optimisticId: string | null, result: CohResponse) {
+    setMessages((current) => [
+      ...current.map((message) => {
+        if (optimisticId && message.id === optimisticId) return { ...message, delivery: 'sent' as const };
+        if (message.cohResponse?.action?.id === actionId) {
+          return {
+            ...message,
+            cohResponse: {
+              ...message.cohResponse,
+              action: result.action,
+              status: result.status,
+            },
+          };
+        }
+        return message;
+      }),
+      {
+        id: `bot-${result.requestId}`,
+        mine: false,
+        author: 'Coh',
+        text: result.reply,
+        bot: true,
+        channel: 'coh',
+        cohResponse: result,
+      },
+    ]);
+  }
+
+  function changeCohProposal(response: CohResponse) {
+    setCohConversationId(response.conversationId);
+    setChatMode('coh');
+    setCohMessageDraft('Change ');
+    showNotice('Tell Coh exactly what to change; the current proposal stays intact until you confirm.');
+  }
+
+  async function openCohAction(response: CohResponse) {
+    if (!response.action?.id) return;
+    const action = await getHouseholdAction(response.action.id).catch(() => null);
+    if (action) await openActionTarget(action);
+    else showNotice('That item could not be opened. Refresh and try again.');
+  }
+
   async function toggleVoiceRequest() {
-    if (voiceSending || cohThinking) return;
+    if (voiceToggleLockRef.current) return;
+    if (!voiceRecorderState.isRecording && cohRemoteBusyRef.current) {
+      showNotice('Coh is still reconciling the previous request. You can keep using Family chat meanwhile.');
+      return;
+    }
+    voiceToggleLockRef.current = true;
     if (voiceRecorderState.isRecording) {
+      if (cohRequestLockRef.current || cohRemoteBusyRef.current) {
+        voiceToggleLockRef.current = false;
+        showNotice('Coh is reconciling another request. Keep recording, then tap again when it is done to send this voice note.');
+        return;
+      }
+      cohRequestLockRef.current = true;
       setVoiceSending(true);
       try {
         await voiceRecorder.stop();
@@ -1134,127 +1786,57 @@ function CohoApp() {
           mimeType: 'audio/m4a',
         });
         const prompt = '@coh Listen to this voice note and help me finish the household action.';
+        const requestId = createCohRequestId();
+        const optimisticId = `pending-${requestId}`;
+        const timezone = deviceTimezone();
+        const conversationId = cohConversationId ?? createCohConversationId();
         setMessages((current) => [...current, {
-          id: `voice-${Date.now()}`,
+          id: optimisticId,
           mine: true,
           author: 'You',
           text: '🎙️ Voice request',
           channel: 'coh',
+          requestId,
+          attachments: [attachment],
+          attachmentCount: 1,
+          timezone,
+          conversationId,
+          cohPrompt: prompt,
+          delivery: 'sending',
         }]);
-        await handleBotMessage(prompt, [attachment]);
+        await handleBotMessage(
+          prompt,
+          [attachment],
+          requestId,
+          optimisticId,
+          timezone,
+          conversationId,
+        );
       } catch (nextError) {
         addBotMessage(nextError instanceof Error ? nextError.message : 'I could not read that voice note.');
       } finally {
         setVoiceSending(false);
+        cohRequestLockRef.current = false;
+        voiceToggleLockRef.current = false;
       }
       return;
     }
 
-    const permission = await requestRecordingPermissionsAsync();
-    if (!permission.granted) {
-      showNotice('Microphone permission is needed only when you choose to speak to Coh.');
-      return;
-    }
-    await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
-    await voiceRecorder.prepareToRecordAsync();
-    voiceRecorder.record();
-    setChatMode('coh');
-    showNotice('Listening… tap the microphone again when you’re done');
-  }
-
-  function handleLocalBotMessage(text: string) {
-    const normalized = text.trim().toLowerCase();
-    if (!botDraft && !normalized.startsWith('@coh') && !normalized.startsWith('hey coh') && !normalized.startsWith('@bot') && !normalized.startsWith('hey bot')) return;
-
-    if (/^(cancel|never mind|nevermind|stop)\b/.test(normalized)) {
-      setBotDraft(null);
-      addBotMessage('Canceled — I didn’t create anything.');
-      return;
-    }
-
-    if (!botDraft) {
-      const extracted = extractEventIntent(text);
-      const next: BotDraft = { ...extracted, person: extracted.person ?? 'You', awaiting: 'title' };
-      continueBotDraft(next);
-      return;
-    }
-
-    if (botDraft.awaiting === 'title') {
-      const extracted = extractEventIntent(`@coh ${text}`);
-      continueBotDraft({ ...botDraft, ...extracted, title: extracted.title ?? titleCaseWords(text.trim()) });
-      return;
-    }
-
-    if (botDraft.awaiting === 'day') {
-      const date = extractDate(text);
-      if (!date) { addBotMessage(`I couldn’t identify the day. Try “tomorrow,” “Wednesday,” or “August 14.”`); return; }
-      continueBotDraft({ ...botDraft, ...date });
-      return;
-    }
-
-    if (botDraft.awaiting === 'time') {
-      const time = extractTime(text);
-      if (!time) { addBotMessage('What time should I use? For example, “9:15 AM.”'); return; }
-      continueBotDraft({ ...botDraft, ...time });
-      return;
-    }
-
-    if (botDraft.awaiting === 'meridiem') {
-      const meridiem = normalized.match(/\b(am|pm)\b/i)?.[1]?.toUpperCase() as 'AM' | 'PM' | undefined;
-      if (!meridiem) { addBotMessage(`Is ${botDraft.time} in the morning or evening? Reply AM or PM.`); return; }
-      continueBotDraft({ ...botDraft, meridiem });
-      return;
-    }
-
-    if (botDraft.awaiting === 'place') {
-      const place = /^(skip|none|no place|home)\b/.test(normalized) ? undefined : cleanAnswer(text);
-      continueBotDraft({ ...botDraft, place, awaiting: place ? 'directions' : 'reminder' });
-      return;
-    }
-
-    if (botDraft.awaiting === 'directions') {
-      if (!isYes(normalized) && !isNo(normalized)) { addBotMessage('Should I include directions? Reply yes or no.'); return; }
-      continueBotDraft({ ...botDraft, directions: isYes(normalized), awaiting: 'reminder' });
-      return;
-    }
-
-    if (botDraft.awaiting === 'reminder') {
-      if (!isYes(normalized) && !isNo(normalized) && !parseReminder(normalized)) { addBotMessage('Would you like a reminder? Say “no,” “yes” for 15 minutes, or tell me another number.'); return; }
-      continueBotDraft({ ...botDraft, reminder: isNo(normalized) ? undefined : isYes(normalized) ? 15 : parseReminder(normalized), awaiting: 'confirm' });
-      return;
-    }
-
-    if (botDraft.awaiting === 'confirm') {
-      if (isYes(normalized) || /^(add it|create it|save it|done)\b/.test(normalized)) {
-        const event: BotEvent = { id: `event-${Date.now()}`, title: botDraft.title!, person: botDraft.person ?? 'You', day: botDraft.day!, dateISO: botDraft.dateISO, time: formatDraftTime(botDraft), place: botDraft.place, reminder: botDraft.reminder, directions: botDraft.directions };
-        setBotDraft(null);
-        void persistApprovedEvent(event).then((result) => addBotMessage(eventSaveReply(event, result)));
+    try {
+      const permission = await requestRecordingPermissionsAsync();
+      if (!permission.granted) {
+        showNotice('Microphone permission is needed only when you choose to speak to Coh.');
         return;
       }
-      if (isNo(normalized)) {
-        addBotMessage('Okay — I didn’t create it. Tell me what you’d like changed, or say cancel.');
-        return;
-      }
-      const correction = extractDraftCorrection(text);
-      if (Object.keys(correction).length) { continueBotDraft({ ...botDraft, ...correction, awaiting: 'confirm' }); return; }
-      addBotMessage('Tell me what to change—such as “make it 10 AM,” “change the place to Brass Barber,” or say “add it.”');
+      await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
+      await voiceRecorder.prepareToRecordAsync();
+      voiceRecorder.record();
+      setChatMode('coh');
+      showNotice('Listening… tap the microphone again when you’re done');
+    } finally {
+      voiceToggleLockRef.current = false;
     }
   }
-
-  function continueBotDraft(draft: BotDraft) {
-    let next = { ...draft };
-    let question = '';
-    if (!next.title) { next.awaiting = 'title'; question = 'Absolutely. What should I add?'; }
-    else if (!next.day) { next.awaiting = 'day'; question = `What day is ${possessiveEvent(next)}?`; }
-    else if (!next.time) { next.awaiting = 'time'; question = `What time is ${possessiveEvent(next)} on ${next.day}?`; }
-    else if (!next.meridiem) { next.awaiting = 'meridiem'; question = `Is ${next.time} in the morning or evening? Reply AM or PM.`; }
-    else if (next.awaiting === 'directions' && next.place) { question = `Got it — ${next.place}. Would you like me to include directions?`; }
-    else if (next.awaiting === 'reminder') { question = 'Would you like a reminder? Say “yes” for 15 minutes, “no,” or choose another time.'; }
-    else if (next.awaiting === 'confirm') { question = `${draftSummary(next)} Add it to the family calendar?`; }
-    else { next.awaiting = 'place'; question = `I have ${draftSummary(next, false)} Where is it? You can give me the place name or say “skip.”`; }
-    setBotDraft(next);
-    addBotMessage(question);
-    }
 
   function openCalendarEvent(event: BotEvent) {
     setCalendarFocusDate(event.dateISO ?? null);
@@ -1402,7 +1984,7 @@ function CohoApp() {
     }
     if (kind.toLowerCase() === 'coh') {
       setChatMode('coh');
-      setMessageDraft(id === 'meal-plan'
+      setCohMessageDraft(id === 'meal-plan'
         ? '@coh Help me plan our family meals for the next seven days, then build the grocery list.'
         : '@coh ');
       setTab('Chat');
@@ -1448,71 +2030,6 @@ function CohoApp() {
       showNotice('Follow-up completed');
     } catch {
       showNotice('The follow-up could not be completed.');
-    }
-  }
-
-  async function persistApprovedEvent(event: BotEvent): Promise<'shared' | 'device' | 'failed'> {
-    const startsAt = eventStartISO(event);
-    if (!startsAt) {
-      showNotice('The event time could not be saved. Open it and check the date and time.');
-      return 'failed';
-    }
-    if (!householdId || !currentUserId || !event.dateISO) {
-      try {
-        await writeApprovedEventToDevice({
-          id: event.id,
-          title: event.title,
-          startsAt,
-          location: event.place,
-          notes: `Added by Coh for ${event.person}`,
-          reminderMinutes: event.reminder,
-        });
-        setBotEvents((current) => current.some((item) => item.id === event.id) ? current : [...current, event]);
-        showNotice('Coh added the event on this iPhone. Connect the household to share it.');
-        return 'device';
-      } catch {
-        showNotice('The event could not be saved. Check calendar access and try again.');
-        return 'failed';
-      }
-    }
-    try {
-      const created = await createFamilyEvent({
-        householdId,
-        userId: currentUserId,
-        title: event.title,
-        startsAt,
-        location: event.place,
-        details: JSON.stringify({ person: event.person, reminder: event.reminder, directions: event.directions }),
-      });
-      await writeApprovedEventToDevice({
-        id: created.id ?? event.id,
-        title: event.title,
-        startsAt,
-        location: event.place,
-        notes: `Added by Coh for ${event.person}`,
-        reminderMinutes: event.reminder,
-      }).catch(() => undefined);
-      const saved = { ...event, id: created.id ?? event.id, sourceId: created.id ?? undefined };
-      setBotEvents((current) => current.some((item) => item.id === saved.id) ? current : [...current, saved]);
-      showNotice('Coh added the event to the shared family calendar');
-      return 'shared';
-    } catch {
-      try {
-        await writeApprovedEventToDevice({
-          id: event.id,
-          title: event.title,
-          startsAt,
-          location: event.place,
-          notes: `Added by Coh for ${event.person}`,
-          reminderMinutes: event.reminder,
-        });
-        setBotEvents((current) => current.some((item) => item.id === event.id) ? current : [...current, event]);
-        showNotice('The event is on this iPhone but could not be shared yet.');
-        return 'device';
-      } catch {
-        showNotice('The event could not be saved. Check calendar access and try again.');
-        return 'failed';
-      }
     }
   }
 
@@ -1841,7 +2358,7 @@ function CohoApp() {
   const openRecaps = () => { setInitialRecapId(null); setMoreView('Recaps'); setTab('More'); };
   const openCohPrompt = (prompt: string) => {
     setChatMode('coh');
-    setMessageDraft(prompt);
+    setCohMessageDraft(prompt);
     setMoreView('Menu');
     setTab('Chat');
     showNotice('Review the request, then send it to Coh');
@@ -1977,7 +2494,25 @@ function CohoApp() {
           />}
           {tab === 'Calendar' && <CalendarScreen theme={theme} styles={styles} botEvents={botEvents} profiles={profiles} focusDate={calendarFocusDate} onOpenEvent={setSelectedEvent} onAction={showNotice} onManage={() => { setIntegrationReturnView(null); setIntegrationCategoryBackView('Menu'); setMoreView('Calendars'); setTab('More'); }} onAdd={() => { setQuickAddType('Event'); setQuickAddOpen(true); }} />}
           {tab === 'Chores' && <ChoresScreen styles={styles} chores={chores} memberNames={profiles.map((profile) => profile.name)} rewardMember={rewardMember} setRewardMember={setRewardMember} selectedRewards={selectedRewards} onConfigure={setEditingChore} onAdd={() => { setQuickAddType('Chore'); setQuickAddOpen(true); }} onSelectReward={(member: string, reward: string) => { const next = { ...selectedRewards, [member]: reward }; setSelectedRewards(next); AsyncStorage.setItem('coho-reward-goals', JSON.stringify(next)); showNotice(`${member} picked a new reward goal`); }} onToggle={toggleChore} />}
-          {tab === 'Chat' && <ChatScreen styles={styles} messages={messages} mode={chatMode} setMode={setChatMode} draft={messageDraft} setDraft={setMessageDraft} onSend={sendMessage} onAdd={() => setQuickAddOpen(true)} onVoice={toggleVoiceRequest} voiceRecording={voiceRecorderState.isRecording} voiceSending={voiceSending} cohThinking={cohThinking} />}
+          {tab === 'Chat' && <ChatScreen
+            styles={styles}
+            messages={messages}
+            mode={chatMode}
+            setMode={setChatMode}
+            draft={chatMode === 'coh' ? cohMessageDraft : familyMessageDraft}
+            setDraft={chatMode === 'coh' ? setCohMessageDraft : setFamilyMessageDraft}
+            onSend={sendMessage}
+            onAdd={() => setQuickAddOpen(true)}
+            onVoice={toggleVoiceRequest}
+            onRetry={retryCohMessage}
+            onConfirm={confirmCohProposal}
+            onCancel={cancelCohProposal}
+            onChange={changeCohProposal}
+            onOpenAction={openCohAction}
+            voiceRecording={voiceRecorderState.isRecording}
+            voiceSending={voiceSending}
+            cohThinking={cohThinking || cohRestoring}
+          />}
           {tab === 'More' && moreView === 'Menu' && <MoreMenu styles={styles} setView={(view) => {
             setIntegrationReturnView(null);
             if (integrationCategoryViews.has(view)) setIntegrationCategoryBackView('Menu');
@@ -2537,25 +3072,359 @@ function ChoresScreen({ styles, chores, memberNames, onToggle, onConfigure, rewa
   </ScrollView>;
 }
 
-function ChatScreen({ styles, messages, mode, setMode, draft, setDraft, onSend, onAdd, onVoice, voiceRecording, voiceSending, cohThinking }: any) {
+function ChatScreen({
+  styles,
+  messages,
+  mode,
+  setMode,
+  draft,
+  setDraft,
+  onSend,
+  onAdd,
+  onVoice,
+  onRetry,
+  onConfirm,
+  onCancel,
+  onChange,
+  onOpenAction,
+  voiceRecording,
+  voiceSending,
+  cohThinking,
+}: any) {
   const cohActive = mode === 'coh';
+  const assistantBusy = cohActive && cohThinking;
+  const assistantVoiceBusy = cohActive && (voiceRecording || voiceSending);
+  const composerBusy = assistantBusy || assistantVoiceBusy;
   const visibleMessages = messages.filter((message: ChatMessage) => messageChannel(message) === mode);
-  return <View style={styles.flex}><View style={styles.chatModeTabs}><Pressable onPress={() => setMode('family')} style={[styles.chatModeTab, mode === 'family' && styles.chatModeTabActive]}><Ionicons name="people" size={16} color={mode === 'family' ? '#fff' : styles.iconColor.color} /><Text style={[styles.chatModeText, mode === 'family' && styles.chatModeTextActive]}>Family chat</Text></Pressable><Pressable onPress={() => setMode('coh')} style={[styles.chatModeTab, mode === 'coh' && styles.chatModeCohActive]}><Ionicons name="sparkles" size={16} color={mode === 'coh' ? '#fff' : '#7047EE'} /><Text style={[styles.chatModeText, mode === 'coh' && styles.chatModeTextActive]}>Ask Coh</Text></Pressable></View><FlatList data={visibleMessages} keyExtractor={(item) => item.id} contentContainerStyle={styles.messageList} automaticallyAdjustKeyboardInsets keyboardDismissMode="interactive" keyboardShouldPersistTaps="handled" renderItem={({ item }) => <View style={[styles.messageWrap, item.mine && styles.messageMine]}>{!item.mine && <View style={[styles.avatar, item.bot ? styles.botAvatar : styles.chatAvatar]}>{item.bot ? <Ionicons name="sparkles" size={17} color="#fff" /> : <Text style={styles.avatarText}>{initials(item.author)}</Text>}</View>}<View style={styles.messageBody}><Text style={[styles.messageAuthor, item.mine && styles.messageAuthorMine, item.bot && styles.botAuthor]}>{item.author}</Text><View style={[styles.messageBubble, item.mine && styles.messageBubbleMine, item.bot && styles.botBubble]}><MentionText text={item.text} mine={item.mine} styles={styles} /></View></View></View>} ListHeaderComponent={cohActive ? <View style={styles.botHint}><Ionicons name="sparkles" size={15} color="#7047EE" /><Text style={styles.botHintText}>Private Coh workspace · type, speak, or share screenshots and PDFs into Coho.</Text></View> : <View style={styles.chatHeader}><View style={styles.homeThreadIcon}><Ionicons name="home" size={20} color="#F5A623" /></View><View><Text style={styles.chatTitle}>Everyone</Text><Text style={styles.muted}>Family messages only</Text></View></View>} ListEmptyComponent={<View style={styles.emptyChat}><Ionicons name={cohActive ? 'sparkles-outline' : 'chatbubbles-outline'} size={28} color={cohActive ? '#7047EE' : styles.iconColor.color} /><Text style={styles.settingTitle}>{cohActive ? 'Ask Coh to organize something' : 'Start the family conversation'}</Text></View>} ListFooterComponent={cohActive && (cohThinking || voiceRecording || voiceSending) ? <View style={styles.cohThinking}><Ionicons name={voiceRecording ? 'mic' : 'sparkles'} size={15} color={voiceRecording ? '#E94F64' : '#7047EE'} /><Text style={styles.botAuthor}>{voiceRecording ? 'Listening… tap the red microphone to send' : voiceSending ? 'Coh is transcribing…' : 'Coh is thinking…'}</Text></View> : null} /><View style={[styles.composeRow, cohActive && styles.composeRowCoh]}><Pressable accessibilityLabel={cohActive ? (voiceRecording ? 'Stop and send voice request' : 'Speak to Coh') : 'Add'} onPress={cohActive ? onVoice : onAdd} style={[styles.composePlus, cohActive && styles.composeCohBadge, voiceRecording && { backgroundColor: '#E94F64' }]}>{cohActive ? <Ionicons name={voiceRecording ? 'stop' : 'mic'} size={18} color="#fff" /> : <Ionicons name="add" size={22} color="#2257F4" />}</Pressable><TextInput value={draft} onChangeText={setDraft} placeholder={voiceRecording ? 'Listening…' : cohThinking ? 'Coh is thinking…' : cohActive ? 'Ask Coh anything about home…' : 'Message your family…'} placeholderTextColor="#8B93A5" editable={!cohThinking && !voiceRecording} style={[styles.composeInput, cohActive && styles.composeInputCoh]} returnKeyType="send" onSubmitEditing={onSend} /><Pressable disabled={cohThinking || voiceRecording} onPress={onSend} style={[styles.sendButton, cohActive && styles.sendButtonCoh, (cohThinking || voiceRecording) && { opacity: .55 }]}><Ionicons name={cohActive ? 'sparkles' : 'send'} size={17} color="#fff" /></Pressable></View></View>;
+  const messageListRef = useRef<FlatList<ChatMessage>>(null);
+
+  useEffect(() => {
+    if (!visibleMessages.length && !assistantBusy && !assistantVoiceBusy) return;
+    const frame = requestAnimationFrame(() => {
+      messageListRef.current?.scrollToEnd({ animated: true });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [visibleMessages.length, mode, assistantBusy, assistantVoiceBusy]);
+
+  return <View style={styles.flex}>
+    <View style={styles.chatModeTabs}>
+      <Pressable onPress={() => setMode('family')} style={[styles.chatModeTab, mode === 'family' && styles.chatModeTabActive]}>
+        <Ionicons name="people" size={16} color={mode === 'family' ? '#fff' : styles.iconColor.color} />
+        <Text style={[styles.chatModeText, mode === 'family' && styles.chatModeTextActive]}>Family chat</Text>
+      </Pressable>
+      <Pressable onPress={() => setMode('coh')} style={[styles.chatModeTab, mode === 'coh' && styles.chatModeCohActive]}>
+        <Ionicons name="sparkles" size={16} color={mode === 'coh' ? '#fff' : '#7047EE'} />
+        <Text style={[styles.chatModeText, mode === 'coh' && styles.chatModeTextActive]}>Ask Coh</Text>
+      </Pressable>
+    </View>
+    <FlatList
+      ref={messageListRef}
+      data={visibleMessages}
+      keyExtractor={(item) => item.id}
+      contentContainerStyle={styles.messageList}
+      automaticallyAdjustKeyboardInsets
+      keyboardDismissMode="interactive"
+      keyboardShouldPersistTaps="handled"
+      renderItem={({ item }) => <View style={[styles.messageWrap, item.mine && styles.messageMine]}>
+        {!item.mine && <View style={[styles.avatar, item.bot ? styles.botAvatar : styles.chatAvatar]}>
+          {item.bot
+            ? <Ionicons name="sparkles" size={17} color="#fff" />
+            : <Text style={styles.avatarText}>{initials(item.author)}</Text>}
+        </View>}
+        <View style={styles.messageBody}>
+          <Text style={[styles.messageAuthor, item.mine && styles.messageAuthorMine, item.bot && styles.botAuthor]}>{item.author}</Text>
+          <View style={[styles.messageBubble, item.mine && styles.messageBubbleMine, item.bot && styles.botBubble]}>
+            <MentionText text={item.text} mine={item.mine} styles={styles} />
+          </View>
+          {item.delivery === 'sending' && <Text style={[styles.messageDelivery, item.mine && styles.messageDeliveryMine]}>Sending…</Text>}
+          {item.delivery === 'failed' && <View style={[styles.messageFailure, item.mine && styles.messageFailureMine]}>
+            <Ionicons name="cloud-offline-outline" size={14} color="#C74732" />
+            <Text style={styles.messageFailureText}>Not delivered</Text>
+            {item.channel === 'coh' && item.requestId && item.retryable !== false && <Pressable disabled={assistantBusy} onPress={() => onRetry(item)} style={styles.messageRetryButton}>
+              <Ionicons name="refresh" size={13} color="#7047EE" />
+              <Text style={styles.messageRetryText}>Retry safely</Text>
+            </Pressable>}
+          </View>}
+          {item.bot && item.cohResponse && <CohActionCard
+            styles={styles}
+            response={item.cohResponse}
+            busy={assistantBusy}
+            onConfirm={() => onConfirm(item.cohResponse)}
+            onCancel={() => onCancel(item.cohResponse)}
+            onChange={() => onChange(item.cohResponse)}
+            onOpen={() => onOpenAction(item.cohResponse)}
+          />}
+        </View>
+      </View>}
+      ListHeaderComponent={cohActive
+        ? <View style={styles.botHint}><Ionicons name="sparkles" size={15} color="#7047EE" /><Text style={styles.botHintText}>Private Coh workspace · type, speak, or share screenshots and PDFs into Coho.</Text></View>
+        : <View style={styles.chatHeader}><View style={styles.homeThreadIcon}><Ionicons name="home" size={20} color="#F5A623" /></View><View><Text style={styles.chatTitle}>Everyone</Text><Text style={styles.muted}>Family messages only</Text></View></View>}
+      ListEmptyComponent={<View style={styles.emptyChat}><Ionicons name={cohActive ? 'sparkles-outline' : 'chatbubbles-outline'} size={28} color={cohActive ? '#7047EE' : styles.iconColor.color} /><Text style={styles.settingTitle}>{cohActive ? 'Ask Coh to organize something' : 'Start the family conversation'}</Text></View>}
+      ListFooterComponent={cohActive && (assistantBusy || voiceRecording || voiceSending)
+        ? <View style={styles.cohThinking}><Ionicons name={voiceRecording ? 'mic' : 'sparkles'} size={15} color={voiceRecording ? '#E94F64' : '#7047EE'} /><Text style={styles.botAuthor}>{voiceRecording ? 'Listening… tap the red microphone to send' : voiceSending ? 'Coh is transcribing…' : 'Coh is thinking…'}</Text></View>
+        : null}
+    />
+    <View style={[styles.composeRow, cohActive && styles.composeRowCoh]}>
+      <Pressable
+        accessibilityLabel={cohActive ? (voiceRecording ? 'Stop and send voice request' : 'Speak to Coh') : 'Add'}
+        disabled={cohActive && assistantBusy && !voiceRecording}
+        onPress={cohActive ? onVoice : onAdd}
+        style={[
+          styles.composePlus,
+          cohActive && styles.composeCohBadge,
+          voiceRecording && { backgroundColor: '#E94F64' },
+          cohActive && assistantBusy && !voiceRecording && { opacity: .55 },
+        ]}
+      >
+        {cohActive ? <Ionicons name={voiceRecording ? 'stop' : 'mic'} size={18} color="#fff" /> : <Ionicons name="add" size={22} color="#2257F4" />}
+      </Pressable>
+      <TextInput
+        value={draft}
+        onChangeText={setDraft}
+        placeholder={cohActive && voiceRecording ? 'Listening…' : assistantBusy ? 'Coh is thinking…' : cohActive ? 'Ask Coh anything about home…' : 'Message your family…'}
+        placeholderTextColor="#8B93A5"
+        editable={!composerBusy}
+        style={[styles.composeInput, cohActive && styles.composeInputCoh]}
+        returnKeyType="send"
+        onSubmitEditing={onSend}
+      />
+      <Pressable disabled={composerBusy} onPress={onSend} style={[styles.sendButton, cohActive && styles.sendButtonCoh, composerBusy && { opacity: .55 }]}>
+        <Ionicons name={cohActive ? 'sparkles' : 'send'} size={17} color="#fff" />
+      </Pressable>
+    </View>
+  </View>;
+}
+
+function CohActionCard({
+  styles,
+  response,
+  busy,
+  onConfirm,
+  onCancel,
+  onChange,
+  onOpen,
+}: {
+  styles: any;
+  response: CohResponse;
+  busy: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+  onChange: () => void;
+  onOpen: () => void;
+}) {
+  const actionType = response.proposed_action?.type ?? 'none';
+  const hasAction = actionType !== 'none' || Boolean(response.action);
+  if (!hasAction) return null;
+
+  const action = response.action;
+  const missing = response.missing_fields?.length
+    ? response.missing_fields
+    : action?.missingFields ?? [];
+  const ready = response.status === 'ready_for_confirmation'
+    && action?.status === 'pending_approval';
+  const created = Boolean(action?.targetId)
+    || ['scheduled', 'in_progress', 'completed'].includes(action?.status ?? '');
+  const canceled = response.status === 'canceled' || action?.status === 'canceled';
+  const superseded = action?.status === 'superseded';
+  const rows = cohDraftRows(response);
+  const title = response.draft?.title || cohActionLabel(actionType);
+
+  return <View style={[
+    styles.cohActionCard,
+    ready && styles.cohActionCardReady,
+    created && styles.cohActionCardCreated,
+    (canceled || superseded) && styles.cohActionCardCanceled,
+  ]}>
+    <View style={styles.cohActionHeader}>
+      <View style={[styles.cohActionIcon, created && styles.cohActionIconCreated]}>
+        <Ionicons
+          name={created ? 'checkmark' : canceled ? 'close' : cohActionIcon(actionType)}
+          size={16}
+          color="#fff"
+        />
+      </View>
+      <View style={styles.flex}>
+        <Text style={styles.cohActionEyebrow}>
+          {created
+            ? 'CREATED BY COH'
+            : canceled
+              ? 'PROPOSAL CANCELED'
+              : superseded
+                ? 'UPDATED IN A LATER MESSAGE'
+                : ready
+                  ? 'READY FOR YOUR APPROVAL'
+                  : 'COH IS BUILDING THIS'}
+        </Text>
+        <Text style={styles.cohActionTitle}>{title}</Text>
+      </View>
+    </View>
+
+    {rows.map((row) => <View key={row.label} style={styles.cohActionRow}>
+      <Text style={styles.cohActionLabel}>{row.label}</Text>
+      <Text style={styles.cohActionValue}>{row.value}</Text>
+    </View>)}
+
+    {!created && !canceled && missing.length > 0 && <View style={styles.cohMissingBox}>
+      <Ionicons name="help-circle" size={16} color="#A76400" />
+      <Text style={styles.cohMissingText}>Still needed: {missing.map(cohFieldLabel).join(', ')}</Text>
+    </View>}
+
+    {ready && <View style={styles.cohActionButtons}>
+      <Pressable disabled={busy} onPress={onConfirm} style={[styles.cohPrimaryAction, busy && styles.cohActionDisabled]}>
+        <Ionicons name="checkmark-circle" size={17} color="#fff" />
+        <Text style={styles.cohPrimaryActionText}>Confirm & create</Text>
+      </Pressable>
+      <View style={styles.cohSecondaryActionRow}>
+        <Pressable disabled={busy} onPress={onChange} style={styles.cohSecondaryAction}>
+          <Ionicons name="create-outline" size={15} color="#7047EE" />
+          <Text style={styles.cohSecondaryActionText}>Change</Text>
+        </Pressable>
+        <Pressable disabled={busy} onPress={onCancel} style={styles.cohDangerAction}>
+          <Ionicons name="close-circle-outline" size={15} color="#C74732" />
+          <Text style={styles.cohDangerActionText}>Cancel</Text>
+        </Pressable>
+      </View>
+    </View>}
+
+    {created && <Pressable disabled={busy} onPress={onOpen} style={styles.cohOpenAction}>
+      <Text style={styles.cohOpenActionText}>Open {cohActionTargetLabel(action?.targetTable, actionType)}</Text>
+      <Ionicons name="arrow-forward-circle" size={18} color="#167D62" />
+    </Pressable>}
+  </View>;
+}
+
+function normalizeRestoredCohResponse(
+  response: CohResponse | undefined,
+  activeAction: CohResponse['action'],
+) {
+  if (!response?.action || response.status !== 'ready_for_confirmation') {
+    return response;
+  }
+  const stillPending = activeAction?.status === 'pending_approval'
+    && response.action.id === activeAction.id
+    && response.action.version === activeAction.version
+    && response.action.proposalHash === activeAction.proposalHash;
+  return stillPending
+    ? { ...response, action: activeAction }
+    : supersedeCohResponse(response);
+}
+
+function supersedeCohResponse(response: CohResponse): CohResponse {
+  if (!response.action) return response;
+  return {
+    ...response,
+    status: 'collecting',
+    action: {
+      ...response.action,
+      status: 'superseded',
+    },
+  };
+}
+
+function cohDraftRows(response: CohResponse) {
+  const draft = response.draft;
+  const rows: Array<{ label: string; value: string }> = [];
+  if (!draft) return rows;
+  if (draft.person) rows.push({ label: 'For', value: draft.person });
+  const schedule = formatCohSchedule(draft);
+  if (schedule) rows.push({ label: draft.due_at ? 'Due' : 'When', value: schedule });
+  if (draft.location) rows.push({ label: 'Where', value: draft.location });
+  if (draft.reminder_minutes != null) {
+    rows.push({
+      label: 'Reminder',
+      value: draft.reminder_minutes === 0 ? 'At start time' : `${draft.reminder_minutes} minutes before`,
+    });
+  }
+  if (draft.recurrence_rule) rows.push({ label: 'Repeats', value: friendlyRecurrence(draft.recurrence_rule) });
+  if (draft.reward_type) {
+    const reward = [
+      draft.reward_value != null ? String(draft.reward_value) : '',
+      draft.reward_label || draft.reward_type.replace('_', ' '),
+    ].filter(Boolean).join(' ');
+    rows.push({ label: 'Reward', value: reward });
+  }
+  if (draft.grocery_items?.length) {
+    rows.push({ label: 'Groceries', value: `${draft.grocery_items.length} item${draft.grocery_items.length === 1 ? '' : 's'}` });
+  }
+  if (draft.meals?.length) {
+    rows.push({ label: 'Meal plan', value: `${draft.meals.length} meal${draft.meals.length === 1 ? '' : 's'}` });
+  }
+  if (draft.notes && response.intent === 'note') rows.push({ label: 'Note', value: draft.notes });
+  return rows.slice(0, 7);
+}
+
+function formatCohSchedule(draft: CohDraft) {
+  const timestamp = draft.starts_at || draft.due_at;
+  if (timestamp) {
+    const value = new Date(timestamp);
+    if (!Number.isNaN(value.getTime())) {
+      return value.toLocaleString(undefined, {
+        weekday: 'short',
+        month: 'short',
+        day: 'numeric',
+        hour: 'numeric',
+        minute: '2-digit',
+      });
+    }
+  }
+  return [draft.date, draft.time].filter(Boolean).join(' at ');
+}
+
+function friendlyRecurrence(rule: string) {
+  if (/FREQ=DAILY/i.test(rule)) return 'Daily';
+  if (/FREQ=WEEKLY/i.test(rule) && /INTERVAL=2/i.test(rule)) return 'Every 2 weeks';
+  if (/FREQ=WEEKLY/i.test(rule)) return 'Weekly';
+  if (/FREQ=MONTHLY/i.test(rule)) return 'Monthly';
+  return rule;
+}
+
+function cohActionLabel(type: CohResponse['proposed_action']['type']) {
+  if (type === 'create_event') return 'Family calendar event';
+  if (type === 'create_chore') return 'Family chore';
+  if (type === 'create_note') return 'Family note';
+  if (type === 'add_grocery_items') return 'Grocery list';
+  if (type === 'create_meal_plan') return 'Family meal plan';
+  return 'Household action';
+}
+
+function cohActionIcon(type: CohResponse['proposed_action']['type']): any {
+  if (type === 'create_event') return 'calendar';
+  if (type === 'create_chore') return 'checkbox';
+  if (type === 'create_note') return 'document-text';
+  if (type === 'add_grocery_items') return 'cart';
+  if (type === 'create_meal_plan') return 'restaurant';
+  return 'sparkles';
+}
+
+function cohActionTargetLabel(targetTable: string | null | undefined, type: CohResponse['proposed_action']['type']) {
+  if (targetTable === 'events' || type === 'create_event') return 'event';
+  if (targetTable === 'chores' || type === 'create_chore') return 'chore';
+  if (targetTable === 'notes' || type === 'create_note') return 'note';
+  if (targetTable === 'grocery_items' || type === 'add_grocery_items') return 'grocery list';
+  if (targetTable === 'meal_plans' || type === 'create_meal_plan') return 'meal plan';
+  return 'created item';
+}
+
+function cohFieldLabel(field: string) {
+  const labels: Record<string, string> = {
+    title: 'title',
+    person: 'family member',
+    date: 'date',
+    time: 'time',
+    starts_at: 'date and time',
+    due_at: 'due date',
+    location: 'place',
+    reminder_minutes: 'reminder',
+    reward_type: 'reward',
+    grocery_items: 'items',
+    meals: 'meals',
+  };
+  return labels[field] ?? field.replace(/_/g, ' ');
 }
 
 function messageChannel(message: ChatMessage): ChatChannel {
   if (message.channel) return message.channel;
   return message.bot || /(@coh|hey coh)\b/i.test(message.text) ? 'coh' : 'family';
-}
-
-function eventSaveReply(event: BotEvent, result: 'shared' | 'device' | 'failed') {
-  if (result === 'failed') {
-    return `I couldn’t save “${event.title}.” Check calendar access or your connection, then ask me to try again.`;
-  }
-  const destination = result === 'shared'
-    ? 'the shared family calendar'
-    : 'this iPhone’s calendar';
-  return `Done — “${event.title}” is on ${destination} for ${event.day} at ${event.time}.${event.reminder ? ` The reminder is ${event.reminder} minutes before.` : ''}${event.directions && event.place ? ` Directions to ${event.place} are included.` : ''}`;
 }
 
 function initials(name: string) {
@@ -2895,129 +3764,6 @@ function choreFormSummary(value: ChoreFormValue, profiles: FamilyProfile[]) {
   return `${owner} · ${due} · ${recurrenceLabel(value.recurrence)} · ${reward}`;
 }
 
-function eventStartISO(event: BotEvent) {
-  if (!event.dateISO) return null;
-  const dateMatch = event.dateISO.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  const timeMatch = event.time.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
-  if (!dateMatch || !timeMatch) return null;
-  let hour = Number(timeMatch[1]);
-  const minute = Number(timeMatch[2]);
-  const meridiem = timeMatch[3].toUpperCase();
-  if (meridiem === 'PM' && hour < 12) hour += 12;
-  if (meridiem === 'AM' && hour === 12) hour = 0;
-  return new Date(Number(dateMatch[1]), Number(dateMatch[2]) - 1, Number(dateMatch[3]), hour, minute).toISOString();
-}
-
-function eventFromCohDraft(draft: CohDraft): BotEvent | null {
-  if (!draft.title || !draft.date || !draft.time) return null;
-  const date = new Date(`${draft.date}T${draft.time}:00`);
-  if (Number.isNaN(date.getTime())) return null;
-  return {
-    id: `coh-${draft.date}-${draft.time}-${draft.title.toLowerCase().replace(/\W+/g, '-')}`,
-    title: draft.title,
-    person: draft.person ?? 'You',
-    day: date.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' }),
-    dateISO: draft.date,
-    time: date.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }),
-    place: draft.location ?? undefined,
-    reminder: draft.reminder_minutes ?? undefined,
-    directions: draft.directions ?? undefined,
-  };
-}
-
-function extractEventIntent(text: string): Partial<BotDraft> {
-  const cleaned = text.replace(/^\s*(@coh|hey coh|@bot|hey bot)[,:]?\s*/i, '').trim();
-  const date = extractDate(cleaned);
-  const time = extractTime(cleaned);
-  const personMatch = cleaned.match(/\b(?:for|with)\s+([a-z][a-z'-]*)\b/i);
-  const placeMatch = cleaned.match(/\b(?:at|place is|location is)\s+([a-z][a-z0-9&'. -]{2,})$/i);
-  let title = cleaned
-    .replace(/\b(today|tomorrow|tonight|this morning|this afternoon|this evening|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/gi, ' ')
-    .replace(/\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d{1,2}(?:st|nd|rd|th)?\b/gi, ' ')
-    .replace(/\b\d{1,2}[\/-]\d{1,2}(?:[\/-]\d{2,4})?\b/g, ' ')
-    .replace(/\b(?:at\s*)?\d{1,2}(?::\d{2})?\s*(?:am|pm)?\b/gi, ' ')
-    .replace(/\b(?:for|with)\s+[a-z][a-z'-]*\b/gi, ' ')
-    .replace(/\b(i have|i've got|my|please|can you|could you|add|create|schedule|put|make|an?|the|on|at)\b/gi, ' ')
-    .replace(/[,.;]+/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-  if (/^(hair|hair cut|barber|barber appointment)$/i.test(title)) title = 'Haircut';
-  const result: Partial<BotDraft> = { ...date, ...time };
-  if (title) result.title = titleCaseWords(title);
-  if (personMatch) result.person = titleCase(personMatch[1]);
-  else if (/\b(i have|i need|my)\b/i.test(cleaned)) result.person = 'You';
-  if (placeMatch && !/^\d/.test(placeMatch[1])) result.place = titleCaseWords(placeMatch[1].trim());
-  return result;
-}
-
-function extractDate(text: string): Partial<BotDraft> | null {
-  const normalized = text.toLowerCase();
-  const today = startOfDay(new Date());
-  let target: Date | null = null;
-  if (/\btoday\b/.test(normalized)) target = today;
-  else if (/\btonight\b/.test(normalized)) target = today;
-  else if (/\btomorrow\b/.test(normalized)) target = addDays(today, 1);
-  else {
-    const weekdays = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
-    const weekday = weekdays.findIndex((day) => new RegExp(`\\b${day}\\b`, 'i').test(text));
-    if (weekday >= 0) {
-      let offset = (weekday - today.getDay() + 7) % 7;
-      if (offset === 0 && !/\btoday\b/i.test(text)) offset = 7;
-      target = addDays(today, offset);
-    }
-  }
-  const numeric = text.match(/\b(1[0-2]|0?[1-9])[\/-](3[01]|[12]\d|0?[1-9])(?:[\/-](\d{2,4}))?\b/);
-  if (numeric) {
-    let year = numeric[3] ? Number(numeric[3]) : today.getFullYear();
-    if (year < 100) year += 2000;
-    target = new Date(year, Number(numeric[1]) - 1, Number(numeric[2]));
-    if (!numeric[3] && target < today) target.setFullYear(year + 1);
-  }
-  const named = text.match(/\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(\d{1,2})(?:st|nd|rd|th)?(?:,?\s+(\d{4}))?\b/i);
-  if (named) {
-    const parsed = new Date(`${named[1]} ${named[2]}, ${named[3] ?? today.getFullYear()}`);
-    if (!Number.isNaN(parsed.getTime())) { target = parsed; if (!named[3] && target < today) target.setFullYear(today.getFullYear() + 1); }
-  }
-  if (!target || Number.isNaN(target.getTime())) return null;
-  return { day: target.toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric' }), dateISO: localDateKey(target) };
-}
-
-function extractTime(text: string): Partial<BotDraft> | null {
-  const withoutDates = text
-    .replace(/\b\d{1,2}[\/-]\d{1,2}(?:[\/-]\d{2,4})?\b/g, ' ')
-    .replace(/\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d{1,2}(?:st|nd|rd|th)?(?:,?\s+\d{4})?\b/gi, ' ');
-  const match = withoutDates.match(/\b(?:at\s*)?(1[0-2]|0?[1-9])(?::([0-5]\d))?\s*(am|pm)?\b/i);
-  if (!match) return null;
-  const hour = String(Number(match[1]));
-  const time = match[2] ? `${hour}:${match[2]}` : `${hour}:00`;
-  const meridiem = match[3]?.toUpperCase() as 'AM' | 'PM' | undefined;
-  return { time, meridiem };
-}
-
-function extractDraftCorrection(text: string): Partial<BotDraft> {
-  const correction: Partial<BotDraft> = {};
-  const date = extractDate(text);
-  const time = extractTime(text);
-  const place = text.match(/\b(?:change|set|make)?\s*(?:the\s+)?(?:place|location)\s*(?:to|is)?\s+(.+)$/i);
-  const person = text.match(/\b(?:change|set|make)?\s*(?:the\s+)?(?:person|name|for)\s*(?:to|is)?\s+([a-z][a-z'-]*)\b/i);
-  const title = text.match(/\b(?:change|rename|set)\s+(?:the\s+)?(?:event|title)\s*(?:to|as|is)\s+(.+)$/i);
-  if (date) Object.assign(correction, date);
-  if (time) Object.assign(correction, time);
-  if (place) correction.place = titleCaseWords(place[1].trim());
-  if (person) correction.person = titleCase(person[1]);
-  if (title) correction.title = titleCaseWords(title[1].trim());
-  return correction;
-}
-
-function titleCase(value: string) { return value.charAt(0).toUpperCase() + value.slice(1).toLowerCase(); }
-function titleCaseWords(value: string) { return value.split(/\s+/).map(titleCase).join(' '); }
-function isYes(value: string) { return /^(yes|y|yeah|yep|sure|please|ok|okay)\b/.test(value); }
-function isNo(value: string) { return /^(no|n|nope|skip|none|not now)\b/.test(value); }
-function parseReminder(value: string) { const match = value.match(/(\d+)\s*(?:minute|min)/); return match ? Number(match[1]) : undefined; }
-function cleanAnswer(value: string) { return value.replace(/^(it is|it's|the place is|at)\s+/i, '').trim(); }
-function possessiveEvent(draft: BotDraft) { return draft.person && draft.person !== 'You' ? `${draft.person}’s ${draft.title?.toLowerCase()}` : `your ${draft.title?.toLowerCase()}`; }
-function formatDraftTime(draft: BotDraft) { return `${draft.time} ${draft.meridiem}`; }
-function draftSummary(draft: BotDraft, sentence = true) { const text = `“${draft.title}” for ${draft.person ?? 'You'} on ${draft.day} at ${formatDraftTime(draft)}${draft.place ? ` at ${draft.place}` : ''}${draft.directions ? ' with directions' : ''}${draft.reminder ? ` and a ${draft.reminder}-minute reminder` : ''}.`; return sentence ? `Here’s what I have: ${text}` : text; }
 function parseClock(value: string) { const match = value.match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i); let hour = Number(match?.[1] ?? 7); const minute = Number(match?.[2] ?? 0); const pm = match?.[3]?.toUpperCase() === 'PM'; if (pm && hour < 12) hour += 12; if (!pm && hour === 12) hour = 0; return { hour, minute }; }
 function weekdayNumber(day: string) { return ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'].indexOf(day) + 1; }
 function startOfDay(date: Date) { const next = new Date(date); next.setHours(0, 0, 0, 0); return next; }
@@ -3251,7 +3997,10 @@ function RecapsScreen({ styles, onRefresh, onListen, onOpenEvent, onCompleteFoll
     if (!selectedSnapshotId && snapshots[0]?.id) setSelectedSnapshotId(snapshots[0].id);
   }, [snapshots, selectedSnapshotId, initialSnapshotId]);
   const openChores = chores.filter((item: any) => !item.done).length;
-  const recentMessages = messages.filter((item: ChatMessage) => !item.bot).slice(-5).length;
+  const recentMessages = messages
+    .filter((item: ChatMessage) => messageChannel(item) === 'family' && !item.bot)
+    .slice(-5)
+    .length;
   const syncTime = new Date().toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
   const today = localDateKey(new Date());
   const weekEvents = events.filter((event: BotEvent) => !event.dateISO || event.dateISO >= today).slice(0, 14);
@@ -4014,6 +4763,38 @@ function createStyles(t: Theme) {
     eventEntryIcon: { width: 39, height: 39, borderRadius: 13, alignItems: 'center', justifyContent: 'center', marginBottom: 12 },
     eventEntryTitle: { color: t.text, fontSize: 11, lineHeight: 14, fontWeight: '900' },
     eventEntryDetail: { color: t.muted, fontSize: 8, lineHeight: 12, fontWeight: '700', marginTop: 5 },
+    messageDelivery: { color: t.muted, fontSize: 8, fontWeight: '700', marginTop: 4 },
+    messageDeliveryMine: { textAlign: 'right' },
+    messageFailure: { minHeight: 30, marginTop: 5, paddingHorizontal: 9, borderRadius: 10, flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: '#C747320D', borderWidth: 1, borderColor: '#C7473228' },
+    messageFailureMine: { alignSelf: 'flex-end' },
+    messageFailureText: { color: '#C74732', fontSize: 8, fontWeight: '800' },
+    messageRetryButton: { minHeight: 24, marginLeft: 3, paddingHorizontal: 7, borderRadius: 8, flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: '#7047EE12' },
+    messageRetryText: { color: '#7047EE', fontSize: 8, fontWeight: '900' },
+    cohActionCard: { minWidth: 248, marginTop: 8, padding: 12, borderRadius: 17, backgroundColor: t.surface, borderWidth: 1, borderColor: '#7047EE42', shadowColor: '#7047EE', shadowOpacity: .09, shadowRadius: 9, shadowOffset: { width: 0, height: 4 } },
+    cohActionCardReady: { borderColor: '#7047EE88', backgroundColor: t.dark ? '#211A42' : '#FBF8FF' },
+    cohActionCardCreated: { borderColor: '#19A47B66', backgroundColor: t.dark ? '#132D28' : '#F3FBF8' },
+    cohActionCardCanceled: { opacity: .72, borderColor: t.line },
+    cohActionHeader: { flexDirection: 'row', alignItems: 'center', gap: 9, marginBottom: 8 },
+    cohActionIcon: { width: 31, height: 31, borderRadius: 11, alignItems: 'center', justifyContent: 'center', backgroundColor: '#7047EE' },
+    cohActionIconCreated: { backgroundColor: '#19A47B' },
+    cohActionEyebrow: { color: '#7047EE', fontSize: 7, lineHeight: 10, fontWeight: '900', letterSpacing: .8 },
+    cohActionTitle: { color: t.text, fontSize: 13, lineHeight: 17, fontWeight: '900', marginTop: 2 },
+    cohActionRow: { minHeight: 30, paddingVertical: 6, flexDirection: 'row', alignItems: 'flex-start', gap: 10, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: t.line },
+    cohActionLabel: { width: 55, color: t.muted, fontSize: 8, lineHeight: 13, fontWeight: '800' },
+    cohActionValue: { flex: 1, color: t.text, fontSize: 9, lineHeight: 13, fontWeight: '700', textAlign: 'right' },
+    cohMissingBox: { minHeight: 38, marginTop: 8, paddingHorizontal: 9, paddingVertical: 8, borderRadius: 12, flexDirection: 'row', alignItems: 'center', gap: 7, backgroundColor: '#FFB02016', borderWidth: 1, borderColor: '#FFB02040' },
+    cohMissingText: { flex: 1, color: '#A76400', fontSize: 8, lineHeight: 12, fontWeight: '800' },
+    cohActionButtons: { gap: 7, marginTop: 10 },
+    cohPrimaryAction: { minHeight: 42, borderRadius: 13, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7, backgroundColor: '#7047EE' },
+    cohPrimaryActionText: { color: '#fff', fontSize: 10, fontWeight: '900' },
+    cohSecondaryActionRow: { flexDirection: 'row', gap: 7 },
+    cohSecondaryAction: { flex: 1, minHeight: 35, borderRadius: 11, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 5, backgroundColor: '#7047EE10', borderWidth: 1, borderColor: '#7047EE35' },
+    cohSecondaryActionText: { color: '#7047EE', fontSize: 9, fontWeight: '900' },
+    cohDangerAction: { flex: 1, minHeight: 35, borderRadius: 11, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 5, backgroundColor: '#C747320A', borderWidth: 1, borderColor: '#C747322B' },
+    cohDangerActionText: { color: '#C74732', fontSize: 9, fontWeight: '900' },
+    cohActionDisabled: { opacity: .55 },
+    cohOpenAction: { minHeight: 40, marginTop: 9, paddingHorizontal: 11, borderRadius: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', backgroundColor: '#19A47B12', borderWidth: 1, borderColor: '#19A47B35' },
+    cohOpenActionText: { color: '#167D62', fontSize: 9, fontWeight: '900' },
     eventEntrySafety: { minHeight: 62, borderRadius: 16, padding: 12, flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: '#19A47B10', borderWidth: 1, borderColor: '#19A47B35', marginTop: 2 },
     eventEntrySafetyText: { flex: 1, color: t.text, fontSize: 9, lineHeight: 14, fontWeight: '700' },
     manualEventToggle: { minHeight: 62, borderRadius: 16, marginTop: 14, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line },

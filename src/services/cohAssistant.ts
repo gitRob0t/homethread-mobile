@@ -1,4 +1,3 @@
-import { supabase } from '../lib/supabase';
 import { invokeEdgeFunction } from './edgeFunctions';
 import { recordAppEvent } from './telemetry';
 
@@ -34,6 +33,7 @@ export type CohDraft = {
 
 export type CohResponse = {
   conversationId: string | null;
+  requestId: string;
   reply: string;
   intent: 'event' | 'chore' | 'note' | 'grocery' | 'meal' | 'travel' | 'restaurant' | 'question' | 'none';
   status: 'collecting' | 'ready_for_confirmation' | 'confirmed' | 'canceled' | 'answered';
@@ -47,12 +47,57 @@ export type CohResponse = {
     id: string;
     status: string;
     version: number;
+    proposalHash: string;
     targetTable: string | null;
     targetId: string | null;
+    missingFields?: string[];
   } | null;
+  retryable?: boolean;
+  correlationId?: string | null;
 };
 
 export type CohHistoryItem = { role: 'user' | 'assistant'; content: string };
+
+export type CohTurn = {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  createdAt: string;
+  requestId: string | null;
+  operation: 'message' | 'confirm' | 'cancel' | null;
+  requestState: 'processing' | 'completed' | 'failed' | null;
+  retryable: boolean;
+  errorCode: string | null;
+  leaseExpiresAt: string | null;
+  attachmentCount: number;
+  timezone: string | null;
+  response: CohResponse | null;
+};
+
+export type CohOutstandingRequest = {
+  requestId: string;
+  conversationId: string;
+  operation: 'message' | 'confirm' | 'cancel';
+  status: 'processing' | 'completed' | 'failed';
+  retryable: boolean;
+  errorCode: string | null;
+  errorMessage: string | null;
+  leaseExpiresAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  action: CohResponse['action'];
+  response: CohResponse | null;
+};
+
+export type CohSession = {
+  conversationId: string | null;
+  turns: CohTurn[];
+  activeAction: CohResponse['action'];
+  // Optional during a rolling Edge Function deployment. The app normalizes
+  // an older response to an empty ledger instead of breaking recovery.
+  outstandingRequests?: CohOutstandingRequest[];
+  hasProcessingRequests?: boolean;
+};
 
 export type CohAttachment = {
   name: string;
@@ -63,10 +108,71 @@ export type CohAttachment = {
 
 export async function askCoh(input: {
   message: string;
+  requestId: string;
   conversationId?: string | null;
   householdId?: string | null;
   timezone: string;
-  history: CohHistoryItem[];
+  attachments?: CohAttachment[];
+}): Promise<CohResponse> {
+  return invokeCoh({
+    operation: 'message',
+    ...input,
+  });
+}
+
+export async function confirmCohAction(input: {
+  requestId: string;
+  conversationId: string;
+  householdId: string;
+  timezone: string;
+  actionId: string;
+  expectedVersion: number;
+  proposalHash: string;
+}): Promise<CohResponse> {
+  return invokeCoh({
+    operation: 'confirm',
+    ...input,
+  });
+}
+
+export async function cancelCohAction(input: {
+  requestId: string;
+  conversationId: string;
+  householdId: string;
+  timezone: string;
+  actionId: string;
+  expectedVersion: number;
+  proposalHash: string;
+}): Promise<CohResponse> {
+  return invokeCoh({
+    operation: 'cancel',
+    ...input,
+  });
+}
+
+export async function resumeCoh(input: {
+  householdId: string;
+  timezone: string;
+}): Promise<CohSession> {
+  return invokeEdgeFunction<CohSession>('coh-assistant', {
+    body: {
+      operation: 'resume',
+      requestId: createCohRequestId(),
+      ...input,
+    },
+  });
+}
+
+async function invokeCoh(input: {
+  operation: 'message' | 'confirm' | 'cancel';
+  message?: string;
+  requestId: string;
+  conversationId?: string | null;
+  householdId?: string | null;
+  timezone: string;
+  actionId?: string;
+  expectedVersion?: number;
+  proposalHash?: string;
   attachments?: CohAttachment[];
 }): Promise<CohResponse> {
   let data: CohResponse;
@@ -78,21 +184,70 @@ export async function askCoh(input: {
       severity: 'error',
       correlationId: input.conversationId,
       properties: {
+        operation: input.operation,
+        requestId: input.requestId,
         attachmentCount: input.attachments?.length ?? 0,
         hasConversation: Boolean(input.conversationId),
       },
     });
     throw error;
   }
-  if (!data?.reply) {
+  const validProposal = data?.status !== 'ready_for_confirmation'
+    || Boolean(
+      data.action
+      && Number.isInteger(data.action.version)
+      && /^[0-9a-f]{64}$/i.test(data.action.proposalHash),
+    );
+  if (
+    !data?.reply?.trim()
+    || data.requestId !== input.requestId
+    || !data.conversationId
+    || !validProposal
+  ) {
     void recordAppEvent('coh_client_invalid_response', {
       householdId: input.householdId,
       severity: 'error',
       correlationId: input.conversationId,
+      properties: {
+        operation: input.operation,
+        requestId: input.requestId,
+        responseRequestMatches: data?.requestId === input.requestId,
+        hasConversation: Boolean(data?.conversationId),
+        hasValidProposal: validProposal,
+      },
     });
     throw new Error('Coh returned an invalid response.');
   }
   return data;
+}
+
+export function createCohRequestId() {
+  return createUuid();
+}
+
+export function createCohConversationId() {
+  return createUuid();
+}
+
+function createUuid() {
+  const value = randomHex(32).split('');
+  value[12] = '4';
+  value[16] = ['8', '9', 'a', 'b'][Math.floor(Math.random() * 4)];
+  return [
+    value.slice(0, 8).join(''),
+    value.slice(8, 12).join(''),
+    value.slice(12, 16).join(''),
+    value.slice(16, 20).join(''),
+    value.slice(20, 32).join(''),
+  ].join('-');
+}
+
+function randomHex(length: number) {
+  let value = '';
+  while (value.length < length) {
+    value += Math.floor(Math.random() * 0x100000000).toString(16).padStart(8, '0');
+  }
+  return value.slice(0, length);
 }
 
 export async function attachmentFromUri(input: {

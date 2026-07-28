@@ -25,6 +25,7 @@ const [
   supabaseConfig,
   invitationFunction,
   assistant,
+  cohHardening,
   extractor,
   mailboxMigration,
   mailboxClient,
@@ -53,6 +54,7 @@ const [
   read('supabase/config.toml'),
   read('supabase/functions/send-household-invite/index.ts'),
   read('supabase/functions/coh-assistant/index.ts'),
+  read('supabase/migrations/202607270002_coh_agent_hardening.sql'),
   read('supabase/functions/coh-extract/index.ts'),
   read('supabase/migrations/202607270001_mailbox_connections.sql'),
   read('src/services/mailboxConnections.ts'),
@@ -71,6 +73,45 @@ const contracts = [
   ['Edge error bodies are surfaced safely', edgeClient, /response\.clone\(\)\.json\(\)/],
   ['deployment pins the supported Coh model', deploy, /gpt-5\.6-sol/],
   ['assistant defaults to the supported Coh model', assistant, /'gpt-5\.6-sol'/],
+  ['Coh requests have a durable idempotency ledger', cohHardening, /create table if not exists public\.assistant_requests[\s\S]*unique \(user_id, request_id\)/],
+  ['Coh request claims reject changed payloads', cohHardening, /request_row\.payload_hash <> target_payload_hash[\s\S]*request ID cannot be reused/],
+  ['Coh request workers use fenced leases', cohHardening, /lease_token uuid[\s\S]*expected_lease_token[\s\S]*lease_token = expected_lease_token/],
+  ['Coh request recovery has a bounded read index', cohHardening, /assistant_requests_recovery_idx[\s\S]*user_id, household_id, updated_at desc/],
+  ['Coh proposals compute their digest in Postgres', cohHardening, /calculated_hash := encode\([\s\S]*extensions\.digest/],
+  ['Coh proposal corrections avoid ambiguous SQL parameters', cohHardening, /input_proposed_payload jsonb[\s\S]*proposed_payload = coalesce\(input_proposed_payload/],
+  ['Coh proposal replay uses a durable request marker', cohHardening, /proposal_request_id = target_request[\s\S]*return current_action/],
+  ['Coh proposal retries cannot overwrite newer corrections', cohHardening, /request_row\.proposal_action_id is not null[\s\S]*request_row\.proposal_action_version[\s\S]*request_row\.proposal_hash[\s\S]*superseded\. Resume/],
+  ['Coh proposal request results persist atomically', cohHardening, /proposal_action_id = updated_action\.id[\s\S]*proposal_snapshot = to_jsonb\(updated_action\)[\s\S]*proposal_action_id is null/],
+  ['Coh proposal ownership rejects nullable source mismatches', cohHardening, /source_id is distinct from conversation\.id/],
+  ['executed Coh actions cannot be rewritten as proposals', cohHardening, /current_action\.target_id is not null[\s\S]*current_action\.executed_at is not null[\s\S]*Executed actions must be changed/],
+  ['Coh confirmation requires version and proposal digest', cohHardening, /confirm_coh_action\([\s\S]*expected_version integer[\s\S]*expected_proposal_hash text/],
+  ['Coh confirmation replay is tied to its exact request', cohHardening, /confirmation_request_id = target_request[\s\S]*approve_and_execute_household_action/],
+  ['Coh cancellation replay is tied to its exact request', cohHardening, /cancellation_request_id = target_request[\s\S]*transition_household_action/],
+  ['pending Coh proposals remain private to their requester', cohHardening, /source_kind = 'coh'[\s\S]*conversation\.id = household_actions\.source_id[\s\S]*conversation\.user_id = auth\.uid\(\)/],
+  ['direct clients cannot spoof Coh action inserts', cohHardening, /source_kind <> 'coh'/],
+  ['Coh guard preserves executed action lifecycle changes', cohHardening, /old\.source_kind = 'coh'[\s\S]*old\.target_id is null[\s\S]*old\.executed_at is null/],
+  ['pre-hardening Coh proposals receive a digest', cohHardening, /Existing Coh proposals predate[\s\S]*where action\.source_kind = 'coh'[\s\S]*proposal_hash is null/],
+  ['closed Coh conversations require a new identifier', assistant, /operation === 'message' && conversation\.closed_at[\s\S]*NEW_CONVERSATION_REQUIRED/],
+  ['lost Coh responses recover from a durable assistant turn', assistant, /request response recovery query[\s\S]*recovered request completion/],
+  ['resume exposes request operation and retry state', assistant, /operation: reconciledRequestState\?\.operation[\s\S]*rawRequestState\?\.operation[\s\S]*requestState: reconciledRequestState\?\.status[\s\S]*retryable:/],
+  ['resume preserves attachment and timezone retry metadata', assistant, /attachmentCount: turn\.role === 'user'[\s\S]*timezone: turn\.role === 'user'[\s\S]*attachment_count: attachments\.length[\s\S]*timezone: body\?\.timezone \?\? null/],
+  ['resume exposes authoritative outstanding requests', assistant, /outstandingRequests[\s\S]*hasProcessingRequests[\s\S]*requestRow\.status === 'processing'/],
+  ['resume recovers unfinished requests from closed conversations', assistant, /A confirm\/cancel can close its conversation[\s\S]*outstanding conversation readback/],
+  ['resume recovers bounded terminal confirm and cancel receipts', assistant, /terminalReceiptCutoff[\s\S]*terminal conversation query[\s\S]*\['confirm', 'cancel'\][\s\S]*reconciledStatus[\s\S]*response:/],
+  ['closed terminal receipts cannot pin the active conversation', assistant, /conversationId: requestRow\.conversation_id[\s\S]*conversationId: conversation\.closed_at \? null : conversation\.id/],
+  ['newer terminal receipts outrank stale unfinished recovery', assistant, /Compare unfinished work with recent terminal receipts by updated[\s\S]*Date\.parse\(right\.updated_at\) - Date\.parse\(left\.updated_at\)/],
+  ['resume retains the newest bounded turns and requests', assistant, /Keep the newest bounded window[\s\S]*order\('created_at', \{ ascending: false \}\)[\s\S]*\.reverse\(\)/],
+  ['open conversations cannot mask household recovery receipts', assistant, /unfinished request recovery query[\s\S]*terminal request recovery query[\s\S]*Reconciliation is household-wide rather than tied/],
+  ['committed actions recover a receipt before Edge completion', assistant, /terminalReceiptFromAction[\s\S]*request-specific marker is authoritative proof[\s\S]*reconciledStatus/],
+  ['durable terminal markers outrank stale worker errors', assistant, /durable action markers outrank that stale[\s\S]*recoveredTerminalResponse \?\? requestRow\.response_payload/],
+  ['terminal recovery updates turn state as well as the ledger', assistant, /reconciledRequestById[\s\S]*requestState: reconciledRequestState\?\.status/],
+  ['the app reconciles request-ledger entries without conversation turns', app, /const outstandingRequests = session\.outstandingRequests \?\? \[\][\s\S]*receiptMessages[\s\S]*hasProcessingLedgerRequest/],
+  ['a user turn cannot suppress its recovered assistant receipt', app, /restoredResponseRequestIds[\s\S]*!message\.mine && Boolean\(message\.cohResponse\)[\s\S]*!restoredResponseRequestIds\.has/],
+  ['terminal action replay markers clear by durable request ID', app, /The request ID is the durable idempotency identity[\s\S]*replay\.requestId !== request\.requestId/],
+  ['session recovery retains attachment bytes for exact retries', app, /Durable turns intentionally do not return attachment bytes[\s\S]*attachments: local\.attachments/],
+  ['failed turnless message requests become safely retryable', app, /outstandingByRequestId[\s\S]*request\.operation !== 'message'[\s\S]*delivery: 'failed' as const[\s\S]*retryable: leaseExpired \|\| request\.retryable/],
+  ['voice submission honors remotely processing Coh requests', app, /voiceRecorderState\.isRecording[\s\S]*cohRequestLockRef\.current \|\| cohRemoteBusyRef\.current/],
+  ['Coh provider fallback is deterministic and non-writing', assistant, /providerMode = 'safe_fallback'[\s\S]*deterministicFallback/],
   ['inbox extraction defaults to the supported Coh model', extractor, /'gpt-5\.6-sol'/],
   ['direct chores store due reminders', choreScheduling, /add column if not exists reminder_minutes integer/],
   ['recurring chores create the next occurrence', choreScheduling, /create_next_recurring_chore/],
@@ -180,6 +221,39 @@ assert.doesNotMatch(
   mailboxMigration,
   /status text,\s*status text,/,
   'Sanitized mailbox connection RPC must not declare duplicate output columns.',
+);
+const assistantResponseSchema = assistant.slice(
+  assistant.indexOf('const responseSchema'),
+  assistant.indexOf('type CohAttachment'),
+);
+assert.match(
+  assistantResponseSchema,
+  /enum: \['collecting', 'ready_for_confirmation', 'answered'\]/,
+  'The Coh model schema must remain proposal-only.',
+);
+assert.doesNotMatch(
+  assistantResponseSchema,
+  /confirmed|canceled/,
+  'The model must not be allowed to emit terminal action states.',
+);
+assert.doesNotMatch(
+  assistant,
+  /supabase\.rpc\('approve_and_execute_household_action'/,
+  'The Coh Edge Function must execute only through confirm_coh_action.',
+);
+assert.doesNotMatch(
+  assistant,
+  /conversation reopen/,
+  'Closed Coh conversations must not be reopened.',
+);
+const completionFunction = cohHardening.slice(
+  cohHardening.indexOf('create or replace function public.complete_assistant_request'),
+  cohHardening.indexOf('create or replace function public.fail_assistant_request'),
+);
+assert.doesNotMatch(
+  completionFunction,
+  /lease_expires_at\s*>\s*now\(\)/,
+  'A current fencing token must be allowed to finalize after its lease clock expires.',
 );
 
 console.log(`✓ ${contracts.length} backend reliability contracts passed`);

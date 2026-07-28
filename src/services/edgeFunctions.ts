@@ -8,6 +8,9 @@ type EdgeErrorPayload = {
   error?: unknown;
   message?: unknown;
   code?: unknown;
+  correlationId?: unknown;
+  retryable?: unknown;
+  retryAfterMs?: unknown;
   details?: unknown;
   hint?: unknown;
 };
@@ -16,18 +19,27 @@ export class CohoEdgeFunctionError extends Error {
   readonly functionName: string;
   readonly status: number | null;
   readonly code: string | null;
+  readonly correlationId: string | null;
+  readonly retryable: boolean;
+  readonly retryAfterMs: number | null;
 
   constructor(input: {
     functionName: string;
     message: string;
     status?: number | null;
     code?: string | null;
+    correlationId?: string | null;
+    retryable?: boolean;
+    retryAfterMs?: number | null;
   }) {
     super(input.message);
     this.name = 'CohoEdgeFunctionError';
     this.functionName = input.functionName;
     this.status = input.status ?? null;
     this.code = input.code ?? null;
+    this.correlationId = input.correlationId ?? null;
+    this.retryable = input.retryable ?? false;
+    this.retryAfterMs = input.retryAfterMs ?? null;
   }
 }
 
@@ -86,16 +98,28 @@ async function normalizeEdgeError(functionName: string, error: unknown) {
   const code = stringValue(payload?.code);
   const serverMessage = firstString(payload?.error, payload?.message);
   const normalized = (serverMessage || '').toLowerCase();
+  const errorName = error && typeof error === 'object' && 'name' in error
+    ? stringValue((error as { name?: unknown }).name)
+    : '';
+  const transportFailure = errorName === 'FunctionsFetchError'
+    || errorName === 'FunctionsRelayError';
 
   let message = serverMessage;
-  if (
+  if (transportFailure) {
+    message = 'Coh could not reach its secure service. Check your connection and retry.';
+  } else if (
     status === 401
     || normalized.includes('invalid jwt')
     || normalized.includes('invalid session')
     || normalized.includes('authorization header')
   ) {
     message = 'Your Coho session expired. Sign in again and retry.';
-  } else if (status === 404 && code === 'NOT_FOUND') {
+  } else if (
+    status === 404
+    && code === 'NOT_FOUND'
+    && !stringValue(payload?.correlationId)
+    && (!serverMessage || normalized.includes('function'))
+  ) {
     message = `${functionLabel(functionName)} has not been deployed yet. Finish the Coho backend deployment and retry.`;
   } else if (
     normalized.includes('gen_random_bytes')
@@ -117,6 +141,13 @@ async function normalizeEdgeError(functionName: string, error: unknown) {
     functionName,
     status,
     code,
+    correlationId: stringValue(payload?.correlationId) || null,
+    retryable: transportFailure
+      || payload?.retryable === true
+      || status === 408
+      || status === 429
+      || (status != null && status >= 500),
+    retryAfterMs: finiteNumber(payload?.retryAfterMs),
     message,
   });
 }
@@ -158,6 +189,13 @@ function firstString(...values: unknown[]) {
 
 function stringValue(value: unknown) {
   return typeof value === 'string' ? value.trim().slice(0, 500) : '';
+}
+
+function finiteNumber(value: unknown) {
+  const number = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(number) && number >= 0
+    ? Math.min(number, 300_000)
+    : null;
 }
 
 function functionLabel(functionName: string) {
