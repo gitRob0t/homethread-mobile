@@ -6,7 +6,7 @@ BRANCH="${COHO_RELEASE_BRANCH:-agent/chat-keyboard-homebot}"
 PROJECT_REF="${SUPABASE_PROJECT_REF:-cbkpgkiuikpcrefcbutq}"
 EXPECTED_PRODUCTION_REF="cbkpgkiuikpcrefcbutq"
 SUPABASE=(npx --yes supabase@2.109.1)
-EXPECTED_MIGRATION="202607270002_coh_agent_hardening.sql"
+EXPECTED_MIGRATION="20260728143416_coh_agent_hardening.sql"
 
 cd "$ROOT"
 

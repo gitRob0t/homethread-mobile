@@ -6,7 +6,7 @@ import path from 'node:path';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const source = await readFile(path.join(root, 'supabase/functions/coh-assistant/index.ts'), 'utf8');
 const hardening = await readFile(
-  path.join(root, 'supabase/migrations/202607270002_coh_agent_hardening.sql'),
+  path.join(root, 'supabase/migrations/20260728143416_coh_agent_hardening.sql'),
   'utf8',
 );
 const responseSchemaSource = source.slice(
