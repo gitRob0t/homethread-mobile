@@ -26,6 +26,7 @@ export default function AuthGate({ children }: Props) {
   const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState(true);
   const [hasHousehold, setHasHousehold] = useState(false);
+  const [authError, setAuthError] = useState('');
   const processedInitialUrl = useRef(false);
 
   async function acceptInviteAndRefresh(invite: InviteLink) {
@@ -64,13 +65,13 @@ export default function AuthGate({ children }: Props) {
         if (!url) return;
         const invite = invitationFromUrl(url);
         if (invite) void acceptInviteAndRefresh(invite);
-        else completeAuthRedirect(url).catch(() => undefined);
+        else completeAuthRedirect(url).catch((error) => setAuthError(error instanceof Error ? error.message : 'Sign-in could not be completed.'));
       });
     }
     const subscription = Linking.addEventListener('url', ({ url }) => {
       const invite = invitationFromUrl(url);
       if (invite) void acceptInviteAndRefresh(invite);
-      else completeAuthRedirect(url).catch(() => undefined);
+      else completeAuthRedirect(url).catch((error) => setAuthError(error instanceof Error ? error.message : 'Sign-in could not be completed.'));
     });
     return () => subscription.remove();
   }, [session]);
@@ -101,7 +102,7 @@ export default function AuthGate({ children }: Props) {
   }, [session]);
 
   if (loading) return <LoadingScreen />;
-  if (!session) return <AuthScreen />;
+  if (!session) return <AuthScreen initialMessage={authError} />;
   if (!hasHousehold) {
     return <HouseholdSetup onCreated={() => setHasHousehold(true)} />;
   }
@@ -113,9 +114,9 @@ function pendingInviteKey(kind: InviteLink['kind']) {
 }
 
 function invitationFromUrl(url: string): InviteLink | null {
-  const household = url.match(/^(?:coho|homethread):\/\/invite\/([a-f0-9]+)(?:[/?#]|$)/i);
+  const household = url.match(/^(?:coho|homethread|outrspace):\/\/invite\/([a-f0-9]+)(?:[/?#]|$)/i);
   if (household?.[1]) return { kind: 'household', token: household[1] };
-  const trip = url.match(/^(?:coho|homethread):\/\/trip-invite\/([a-f0-9]+)(?:[/?#]|$)/i);
+  const trip = url.match(/^(?:coho|homethread|outrspace):\/\/trip-invite\/([a-f0-9]+)(?:[/?#]|$)/i);
   if (trip?.[1]) return { kind: 'trip', token: trip[1] };
   return null;
 }
@@ -131,13 +132,17 @@ function LoadingScreen() {
   );
 }
 
-function AuthScreen() {
+function AuthScreen({ initialMessage = '' }: { initialMessage?: string }) {
   const [mode, setMode] = useState<'signin' | 'signup'>('signin');
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
-  const [message, setMessage] = useState('');
+  const [message, setMessage] = useState(initialMessage);
+
+  useEffect(() => {
+    if (initialMessage) setMessage(initialMessage);
+  }, [initialMessage]);
 
   async function submit() {
     if (!email.trim() || password.length < 8 || (mode === 'signup' && !name.trim())) {
@@ -149,7 +154,7 @@ function AuthScreen() {
     try {
       if (mode === 'signup') {
         const result = await signUp(email, password, name);
-        if (!result.session) setMessage('Check your email to confirm your Coho account.');
+        if (!result.session) setMessage('Check your email to confirm your OutrSPACE account.');
       } else {
         await signIn(email, password);
       }
@@ -241,7 +246,7 @@ function AuthScreen() {
 
           {mode === 'signin' && <Pressable onPress={forgotPassword}><Text style={styles.textButton}>Forgot password?</Text></Pressable>}
           <Pressable onPress={() => { setMode(mode === 'signin' ? 'signup' : 'signin'); setMessage(''); }}>
-            <Text style={styles.switchText}>{mode === 'signin' ? 'New to Coho? Create an account' : 'Already have an account? Sign in'}</Text>
+            <Text style={styles.switchText}>{mode === 'signin' ? 'New to OutrSPACE? Create an account' : 'Already have an account? Sign in'}</Text>
           </Pressable>
         </View>
       </KeyboardAvoidingView>
@@ -298,7 +303,7 @@ function BrandMark() {
   return (
     <View style={styles.brandRow}>
       <View style={styles.logo}><Text style={styles.logoText}>⌂</Text></View>
-      <Text style={styles.brand}>Coho</Text>
+      <Text style={styles.brand}>OutrSPACE</Text>
     </View>
   );
 }

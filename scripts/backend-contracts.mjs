@@ -36,6 +36,9 @@ const [
   mailboxWebhook,
   deploymentDocs,
   architectureDocs,
+  authService,
+  authGate,
+  appConfig,
 ] = await Promise.all([
   read('supabase/migrations/202607230008_edge_function_repairs.sql'),
   read('supabase/migrations/202607230009_chore_scheduling.sql'),
@@ -67,6 +70,9 @@ const [
   read('supabase/functions/mailbox-webhook/index.ts'),
   read('docs/DEPLOYMENT.md'),
   read('docs/ARCHITECTURE.md'),
+  read('src/services/auth.ts'),
+  read('src/components/AuthGate.tsx'),
+  read('app.json'),
 ]);
 
 const contracts = [
@@ -135,7 +141,7 @@ const contracts = [
   ['cloud imports use explicit insert and update with partial-index dedupe', calendarSync, /existingEvent[\s\S]*from\('events'\)\.update[\s\S]*from\('events'\)\.insert/],
   ['all-day Google events always use an exclusive end date', calendarSync, /googleAllDayEndDate/],
   ['internal event metadata is sanitized before provider export', calendarSync, /calendarDescription\(event\.details\)/],
-  ['calendar sync reports removed iPhone events', householdOS, /deleted event.*removed from Coho/],
+  ['calendar sync reports removed iPhone events', householdOS, /deleted event.*removed from OutrSPACE/],
   ['member removal requires household administration', familyManagement, /if not public\.is_household_admin\(target_household\)/],
   ['household owners cannot be removed', familyManagement, /if member_role = 'owner'/],
   ['member removal clears household access', familyManagement, /delete from public\.household_members/],
@@ -162,6 +168,10 @@ const contracts = [
   ['integrations are grouped into navigable categories', app, /view: 'Calendars'[\s\S]*view: 'Food & Dining'[\s\S]*view: 'Location & Safety'/],
   ['the main view is a live family command center', app, /FAMILY COMMAND CENTER[\s\S]*Needs attention[\s\S]*Family pulse/],
   ['integration status reloads from persisted providers', app, /listCalendarConnections\(household\.id\)[\s\S]*getHouseholdInbox\(household\.id\)[\s\S]*getLocationSharingState/],
+  ['mailbox status reloads before opening integration setup', app, /listMailboxConnections\(household\.id\)[\s\S]*activeMailboxProviders[\s\S]*Gmail \/ Google Workspace/],
+  ['Google SSO uses a native browser callback exchange', authService, /signInWithOAuth\([\s\S]*provider: 'google'[\s\S]*skipBrowserRedirect: true[\s\S]*openAuthSessionAsync[\s\S]*completeAuthRedirect/],
+  ['Google SSO callback errors are shown to the user', authGate, /completeAuthRedirect\(url\)\.catch\(\(error\) => setAuthError/],
+  ['the native auth callback scheme remains registered', appConfig, /"scheme"[\s\S]*"homethread"[\s\S]*"outrspace"/],
   ['invite landing pages bypass gateway JWT verification', supabaseConfig, /\[functions\.send-household-invite\][\s\S]*verify_jwt = false/],
   ['invite deployment preserves its public landing page', deploy, /public_entry_functions=\([\s\S]*send-household-invite[\s\S]*\)/],
   ['invite creation still requires a user session', invitationFunction, /if \(!authorization\) return json\(\{ error: 'Authentication required\.' \}, 401\)/],

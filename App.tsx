@@ -47,6 +47,7 @@ import {
   writeApprovedEventToDevice,
 } from './src/services/deviceCalendar';
 import { listCalendarConnections, type CalendarProvider } from './src/services/calendarConnections';
+import { listMailboxConnections } from './src/services/mailboxConnections';
 import type { EmailSourceProvider } from './src/services/emailSources';
 import { supabase } from './src/lib/supabase';
 import {
@@ -127,6 +128,7 @@ type Tab = 'Today' | 'Calendar' | 'Chores' | 'Chat' | 'More';
 type MoreView =
   | 'Menu'
   | 'Chief of Home'
+  | 'Search'
   | 'Family'
   | 'Notes'
   | 'Recaps'
@@ -294,10 +296,11 @@ type MoreMenuItem = {
 
 const moreMenuItems: MoreMenuItem[] = [
   { title: 'Chief of Home', icon: 'home-outline', color: '#7047EE', detail: 'Personal briefings, week ahead, and follow-ups' },
+  { title: 'Search', icon: 'search-outline', color: '#0F8FA8', detail: 'Find people, plans, assignments, and family messages' },
   { title: 'Family', icon: 'people-outline', color: '#2257F4', detail: 'Members, roles, and family invitations' },
   { title: 'Calendars', icon: 'calendar-outline', color: '#2257F4', detail: 'Apple, Google, Outlook, and other calendar sources' },
-  { title: 'Email', icon: 'mail-unread-outline', color: '#FF7A2E', detail: 'Connect any address and review Coh event suggestions' },
-  { title: 'Meals & Groceries', icon: 'restaurant-outline', color: '#D7550D', detail: 'Meal plans, shared groceries, and Coh Home Chef' },
+  { title: 'Email', icon: 'mail-unread-outline', color: '#FF7A2E', detail: 'Connect any address and review Ace event suggestions' },
+  { title: 'Meals & Groceries', icon: 'restaurant-outline', color: '#D7550D', detail: 'Meal plans, shared groceries, and Ace Home Chef' },
   { title: 'Family Places', icon: 'location-outline', color: '#19A47B', detail: 'Opt-in location, arrivals, and departures' },
   { title: 'Trips', icon: 'airplane-outline', color: '#7047EE', detail: 'Private schedules with friends and other families' },
   { title: 'Notes', icon: 'document-text-outline', color: '#7C4DFF', detail: 'Lists, instructions, and family details' },
@@ -338,7 +341,7 @@ const integrationCategories: IntegrationCategory[] = [
     detail: 'Bring every approved family calendar into one timeline.',
     providers: [
       { name: 'Apple Calendar', icon: 'logo-apple', color: '#5A667A', detail: 'Choose calendars already available on this iPhone.' },
-      { name: 'Google Calendar', icon: 'logo-google', color: '#4285F4', detail: 'Connect Google, then choose exactly which calendars Coho uses.' },
+      { name: 'Google Calendar', icon: 'logo-google', color: '#4285F4', detail: 'Connect Google, then choose exactly which calendars OutrSPACE uses.' },
       { name: 'Outlook Calendar', icon: 'mail-outline', color: '#0078D4', detail: 'Connect Microsoft and choose work or personal calendars.' },
       { name: 'Other calendar', icon: 'link-outline', color: '#19A47B', detail: 'Use an ICS, subscribed, or CalDAV calendar already added to this iPhone.' },
     ],
@@ -390,7 +393,7 @@ const integrationCategories: IntegrationCategory[] = [
     view: 'Displays & Migration',
     icon: 'tablet-landscape-outline',
     color: '#A96013',
-    detail: 'Move existing household schedules into Coho cleanly.',
+    detail: 'Move existing household schedules into OutrSPACE cleanly.',
     providers: [
       { name: 'Skylight', icon: 'cloud-download-outline', color: '#FF7A2E', detail: 'Import or subscribe to an exported Skylight calendar feed.' },
     ],
@@ -588,7 +591,7 @@ function CohoApp() {
         url
         && !/\/invite\//i.test(url)
         && (
-          /^(coho|homethread):\/\//i.test(url)
+          /^(coho|homethread|outrspace):\/\//i.test(url)
           || /^https:\/\/(?:app\.)?coho\.ai\//i.test(url)
         )
       ) {
@@ -644,6 +647,7 @@ function CohoApp() {
           deviceCalendarAccess,
           deviceCalendarSettings,
           calendarConnections,
+          mailboxConnections,
           householdInbox,
           locationSharing,
         ] = await Promise.all([
@@ -651,12 +655,18 @@ function CohoApp() {
           hasDeviceCalendarAccess().catch(() => false),
           getDeviceCalendarSettings().catch(() => null),
           listCalendarConnections(household.id).catch(() => []),
+          listMailboxConnections(household.id).catch(() => []),
           getHouseholdInbox(household.id).catch(() => null),
           getLocationSharingState(household.id, authData.user.id).catch(() => null),
         ]);
         const activeCalendarProviders = new Set(
           calendarConnections
-            .filter((connection) => connection.status === 'active')
+            .filter((connection) => ['active', 'syncing', 'paused'].includes(connection.status))
+            .map((connection) => connection.provider),
+        );
+        const activeMailboxProviders = new Set(
+          mailboxConnections
+            .filter((connection) => ['active', 'syncing', 'paused'].includes(connection.status))
             .map((connection) => connection.provider),
         );
         const inboxActive = householdInbox?.status === 'active';
@@ -667,6 +677,8 @@ function CohoApp() {
             && Boolean(deviceCalendarSettings?.selectedCalendarIds.length),
           'Google Calendar': activeCalendarProviders.has('google'),
           'Outlook Calendar': activeCalendarProviders.has('outlook'),
+          'Gmail / Google Workspace': activeMailboxProviders.has('google'),
+          'Outlook / Microsoft 365': activeMailboxProviders.has('outlook'),
           'Family Inbox': inboxActive,
           'Family Places': locationSharing?.sharing_enabled === true,
         }));
@@ -685,7 +697,7 @@ function CohoApp() {
           subscribeToFamilyInbox(household.id, () => void reloadSharedData(household.id, authData.user!.id)),
         );
       } catch {
-        showNotice('Coho is offline. Changes will stay on this iPhone until the household reconnects.');
+        showNotice('OutrSPACE is offline. Changes will stay on this iPhone until the household reconnects.');
       }
     }
 
@@ -761,7 +773,7 @@ function CohoApp() {
           return {
             id: `coh-turn-${turn.id}`,
             mine: turn.role === 'user',
-            author: turn.role === 'user' ? 'You' : 'Coh',
+            author: turn.role === 'user' ? 'You' : 'Ace',
             text: turn.content,
             bot: turn.role === 'assistant',
             channel: 'coh' as const,
@@ -802,7 +814,7 @@ function CohoApp() {
           .map((request) => ({
             id: `coh-receipt-${request.requestId}`,
             mine: false,
-            author: 'Coh',
+            author: 'Ace',
             text: request.response!.reply,
             bot: true,
             channel: 'coh',
@@ -1074,7 +1086,7 @@ function CohoApp() {
         await reloadSharedData(householdId, currentUserId);
         showNotice(`${title} assigned${assignee ? ` to ${assignee.name}` : ''}`);
       } catch (error) {
-        showNotice(error instanceof Error ? error.message : 'The chore could not be shared. Try again when Coho is online.');
+        showNotice(error instanceof Error ? error.message : 'The chore could not be shared. Try again when OutrSPACE is online.');
       } finally {
         setQuickAddSaving(false);
       }
@@ -1103,7 +1115,7 @@ function CohoApp() {
         });
         showNotice('Note added to the shared household');
       } catch {
-        showNotice('The note could not be shared. Try again when Coho is online.');
+        showNotice('The note could not be shared. Try again when OutrSPACE is online.');
       }
       return;
     }
@@ -1111,7 +1123,7 @@ function CohoApp() {
     setChatMode('coh');
     setCohMessageDraft(prompt);
     setTab('Chat');
-    showNotice('Coh will confirm the missing event details before saving');
+    showNotice('Ace will confirm the missing event details before saving');
   }
 
   function openEventEntry(mode: EventEntryMode) {
@@ -1126,7 +1138,7 @@ function CohoApp() {
       setChatMode('coh');
       setCohMessageDraft('@coh Help me create a family calendar event.');
       setTab('Chat');
-      showNotice('Tell Coh what you know. It will ask only for missing details.');
+      showNotice('Tell Ace what you know. It will ask only for missing details.');
       return;
     }
     if (mode === 'email') {
@@ -1145,7 +1157,7 @@ function CohoApp() {
 
   async function saveManualEvent(form: EventFormValue) {
     if (!householdId || !currentUserId) {
-      showNotice('Join a Coho household before adding a family event.');
+      showNotice('Join an OutrSPACE household before adding a family event.');
       return;
     }
     if (!form.title.trim()) return;
@@ -1193,7 +1205,7 @@ function CohoApp() {
           startsAt,
           endsAt,
           location: form.location.trim() || null,
-          notes: form.details.trim() || 'Added manually in Coho',
+          notes: form.details.trim() || 'Added manually in OutrSPACE',
           reminderMinutes: form.reminderMinutes,
           allDay: form.allDay,
           recurrenceRule: form.recurrenceRule,
@@ -1204,9 +1216,9 @@ function CohoApp() {
       await reloadSharedData(householdId, currentUserId);
       setTab('Calendar');
       const eventNotice = form.writeToDevice && !wroteToDevice
-        ? 'Event added to Coho. Choose a write-back calendar to copy it to your phone.'
+        ? 'Event added to OutrSPACE. Choose a write-back calendar to copy it to your phone.'
         : wroteToDevice
-          ? 'Event added to Coho and your selected phone calendar'
+          ? 'Event added to OutrSPACE and your selected phone calendar'
           : 'Event added to the shared family calendar';
       showNotice(form.reminderMinutes && !reminderScheduled
         ? `${eventNotice} Enable iOS notifications to receive its reminder.`
@@ -1274,7 +1286,7 @@ function CohoApp() {
     setMessages((current) => [...current, {
       id: `bot-${response?.requestId ?? createCohRequestId()}`,
       mine: false,
-      author: 'Coh',
+      author: 'Ace',
       text,
       bot: true,
       channel: 'coh',
@@ -1286,7 +1298,7 @@ function CohoApp() {
     const mode = chatMode;
     const lock = mode === 'coh' ? cohRequestLockRef : familySendLockRef;
     if (mode === 'coh' && cohRemoteBusyRef.current) {
-      showNotice('Coh is still reconciling the previous request. Family chat remains available.');
+      showNotice('Ace is still reconciling the previous request. Family chat remains available.');
       return;
     }
     if (lock.current) return;
@@ -1358,7 +1370,7 @@ function CohoApp() {
 
   async function sendSharedItemToCoh() {
     if (cohRequestLockRef.current || cohRemoteBusyRef.current) {
-      showNotice('Coh is finishing another request. Try sharing again in a moment.');
+      showNotice('Ace is finishing another request. Try sharing again in a moment.');
       return;
     }
     cohRequestLockRef.current = true;
@@ -1469,7 +1481,7 @@ function CohoApp() {
         const assistantMessage: ChatMessage = {
           id: `bot-${requestId}`,
           mine: false,
-          author: 'Coh',
+          author: 'Ace',
           text: response.reply,
           bot: true,
           channel: 'coh',
@@ -1515,7 +1527,7 @@ function CohoApp() {
         }
         cohRemoteBusyRef.current = true;
         setCohResumeNonce((current) => current + 1);
-        showNotice('Coh is still working. This request will reconcile automatically; no need to send it again.');
+        showNotice('Ace is still working. This request will reconcile automatically; no need to send it again.');
         return;
       }
       if (optimisticId) {
@@ -1537,7 +1549,7 @@ function CohoApp() {
       }
       const detail = error instanceof CohoEdgeFunctionError
         ? error.message
-        : 'Coh could not finish that request.';
+        : 'Ace could not finish that request.';
       const retryable = error instanceof CohoEdgeFunctionError ? error.retryable : true;
       showNotice(retryable
         ? `${detail} Your request is preserved—tap Retry.`
@@ -1568,7 +1580,7 @@ function CohoApp() {
     const attachmentCount = message.attachmentCount ?? message.attachments?.length ?? 0;
     if (attachmentCount > 0 && (message.attachments?.length ?? 0) !== attachmentCount) {
       setCohMessageDraft(message.cohPrompt ?? message.text);
-      showNotice('Reattach the original file or voice note, then send this as a new request. Coh will not retry a different payload under the old request ID.');
+      showNotice('Reattach the original file or voice note, then send this as a new request. Ace will not retry a different payload under the old request ID.');
       return;
     }
     cohRequestLockRef.current = true;
@@ -1613,7 +1625,7 @@ function CohoApp() {
     } catch {
       cohActionRequestIdsRef.current.delete(operationKey);
       cohRequestLockRef.current = false;
-      showNotice('Coho could not secure this confirmation for safe replay. Nothing was created; try again.');
+      showNotice('OutrSPACE could not secure this confirmation for safe replay. Nothing was created; try again.');
       return;
     }
     const { requestId, timezone } = replay;
@@ -1655,7 +1667,7 @@ function CohoApp() {
       if (!retryable) await forgetCohActionRequestId(operationKey);
       const detail = error instanceof Error
         ? error.message
-        : 'Coh could not confirm that action. Nothing new was claimed.';
+        : 'Ace could not confirm that action. Nothing new was claimed.';
       showNotice(retryable
         ? `${detail} Tap Confirm & create again to retry the exact same operation safely.`
         : detail);
@@ -1688,7 +1700,7 @@ function CohoApp() {
     } catch {
       cohActionRequestIdsRef.current.delete(operationKey);
       cohRequestLockRef.current = false;
-      showNotice('Coho could not secure this cancellation for safe replay. Nothing changed; try again.');
+      showNotice('OutrSPACE could not secure this cancellation for safe replay. Nothing changed; try again.');
       return;
     }
     const { requestId, timezone } = replay;
@@ -1709,7 +1721,7 @@ function CohoApp() {
     } catch (error) {
       const retryable = !(error instanceof CohoEdgeFunctionError) || error.retryable;
       if (!retryable) await forgetCohActionRequestId(operationKey);
-      const detail = error instanceof Error ? error.message : 'Coh could not cancel that proposal.';
+      const detail = error instanceof Error ? error.message : 'Ace could not cancel that proposal.';
       showNotice(retryable
         ? `${detail} Tap Cancel again to retry the exact same operation safely.`
         : detail);
@@ -1738,7 +1750,7 @@ function CohoApp() {
       {
         id: `bot-${result.requestId}`,
         mine: false,
-        author: 'Coh',
+        author: 'Ace',
         text: result.reply,
         bot: true,
         channel: 'coh',
@@ -1751,7 +1763,7 @@ function CohoApp() {
     setCohConversationId(response.conversationId);
     setChatMode('coh');
     setCohMessageDraft('Change ');
-    showNotice('Tell Coh exactly what to change; the current proposal stays intact until you confirm.');
+    showNotice('Tell Ace exactly what to change; the current proposal stays intact until you confirm.');
   }
 
   async function openCohAction(response: CohResponse) {
@@ -1764,14 +1776,14 @@ function CohoApp() {
   async function toggleVoiceRequest() {
     if (voiceToggleLockRef.current) return;
     if (!voiceRecorderState.isRecording && cohRemoteBusyRef.current) {
-      showNotice('Coh is still reconciling the previous request. You can keep using Family chat meanwhile.');
+      showNotice('Ace is still reconciling the previous request. You can keep using Family chat meanwhile.');
       return;
     }
     voiceToggleLockRef.current = true;
     if (voiceRecorderState.isRecording) {
       if (cohRequestLockRef.current || cohRemoteBusyRef.current) {
         voiceToggleLockRef.current = false;
-        showNotice('Coh is reconciling another request. Keep recording, then tap again when it is done to send this voice note.');
+        showNotice('Ace is reconciling another request. Keep recording, then tap again when it is done to send this voice note.');
         return;
       }
       cohRequestLockRef.current = true;
@@ -1825,7 +1837,7 @@ function CohoApp() {
     try {
       const permission = await requestRecordingPermissionsAsync();
       if (!permission.granted) {
-        showNotice('Microphone permission is needed only when you choose to speak to Coh.');
+        showNotice('Microphone permission is needed only when you choose to speak to Ace.');
         return;
       }
       await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
@@ -1917,7 +1929,7 @@ function CohoApp() {
 
   async function openDeepLink(url: string) {
     const mailboxConnection = url.match(
-      /^(?:coho|homethread):\/\/mail-connected\/(google|outlook)(?:[/?#]|$)/i,
+      /^(?:coho|homethread|outrspace):\/\/mail-connected\/(google|outlook)(?:[/?#]|$)/i,
     );
     if (mailboxConnection) {
       const provider = mailboxConnection[1].toLowerCase() as 'google' | 'outlook';
@@ -1929,12 +1941,12 @@ function CohoApp() {
       setMoreView('Email Connections');
       setTab('More');
       showNotice(connectionId
-        ? `${label} authorization returned. Coho is verifying the connection and first sync.`
+        ? `${label} authorization returned. OutrSPACE is verifying the connection and first sync.`
         : `${label} authorization was not completed. Nothing new was connected.`);
       return;
     }
     const calendarConnection = url.match(
-      /^(?:coho|homethread):\/\/calendar-connected\/(google|outlook)(?:[/?#]|$)/i,
+      /^(?:coho|homethread|outrspace):\/\/calendar-connected\/(google|outlook)(?:[/?#]|$)/i,
     );
     if (calendarConnection) {
       const label = calendarConnection[1].toLowerCase() === 'google'
@@ -1945,10 +1957,10 @@ function CohoApp() {
       setIntegrationReturnView('Calendars');
       setMoreView('Calendar Setup');
       setTab('More');
-      showNotice(`${label} connected. Coho is completing the first sync.`);
+      showNotice(`${label} connected. OutrSPACE is completing the first sync.`);
       return;
     }
-    const match = url.match(/^(?:coho|homethread):\/\/(action|event|chore|follow-up|message|inbox|recap|coh|automations)\/([^/?#]+)/i)
+    const match = url.match(/^(?:coho|homethread|outrspace):\/\/(action|event|chore|follow-up|message|inbox|recap|coh|automations)\/([^/?#]+)/i)
       ?? url.match(/^https:\/\/(?:app\.)?coho\.ai\/(action|event|chore|follow-up|message|inbox|recap|coh|automations)\/([^/?#]+)/i);
     if (!match) return;
     const [, kind, id] = match;
@@ -2117,7 +2129,7 @@ function CohoApp() {
     try {
       await setAudioModeAsync({ playsInSilentMode: true });
       await Speech.stop();
-      Speech.speak(snapshotSummary || `Here is your Coho daily sync. ${eventSummary} ${choreSummary}`, {
+      Speech.speak(snapshotSummary || `Here is your OutrSPACE daily sync. ${eventSummary} ${choreSummary}`, {
         language: 'en-US',
         rate: 0.92,
         pitch: 1,
@@ -2146,7 +2158,7 @@ function CohoApp() {
     const permission = await Notifications.requestPermissionsAsync();
     if (permission.granted) {
       await Notifications.scheduleNotificationAsync({
-        content: { title: 'Coho is ready', body: 'Family reminders and daily recaps are now enabled.', sound: 'default', data: { screen: 'Recaps', deepLink: 'coho://recap/latest' } },
+        content: { title: 'OutrSPACE is ready', body: 'Family reminders and daily recaps are now enabled.', sound: 'default', data: { screen: 'Recaps', deepLink: 'coho://recap/latest' } },
         trigger: null,
       });
       await scheduleChiefNotifications(chiefPrefs);
@@ -2335,7 +2347,7 @@ function CohoApp() {
     }
     if (prefs.weekAhead && prefs.push) {
       const { hour, minute } = parseClock(prefs.weekAheadTime);
-      ids.push(await Notifications.scheduleNotificationAsync({ content: { title: 'Your full week ahead', body: 'Open Coho for the family schedule, preparation list, and conflicts.', sound: 'default', data: { screen: 'Recaps', deepLink: 'coho://recap/week-ahead' } }, trigger: { type: Notifications.SchedulableTriggerInputTypes.WEEKLY, weekday: weekdayNumber(prefs.weekAheadDay), hour, minute } }));
+      ids.push(await Notifications.scheduleNotificationAsync({ content: { title: 'Your full week ahead', body: 'Open OutrSPACE for the family schedule, preparation list, and conflicts.', sound: 'default', data: { screen: 'Recaps', deepLink: 'coho://recap/week-ahead' } }, trigger: { type: Notifications.SchedulableTriggerInputTypes.WEEKLY, weekday: weekdayNumber(prefs.weekAheadDay), hour, minute } }));
     }
     if (prefs.followUp && prefs.push) {
       const { hour, minute } = parseClock(prefs.followUpTime);
@@ -2361,7 +2373,7 @@ function CohoApp() {
     setCohMessageDraft(prompt);
     setMoreView('Menu');
     setTab('Chat');
-    showNotice('Review the request, then send it to Coh');
+    showNotice('Review the request, then send it to Ace');
   };
   const openHouseholdOS = (view: MoreView) => {
     setIntegrationReturnView(null);
@@ -2430,7 +2442,7 @@ function CohoApp() {
       setTab('More');
       return;
     }
-    showNotice(`${name} setup requires provider authorization. Coho will never mark it connected before that succeeds.`);
+    showNotice(`${name} setup requires provider authorization. OutrSPACE will never mark it connected before that succeeds.`);
   };
   const handleMoreBack = () => {
     if (integrationReturnView && !integrationCategoryViews.has(moreView)) {
@@ -2490,10 +2502,11 @@ function CohoApp() {
             onInbox={() => { setMoreView('Family Inbox'); setTab('More'); }}
             onChat={() => { setChatMode('family'); setTab('Chat'); }}
             onFamily={() => { setMoreView('Family'); setTab('More'); }}
+            onOpenProfile={setEditingProfile}
             onNotifications={() => { setMoreView('Notification Settings'); setTab('More'); }}
           />}
           {tab === 'Calendar' && <CalendarScreen theme={theme} styles={styles} botEvents={botEvents} profiles={profiles} focusDate={calendarFocusDate} onOpenEvent={setSelectedEvent} onAction={showNotice} onManage={() => { setIntegrationReturnView(null); setIntegrationCategoryBackView('Menu'); setMoreView('Calendars'); setTab('More'); }} onAdd={() => { setQuickAddType('Event'); setQuickAddOpen(true); }} />}
-          {tab === 'Chores' && <ChoresScreen styles={styles} chores={chores} memberNames={profiles.map((profile) => profile.name)} rewardMember={rewardMember} setRewardMember={setRewardMember} selectedRewards={selectedRewards} onConfigure={setEditingChore} onAdd={() => { setQuickAddType('Chore'); setQuickAddOpen(true); }} onSelectReward={(member: string, reward: string) => { const next = { ...selectedRewards, [member]: reward }; setSelectedRewards(next); AsyncStorage.setItem('coho-reward-goals', JSON.stringify(next)); showNotice(`${member} picked a new reward goal`); }} onToggle={toggleChore} />}
+          {tab === 'Chores' && <ChoresScreen styles={styles} chores={chores} profiles={profiles} rewardMember={rewardMember} setRewardMember={setRewardMember} selectedRewards={selectedRewards} onConfigure={setEditingChore} onAdd={() => { setQuickAddType('Chore'); setQuickAddOpen(true); }} onSelectReward={(member: string, reward: string) => { const next = { ...selectedRewards, [member]: reward }; setSelectedRewards(next); AsyncStorage.setItem('coho-reward-goals', JSON.stringify(next)); showNotice(`${member} picked a new reward goal`); }} onToggle={toggleChore} />}
           {tab === 'Chat' && <ChatScreen
             styles={styles}
             messages={messages}
@@ -2519,6 +2532,17 @@ function CohoApp() {
             setMoreView(view);
           }} userId={currentUserId} onNotice={showNotice} />}
           {tab === 'More' && moreView === 'Chief of Home' && <ChiefOfHomeScreen styles={styles} prefs={chiefPrefs} memberNames={profiles.map((profile) => profile.name)} setPrefs={saveChiefPreferences} onActivate={activateChiefOfHome} />}
+          {tab === 'More' && moreView === 'Search' && <SearchScreen
+            styles={styles}
+            events={botEvents}
+            chores={chores}
+            messages={messages}
+            profiles={profiles}
+            onOpenEvent={openCalendarEvent}
+            onOpenChore={(chore) => { setEditingChore(chore); setTab('Chores'); }}
+            onOpenMessage={(channel) => { setChatMode(channel); setTab('Chat'); }}
+            onOpenProfile={setEditingProfile}
+          />}
           {tab === 'More' && moreView === 'Family' && <FamilyProfilesScreen styles={styles} profiles={profiles} onInvite={() => setFamilyHubOpen(true)} onEdit={setEditingProfile} onAdd={() => setEditingProfile({ id: `new-${Date.now()}`, name: '', dob: '', bio: '', role: 'Family member', color: '#DCE7FF', ink: '#2257F4' })} />}
           {tab === 'More' && moreView === 'Notes' && <NotesScreen styles={styles} householdId={householdId} userId={currentUserId} onAction={showNotice} />}
           {tab === 'More' && moreView === 'Recaps' && <RecapsScreen styles={styles} onRefresh={refreshDailySync} onListen={speakDailySync} onOpenEvent={openCalendarEvent} onCompleteFollowUp={completeFollowUpItem} events={botEvents} chores={chores} messages={messages} followUps={followUps} snapshots={briefingSnapshots} initialSnapshotId={initialRecapId} />}
@@ -2541,6 +2565,9 @@ function CohoApp() {
           {tab === 'More' && moreView === 'Calendar Setup' && <CalendarConnectionScreen dark={dark} householdId={householdId} userId={currentUserId} initialProvider={calendarSetupProvider} onNotice={showNotice} onConnected={(source) => setConnected((current) => ({
             ...current,
             [source === 'google' ? 'Google Calendar' : source === 'outlook' ? 'Outlook Calendar' : 'Apple Calendar']: true,
+          }))} onConnectionStateChange={(source, isConnected) => setConnected((current) => ({
+            ...current,
+            [source === 'google' ? 'Google Calendar' : 'Outlook Calendar']: isConnected,
           }))} onSynced={() => reloadSharedData()} />}
           {tab === 'More' && moreView === 'Email Connections' && <EmailConnectionsScreen
             dark={dark}
@@ -2680,6 +2707,7 @@ function TodayScreen({
   onInbox,
   onChat,
   onFamily,
+  onOpenProfile,
   onNotifications,
 }: any) {
   const now = new Date();
@@ -2712,7 +2740,7 @@ function TodayScreen({
       icon: 'mail-unread-outline',
       color: '#FF7A2E',
       title: `${inboxReviewCount} inbox item${inboxReviewCount === 1 ? '' : 's'} need review`,
-      detail: 'Approve the details before Coh adds anything.',
+      detail: 'Approve the details before Ace adds anything.',
       action: onInbox,
     },
     followUps.length > 0 && {
@@ -2757,7 +2785,7 @@ function TodayScreen({
     <LinearGradient colors={['#1C49DB', '#7047EE']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={styles.commandCenterHero}>
       <View style={styles.commandCenterTop}>
         <View style={styles.commandCenterMark}><Ionicons name="home" size={21} color="#7047EE" /></View>
-        <View style={styles.flex}><Text style={styles.commandCenterLabel}>FAMILY COMMAND CENTER</Text><Text style={styles.commandCenterTitle}>{nextEvent ? `Next: ${nextEvent.title}` : 'Your household is clear.'}</Text><Text style={styles.commandCenterDetail}>{nextEvent ? `${nextEvent.day} at ${nextEvent.time}${nextEvent.place ? ` · ${nextEvent.place}` : ''}` : 'Coh is watching the calendar, chores, inbox, and follow-ups.'}</Text></View>
+        <View style={styles.flex}><Text style={styles.commandCenterLabel}>FAMILY COMMAND CENTER</Text><Text style={styles.commandCenterTitle}>{nextEvent ? `Next: ${nextEvent.title}` : 'Your household is clear.'}</Text><Text style={styles.commandCenterDetail}>{nextEvent ? `${nextEvent.day} at ${nextEvent.time}${nextEvent.place ? ` · ${nextEvent.place}` : ''}` : 'Ace is watching the calendar, chores, inbox, and follow-ups.'}</Text></View>
       </View>
       <View style={styles.commandStatsRow}>{commandStats.map((item) => <Pressable key={item.label} onPress={item.action} style={styles.commandStat}>
         <Text style={styles.commandStatValue}>{item.value}</Text><Text style={styles.commandStatLabel}>{item.label}</Text>
@@ -2772,24 +2800,25 @@ function TodayScreen({
     </Pressable>)}
 
     <View style={styles.sectionHead}><View><Text style={styles.sectionTitle}>Today</Text><Text style={styles.muted}>{todaysEvents.length} event{todaysEvents.length === 1 ? '' : 's'} · {todaysChores.length} chore{todaysChores.length === 1 ? '' : 's'} due</Text></View><Pressable onPress={onCalendar}><Text style={styles.link}>See full day ›</Text></Pressable></View>
-    {cards.length === 0 ? <View style={styles.emptyChat}><Ionicons name="sparkles-outline" size={28} color="#7047EE" /><Text style={styles.settingTitle}>Your family radar is clear</Text><Text style={styles.muted}>Ask Coh to add an event or create the first shared chore.</Text></View> : <View style={styles.bentoGrid}>{cards.map((card: any) => <Pressable key={`${card.kind}-${card.item.id}`} onPress={() => card.kind === 'event' ? onOpenEvent(card.item) : onChores()} style={styles.bentoCard}>
+    {cards.length === 0 ? <View style={styles.emptyChat}><Ionicons name="sparkles-outline" size={28} color="#7047EE" /><Text style={styles.settingTitle}>Your family radar is clear</Text><Text style={styles.muted}>Ask Ace to add an event or create the first shared chore.</Text></View> : <View style={styles.bentoGrid}>{cards.map((card: any) => <Pressable key={`${card.kind}-${card.item.id}`} onPress={() => card.kind === 'event' ? onOpenEvent(card.item) : onChores()} style={styles.bentoCard}>
       <View style={[styles.cardIcon, { backgroundColor: card.tint }]}><Ionicons name={card.icon as any} size={24} color={card.color} /></View>
       <Text style={styles.cardTitle}>{card.title}</Text><Text style={styles.cardValue}>{card.value}</Text><Text style={styles.cardDetail}>{card.detail}</Text>
       <View style={[styles.cardPill, { backgroundColor: `${card.color}12` }]}><Ionicons name="time-outline" size={13} color={card.color} /><Text style={[styles.cardPillText, { color: card.color }]}>Tap for details</Text></View>
     </Pressable>)}</View>}
     <Pressable onPress={onRecap}><LinearGradient colors={['#2257F4', '#7047EE']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={styles.recapCard}>
-      <View style={styles.recapIcon}><Ionicons name="sparkles" size={21} color="#fff" /></View><View style={styles.recapCopy}><Text style={styles.recapLabel}>COHO DAILY</Text><Text style={styles.recapTitle}>Your live family sync</Text><Text style={styles.recapText}>{events.length} shared event{events.length === 1 ? '' : 's'} and {openChores.length} open chore{openChores.length === 1 ? '' : 's'}.</Text></View><Ionicons name="chevron-forward" size={20} color="#fff" />
+      <View style={styles.recapIcon}><Ionicons name="sparkles" size={21} color="#fff" /></View><View style={styles.recapCopy}><Text style={styles.recapLabel}>OUTRSPACE DAILY</Text><Text style={styles.recapTitle}>Your live family sync</Text><Text style={styles.recapText}>{events.length} shared event{events.length === 1 ? '' : 's'} and {openChores.length} open chore{openChores.length === 1 ? '' : 's'}.</Text></View><Ionicons name="chevron-forward" size={20} color="#fff" />
     </LinearGradient></Pressable>
     <Text style={styles.sectionTitle}>Family pulse</Text>
     <View style={styles.familyPulseGrid}>
       <Pressable onPress={onFamily} style={styles.familyPulseCard}><Ionicons name="people-outline" size={22} color="#2257F4" /><Text style={styles.familyPulseValue}>{profiles.length}</Text><Text style={styles.familyPulseLabel}>Family members</Text></Pressable>
       <Pressable onPress={onChat} style={styles.familyPulseCard}><Ionicons name="chatbubbles-outline" size={22} color="#7047EE" /><Text style={styles.familyPulseValue}>{familyMessages.length}</Text><Text style={styles.familyPulseLabel}>Shared messages</Text></Pressable>
     </View>
+    {profiles.length > 0 && <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.todayPeopleRow}>{profiles.map((profile: FamilyProfile) => <Pressable key={profile.id} accessibilityRole="button" accessibilityLabel={`Open ${profile.name} profile`} onPress={() => onOpenProfile(profile)} style={styles.todayPersonCard}><ProfileAvatar profile={profile} styles={styles} size="large" /><Text numberOfLines={1} style={styles.todayPersonName}>{profile.name}</Text><Text numberOfLines={1} style={styles.todayPersonRole}>{profile.membershipRole === 'owner' ? 'Owner' : profile.role}</Text><View style={styles.todayProfileLink}><Text style={styles.link}>Profile</Text><Ionicons name="chevron-forward" size={13} color="#2257F4" /></View></Pressable>)}</ScrollView>}
     <Text style={styles.sectionTitle}>Coming up</Text>{upcomingEvents.length === 0 ? <Text style={styles.muted}>No upcoming events yet.</Text> : upcomingEvents.map((event: BotEvent) => <Pressable key={event.id} onPress={() => onOpenEvent(event)} style={styles.upcomingRow}><View style={[styles.dateTile, { borderColor: '#2257F4' }]}><Text style={[styles.dateMonth, { color: '#2257F4' }]}>{event.dateISO ? new Date(`${event.dateISO}T12:00:00`).toLocaleDateString(undefined, { month: 'short' }).toUpperCase() : 'NEXT'}</Text><Text style={[styles.dateNumber, { color: '#2257F4' }]}>{event.dateISO ? Number(event.dateISO.slice(-2)) : '•'}</Text></View><View style={styles.flex}><Text style={styles.upcomingTime}>{event.time}{event.provider && event.provider !== 'coho' ? ` · ${calendarSourceLabel(event.provider)}` : ''}</Text><Text style={styles.upcomingTitle}>{event.title}</Text></View><Ionicons name="chevron-forward" size={18} color="#2257F4" /></Pressable>)}
   </ScrollView>;
 }
 
-type CalendarViewMode = 'month' | 'week' | 'agenda';
+type CalendarViewMode = 'day' | 'range' | 'week' | 'month' | 'year';
 
 const calendarPersonPalette = [
   '#2257F4',
@@ -2848,6 +2877,7 @@ function addMonths(date: Date, count: number) {
 function CalendarScreen({ theme, styles, botEvents, profiles, focusDate, onOpenEvent, onAction, onManage, onAdd }: any) {
   const [selected, setSelected] = useState(startOfDay(new Date()));
   const [view, setView] = useState<CalendarViewMode>('month');
+  const [rangeDaysCount, setRangeDaysCount] = useState(3);
   const [personFilter, setPersonFilter] = useState<string | null>(null);
   useEffect(() => {
     if (!focusDate) return;
@@ -2856,10 +2886,10 @@ function CalendarScreen({ theme, styles, botEvents, profiles, focusDate, onOpenE
   }, [focusDate]);
 
   const people = useMemo(() => {
-    const byName = new Map<string, { id?: string; name: string; color: string; tint: string }>();
+    const byName = new Map<string, { id?: string; name: string; color: string; tint: string; avatarUri?: string }>();
     (profiles as FamilyProfile[]).forEach((profile) => {
       const name = profile.name.trim();
-      if (name) byName.set(name.toLowerCase(), { id: profile.id, name, color: profile.ink || stableCalendarColor(profile.id || name), tint: profile.color || `${stableCalendarColor(profile.id || name)}18` });
+      if (name) byName.set(name.toLowerCase(), { id: profile.id, name, color: profile.ink || stableCalendarColor(profile.id || name), tint: profile.color || `${stableCalendarColor(profile.id || name)}18`, avatarUri: profile.avatarUri });
     });
     (botEvents as BotEvent[]).forEach((event) => {
       const name = event.person?.trim();
@@ -2871,9 +2901,9 @@ function CalendarScreen({ theme, styles, botEvents, profiles, focusDate, onOpenE
   }, [botEvents, profiles]);
 
   const personMeta = (name: string, id?: string) => {
-    if (/^(family|everyone|all)$/i.test(name ?? '')) return { name: 'Family', color: '#7047EE', tint: '#7047EE18' };
+    if (/^(family|everyone|all)$/i.test(name ?? '')) return { name: 'Family', color: '#7047EE', tint: '#7047EE18', avatarUri: undefined };
     return people.find((person) => (id && person.id === id) || person.name.toLowerCase() === name?.toLowerCase())
-      ?? { name: name || 'Family', color: stableCalendarColor(name || 'Family'), tint: `${stableCalendarColor(name || 'Family')}18` };
+      ?? { name: name || 'Family', color: stableCalendarColor(name || 'Family'), tint: `${stableCalendarColor(name || 'Family')}18`, avatarUri: undefined };
   };
 
   const filteredEvents = useMemo(() => (botEvents as BotEvent[])
@@ -2904,32 +2934,34 @@ function CalendarScreen({ theme, styles, botEvents, profiles, focusDate, onOpenE
   const selectedEvents = eventsByDate.get(selectedKey) ?? [];
   const weekStart = startOfWeek(selected);
   const weekDays = Array.from({ length: 7 }, (_, index) => addDays(weekStart, index));
+  const rangeDays = Array.from({ length: rangeDaysCount }, (_, index) => addDays(selected, index));
   const monthStart = new Date(selected.getFullYear(), selected.getMonth(), 1, 12, 0, 0, 0);
   const monthGridStart = startOfWeek(monthStart);
   const monthDays = Array.from({ length: 42 }, (_, index) => addDays(monthGridStart, index));
-  const agendaStart = startOfDay(selected);
-  const agendaEnd = addDays(agendaStart, 30);
-  const agendaKeys = [...eventsByDate.keys()]
-    .filter((key) => {
-      const date = new Date(`${key}T12:00:00`);
-      return date >= agendaStart && date < agendaEnd;
-    })
-    .sort();
+  const yearMonths = Array.from({ length: 12 }, (_, month) => new Date(selected.getFullYear(), month, 1, 12));
   const viewOptions: Array<{ id: CalendarViewMode; label: string; icon: string }> = [
-    { id: 'month', label: 'Month', icon: 'calendar-outline' },
+    { id: 'day', label: 'Day', icon: 'today-outline' },
+    { id: 'range', label: 'Days', icon: 'copy-outline' },
     { id: 'week', label: 'Week', icon: 'albums-outline' },
-    { id: 'agenda', label: 'Agenda', icon: 'list-outline' },
+    { id: 'month', label: 'Month', icon: 'calendar-outline' },
+    { id: 'year', label: 'Year', icon: 'grid-outline' },
   ];
-  const period = view === 'month'
+  const period = view === 'year'
+    ? String(selected.getFullYear())
+    : view === 'month'
     ? selected.toLocaleDateString(undefined, { month: 'long', year: 'numeric' })
     : view === 'week'
       ? `${weekDays[0].toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}–${weekDays[6].toLocaleDateString(undefined, { month: weekDays[0].getMonth() === weekDays[6].getMonth() ? undefined : 'short', day: 'numeric' })}`
-      : `${agendaStart.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}–${addDays(agendaEnd, -1).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`;
+      : view === 'range'
+        ? `${rangeDays[0].toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}–${rangeDays[rangeDays.length - 1].toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`
+        : selected.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' });
 
   function navigatePeriod(direction: -1 | 1) {
-    setSelected((current) => view === 'month'
+    setSelected((current) => view === 'year'
+      ? new Date(current.getFullYear() + direction, current.getMonth(), 1, 12)
+      : view === 'month'
       ? addMonths(current, direction)
-      : addDays(current, direction * (view === 'week' ? 7 : 30)));
+      : addDays(current, direction * (view === 'week' ? 7 : view === 'range' ? rangeDaysCount : 1)));
   }
 
   function renderEvent(event: BotEvent, compact = false) {
@@ -2937,7 +2969,7 @@ function CalendarScreen({ theme, styles, botEvents, profiles, focusDate, onOpenE
     const conflict = conflictIds.has(event.id);
     return <Pressable key={event.id} accessibilityRole="button" accessibilityLabel={`Open ${event.title} for ${person.name}`} onPress={() => onOpenEvent(event)} style={[styles.calendarEventRow, compact && styles.calendarEventRowCompact]}>
       <View style={[styles.calendarEventAccent, { backgroundColor: person.color }]} />
-      <View style={[styles.calendarEventAvatar, { backgroundColor: person.tint }]}><Text style={[styles.calendarEventInitials, { color: person.color }]}>{initials(person.name)}</Text></View>
+      <View style={[styles.calendarEventAvatar, { backgroundColor: person.tint }]}>{person.avatarUri ? <Image source={{ uri: person.avatarUri }} style={styles.profileAvatarImage} /> : <Text style={[styles.calendarEventInitials, { color: person.color }]}>{initials(person.name)}</Text>}</View>
       <View style={styles.flex}>
         <View style={styles.eventSourceTitleRow}>
           <Text numberOfLines={1} style={styles.timelineTitle}>{event.title}</Text>
@@ -2979,6 +3011,11 @@ function CalendarScreen({ theme, styles, botEvents, profiles, focusDate, onOpenE
       </Pressable>;
     })}</View>
 
+    {view === 'range' && <View style={styles.calendarRangePicker}>
+      <Text style={styles.calendarRangeLabel}>SHOW</Text>
+      {[2, 3, 5, 7].map((count) => <Pressable key={count} onPress={() => setRangeDaysCount(count)} style={[styles.calendarRangeChip, rangeDaysCount === count && styles.calendarRangeChipActive]}><Text style={[styles.calendarRangeChipText, rangeDaysCount === count && styles.calendarRangeChipTextActive]}>{count} days</Text></Pressable>)}
+    </View>}
+
     <View style={styles.calendarNav}>
       <Pressable accessibilityLabel={`Previous ${view}`} hitSlop={8} onPress={() => navigatePeriod(-1)} style={styles.smallButton}><Ionicons name="chevron-back" size={18} color={styles.iconColor.color} /></Pressable>
       <View style={styles.flex}><Text style={styles.calendarPeriod}>{period}</Text><Pressable onPress={() => setSelected(startOfDay(new Date()))}><Text style={styles.calendarTodayLink}>TODAY</Text></Pressable></View>
@@ -2992,7 +3029,7 @@ function CalendarScreen({ theme, styles, botEvents, profiles, focusDate, onOpenE
       {people.map((person) => {
         const active = personFilter?.toLowerCase() === person.name.toLowerCase();
         return <Pressable key={person.name} onPress={() => setPersonFilter(active ? null : person.name)} style={[styles.calendarPersonFilter, active && { backgroundColor: person.color, borderColor: person.color }]}>
-          <View style={[styles.calendarPersonDot, { backgroundColor: active ? '#fff' : person.color }]} /><Text style={[styles.calendarPersonFilterText, active && styles.calendarPersonFilterTextActive]}>{person.name}</Text>
+          {person.avatarUri ? <Image source={{ uri: person.avatarUri }} style={styles.calendarPersonImage} /> : <View style={[styles.calendarPersonDot, { backgroundColor: active ? '#fff' : person.color }]} />}<Text style={[styles.calendarPersonFilterText, active && styles.calendarPersonFilterTextActive]}>{person.name}</Text>
         </Pressable>;
       })}
     </ScrollView>
@@ -3027,24 +3064,37 @@ function CalendarScreen({ theme, styles, botEvents, profiles, focusDate, onOpenE
         })}</View>
       </View>
       <View style={styles.sectionHead}><View><Text style={styles.sectionTitle}>{selected.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' })}</Text><Text style={styles.muted}>{selectedEvents.length ? `${selectedEvents.length} family event${selectedEvents.length === 1 ? '' : 's'}` : 'No plans yet'}</Text></View></View>
-      {selectedEvents.length ? selectedEvents.map((event) => renderEvent(event)) : <View style={styles.calendarEmptyCard}><Ionicons name="calendar-clear-outline" size={25} color="#2257F4" /><View style={styles.flex}><Text style={styles.settingTitle}>This day is open</Text><Text style={styles.muted}>Add a plan or ask Coh to schedule it.</Text></View></View>}
+      {selectedEvents.length ? selectedEvents.map((event) => renderEvent(event)) : <View style={styles.calendarEmptyCard}><Ionicons name="calendar-clear-outline" size={25} color="#2257F4" /><View style={styles.flex}><Text style={styles.settingTitle}>This day is open</Text><Text style={styles.muted}>Add a plan or ask Ace to schedule it.</Text></View></View>}
     </>}
+
+    {view === 'day' && <View style={styles.calendarSections}>{renderDaySection(selected, true)}</View>}
+
+    {view === 'range' && <View style={styles.calendarSections}>{rangeDays.map((day) => renderDaySection(day, true))}</View>}
 
     {view === 'week' && <View style={styles.calendarSections}>{weekDays.map((day) => renderDaySection(day, true))}</View>}
 
-    {view === 'agenda' && <View style={styles.calendarSections}>
-      {agendaKeys.length ? agendaKeys.map((key) => renderDaySection(new Date(`${key}T12:00:00`))) : <View style={styles.calendarEmptyCard}><Ionicons name="list-outline" size={25} color="#2257F4" /><View style={styles.flex}><Text style={styles.settingTitle}>No plans in the next 30 days</Text><Text style={styles.muted}>Connect calendars or ask Coh to add the first one.</Text></View></View>}
-      {unscheduledEvents.length > 0 && <View style={styles.calendarDaySection}><View style={styles.calendarDayHeading}><View style={styles.calendarAgendaDate}><Ionicons name="help" size={17} color="#D7550D" /></View><View style={styles.flex}><Text style={styles.calendarDayTitle}>Needs a date</Text><Text style={styles.muted}>{unscheduledEvents.length} imported or incomplete item{unscheduledEvents.length === 1 ? '' : 's'}</Text></View></View>{unscheduledEvents.map((event) => renderEvent(event, true))}</View>}
-    </View>}
+    {view === 'year' && <View style={styles.calendarYearGrid}>{yearMonths.map((month) => {
+      const monthEvents = datedEvents.filter((event) => event.dateISO?.startsWith(`${month.getFullYear()}-${String(month.getMonth() + 1).padStart(2, '0')}`));
+      const busyDays = new Set(monthEvents.map((event) => event.dateISO)).size;
+      return <Pressable key={month.getMonth()} onPress={() => { setSelected(month); setView('month'); }} style={styles.calendarYearCard}>
+        <Text style={styles.calendarYearMonth}>{month.toLocaleDateString(undefined, { month: 'long' })}</Text>
+        <Text style={styles.calendarYearCount}>{monthEvents.length}</Text>
+        <Text style={styles.muted}>{monthEvents.length === 1 ? 'event' : 'events'} · {busyDays} day{busyDays === 1 ? '' : 's'}</Text>
+        <View style={styles.calendarYearPreview}>{monthEvents.slice(0, 6).map((event) => <View key={event.id} style={[styles.calendarYearDot, { backgroundColor: personMeta(event.person, event.personId).color }]} />)}</View>
+      </Pressable>;
+    })}</View>}
+
+    {view !== 'month' && unscheduledEvents.length > 0 && <View style={styles.calendarDaySection}><View style={styles.calendarDayHeading}><View style={styles.calendarAgendaDate}><Ionicons name="help" size={17} color="#D7550D" /></View><View style={styles.flex}><Text style={styles.calendarDayTitle}>Needs a date</Text><Text style={styles.muted}>{unscheduledEvents.length} imported or incomplete item{unscheduledEvents.length === 1 ? '' : 's'}</Text></View></View>{unscheduledEvents.map((event) => renderEvent(event, true))}</View>}
 
     <View style={styles.calendarBottomActions}>
-      <Pressable onPress={onAdd} style={styles.calendarAddAction}><Ionicons name="add-circle" size={21} color="#fff" /><View style={styles.flex}><Text style={styles.calendarAddActionTitle}>Add to your family calendar</Text><Text style={styles.calendarAddActionDetail}>Manual · Coh · email suggestion · calendar import</Text></View><Ionicons name="chevron-forward" size={18} color="#fff" /></Pressable>
+      <Pressable onPress={onAdd} style={styles.calendarAddAction}><Ionicons name="add-circle" size={21} color="#fff" /><View style={styles.flex}><Text style={styles.calendarAddActionTitle}>Add to your family calendar</Text><Text style={styles.calendarAddActionDetail}>Manual · Ace · email suggestion · calendar import</Text></View><Ionicons name="chevron-forward" size={18} color="#fff" /></Pressable>
       <Pressable onPress={onManage} style={styles.syncCard}><Ionicons name="sync" size={18} color="#2257F4" /><View style={styles.flex}><Text style={styles.syncTitle}>Calendar connections</Text><Text style={styles.muted}>Apple, Google, Outlook, and other sources</Text></View><Text style={styles.link}>Manage</Text></Pressable>
     </View>
   </ScrollView>;
 }
 
-function ChoresScreen({ styles, chores, memberNames, onToggle, onConfigure, rewardMember, setRewardMember, selectedRewards, onSelectReward, onAdd }: any) {
+function ChoresScreen({ styles, chores, profiles, onToggle, onConfigure, rewardMember, setRewardMember, selectedRewards, onSelectReward, onAdd }: any) {
+  const memberNames = (profiles as FamilyProfile[]).map((profile) => profile.name);
   const weekStart = startOfWeek(new Date());
   const weekEnd = addDays(weekStart, 7);
   const visibleChores = chores.filter((item: Chore) => {
@@ -3068,7 +3118,7 @@ function ChoresScreen({ styles, chores, memberNames, onToggle, onConfigure, rewa
       <View style={styles.rewardHero}><View style={[styles.rewardIcon, { backgroundColor: `${selected.color}20` }]}><Ionicons name={selected.icon as any} size={25} color={selected.color} /></View><View style={styles.flex}><Text style={styles.progressLabel}>{rewardMember.toUpperCase()} IS EARNING TOWARD</Text><Text style={styles.rewardHeroTitle}>{selected.title} · {selected.detail}</Text><View style={styles.rewardProgressTrack}><View style={[styles.rewardProgressFill, { width: `${progress}%`, backgroundColor: selected.color }]} /></View><Text style={styles.rewardProgressText}>{balance} of {selected.cost} points · {Math.max(0, selected.cost - balance)} to go</Text></View></View>
       <Text style={styles.rewardPrompt}>What does {rewardMember} want to earn?</Text><ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.rewardChoices}>{rewardGoals.map((reward) => { const active = selected.id === reward.id; return <Pressable key={reward.id} onPress={() => onSelectReward(rewardMember, reward.id)} style={[styles.rewardChoice, active && { borderColor: reward.color, backgroundColor: `${reward.color}12` }]}><Ionicons name={reward.icon as any} size={21} color={reward.color} /><Text style={styles.rewardChoiceTitle}>{reward.title}</Text><Text style={styles.muted}>{reward.detail}</Text><Text style={[styles.rewardCost, { color: reward.color }]}>{reward.cost} points</Text>{active && <Ionicons name="checkmark-circle" size={18} color={reward.color} style={styles.rewardSelected} />}</Pressable>; })}</ScrollView>
     </>}
-    <Text style={styles.sectionTitle}>This week</Text>{visibleChores.length === 0 && <View style={styles.emptyChat}><Ionicons name="checkbox-outline" size={28} color="#19A47B" /><Text style={styles.settingTitle}>No chores due this week</Text><Text style={styles.muted}>Add one, assign it, schedule it, and choose exactly what completing it earns.</Text></View>}{visibleChores.map((chore: Chore) => { const reward = choreRewardMeta(chore.rewardId); return <Pressable key={chore.id} onPress={() => onConfigure(chore)} style={styles.choreRow}><Pressable accessibilityLabel={chore.done ? `Mark ${chore.title} incomplete` : `Complete ${chore.title}`} onPress={() => onToggle(chore.id)} style={[styles.checkCircle, chore.done && { backgroundColor: '#19A47B', borderColor: '#19A47B' }]}>{chore.done && <Ionicons name="checkmark" size={17} color="#fff" />}</Pressable><View style={styles.flex}><Text style={[styles.choreTitle, chore.done && styles.struck]}>{chore.title}</Text><Text style={styles.muted}>{chore.owner} · {chore.due}</Text><Text style={styles.choreScheduleText}>{recurrenceLabel(chore.recurrence)}{chore.reminderMinutes != null ? ` · Remind ${chore.reminderMinutes === 0 ? 'at due time' : `${chore.reminderMinutes} min before`}` : ''}</Text><Text style={[styles.choreRewardText, { color: reward.color }]}>{formatChoreReward(chore)}</Text></View><View style={[styles.pointPill, { backgroundColor: `${reward.color}14` }]}><Ionicons name={reward.icon as any} size={12} color={reward.color} /><Text style={[styles.pointPillText, { color: reward.color }]}>Edit</Text></View><View style={[styles.ownerDot, { backgroundColor: chore.color }]} /></Pressable>; })}<Pressable onPress={onAdd} style={styles.outlineAction}><Ionicons name="add" size={19} color="#2257F4" /><Text style={styles.outlineActionText}>Add a chore</Text></Pressable>
+    <Text style={styles.sectionTitle}>This week</Text>{visibleChores.length === 0 && <View style={styles.emptyChat}><Ionicons name="checkbox-outline" size={28} color="#19A47B" /><Text style={styles.settingTitle}>No chores due this week</Text><Text style={styles.muted}>Add one, assign it, schedule it, and choose exactly what completing it earns.</Text></View>}{visibleChores.map((chore: Chore) => { const reward = choreRewardMeta(chore.rewardId); const ownerProfile = (profiles as FamilyProfile[]).find((profile) => profile.id === chore.assignedPersonId || profile.name === chore.owner); return <Pressable key={chore.id} onPress={() => onConfigure(chore)} style={styles.choreRow}><Pressable accessibilityLabel={chore.done ? `Mark ${chore.title} incomplete` : `Complete ${chore.title}`} onPress={() => onToggle(chore.id)} style={[styles.checkCircle, chore.done && { backgroundColor: '#19A47B', borderColor: '#19A47B' }]}>{chore.done && <Ionicons name="checkmark" size={17} color="#fff" />}</Pressable>{ownerProfile && <ProfileAvatar profile={ownerProfile} styles={styles} />}<View style={styles.flex}><Text style={[styles.choreTitle, chore.done && styles.struck]}>{chore.title}</Text><Text style={styles.muted}>{chore.owner} · {chore.due}</Text><Text style={styles.choreScheduleText}>{recurrenceLabel(chore.recurrence)}{chore.reminderMinutes != null ? ` · Remind ${chore.reminderMinutes === 0 ? 'at due time' : `${chore.reminderMinutes} min before`}` : ''}</Text><Text style={[styles.choreRewardText, { color: reward.color }]}>{formatChoreReward(chore)}</Text></View><View style={[styles.pointPill, { backgroundColor: `${reward.color}14` }]}><Ionicons name={reward.icon as any} size={12} color={reward.color} /><Text style={[styles.pointPillText, { color: reward.color }]}>Edit</Text></View>{!ownerProfile && <View style={[styles.ownerDot, { backgroundColor: chore.color }]} />}</Pressable>; })}<Pressable onPress={onAdd} style={styles.outlineAction}><Ionicons name="add" size={19} color="#2257F4" /><Text style={styles.outlineActionText}>Add a chore</Text></Pressable>
   </ScrollView>;
 }
 
@@ -3114,7 +3164,7 @@ function ChatScreen({
       </Pressable>
       <Pressable onPress={() => setMode('coh')} style={[styles.chatModeTab, mode === 'coh' && styles.chatModeCohActive]}>
         <Ionicons name="sparkles" size={16} color={mode === 'coh' ? '#fff' : '#7047EE'} />
-        <Text style={[styles.chatModeText, mode === 'coh' && styles.chatModeTextActive]}>Ask Coh</Text>
+        <Text style={[styles.chatModeText, mode === 'coh' && styles.chatModeTextActive]}>Ask Ace</Text>
       </Pressable>
     </View>
     <FlatList
@@ -3157,16 +3207,16 @@ function ChatScreen({
         </View>
       </View>}
       ListHeaderComponent={cohActive
-        ? <View style={styles.botHint}><Ionicons name="sparkles" size={15} color="#7047EE" /><Text style={styles.botHintText}>Private Coh workspace · type, speak, or share screenshots and PDFs into Coho.</Text></View>
-        : <View style={styles.chatHeader}><View style={styles.homeThreadIcon}><Ionicons name="home" size={20} color="#F5A623" /></View><View><Text style={styles.chatTitle}>Everyone</Text><Text style={styles.muted}>Family messages only</Text></View></View>}
-      ListEmptyComponent={<View style={styles.emptyChat}><Ionicons name={cohActive ? 'sparkles-outline' : 'chatbubbles-outline'} size={28} color={cohActive ? '#7047EE' : styles.iconColor.color} /><Text style={styles.settingTitle}>{cohActive ? 'Ask Coh to organize something' : 'Start the family conversation'}</Text></View>}
+        ? <View style={styles.botHint}><Ionicons name="sparkles" size={15} color="#7047EE" /><Text style={styles.botHintText}>Private Ace workspace · type, speak, or share screenshots and PDFs into OutrSPACE.</Text></View>
+        : <View style={styles.chatHeader}><View style={styles.homeThreadIcon}><Ionicons name="notifications" size={20} color="#F5A623" /></View><View style={styles.flex}><Text style={styles.chatTitle}>Everyone</Text><Text style={styles.muted}>Family messages notify household members and open this conversation.</Text></View></View>}
+      ListEmptyComponent={<View style={styles.emptyChat}><Ionicons name={cohActive ? 'sparkles-outline' : 'chatbubbles-outline'} size={28} color={cohActive ? '#7047EE' : styles.iconColor.color} /><Text style={styles.settingTitle}>{cohActive ? 'Ask Ace to organize something' : 'Start the family conversation'}</Text></View>}
       ListFooterComponent={cohActive && (assistantBusy || voiceRecording || voiceSending)
-        ? <View style={styles.cohThinking}><Ionicons name={voiceRecording ? 'mic' : 'sparkles'} size={15} color={voiceRecording ? '#E94F64' : '#7047EE'} /><Text style={styles.botAuthor}>{voiceRecording ? 'Listening… tap the red microphone to send' : voiceSending ? 'Coh is transcribing…' : 'Coh is thinking…'}</Text></View>
+        ? <View style={styles.cohThinking}><Ionicons name={voiceRecording ? 'mic' : 'sparkles'} size={15} color={voiceRecording ? '#E94F64' : '#7047EE'} /><Text style={styles.botAuthor}>{voiceRecording ? 'Listening… tap the red microphone to send' : voiceSending ? 'Ace is transcribing…' : 'Ace is thinking…'}</Text></View>
         : null}
     />
     <View style={[styles.composeRow, cohActive && styles.composeRowCoh]}>
       <Pressable
-        accessibilityLabel={cohActive ? (voiceRecording ? 'Stop and send voice request' : 'Speak to Coh') : 'Add'}
+        accessibilityLabel={cohActive ? (voiceRecording ? 'Stop and send voice request' : 'Speak to Ace') : 'Add'}
         disabled={cohActive && assistantBusy && !voiceRecording}
         onPress={cohActive ? onVoice : onAdd}
         style={[
@@ -3181,7 +3231,7 @@ function ChatScreen({
       <TextInput
         value={draft}
         onChangeText={setDraft}
-        placeholder={cohActive && voiceRecording ? 'Listening…' : assistantBusy ? 'Coh is thinking…' : cohActive ? 'Ask Coh anything about home…' : 'Message your family…'}
+        placeholder={cohActive && voiceRecording ? 'Listening…' : assistantBusy ? 'Ace is thinking…' : cohActive ? 'Ask Ace anything about home…' : 'Message your family…'}
         placeholderTextColor="#8B93A5"
         editable={!composerBusy}
         style={[styles.composeInput, cohActive && styles.composeInputCoh]}
@@ -3246,14 +3296,14 @@ function CohActionCard({
       <View style={styles.flex}>
         <Text style={styles.cohActionEyebrow}>
           {created
-            ? 'CREATED BY COH'
+            ? 'CREATED BY ACE'
             : canceled
               ? 'PROPOSAL CANCELED'
               : superseded
                 ? 'UPDATED IN A LATER MESSAGE'
                 : ready
                   ? 'READY FOR YOUR APPROVAL'
-                  : 'COH IS BUILDING THIS'}
+                  : 'ACE IS BUILDING THIS'}
         </Text>
         <Text style={styles.cohActionTitle}>{title}</Text>
       </View>
@@ -3450,7 +3500,7 @@ function calendarSourceLabel(provider?: string) {
   if (provider === 'outlook') return 'Outlook';
   if (provider === 'apple') return 'Apple';
   if (provider === 'device-calendar') return 'iPhone calendar';
-  return 'Coho';
+  return 'OutrSPACE';
 }
 
 function calendarSourceColor(provider?: string) {
@@ -3779,8 +3829,52 @@ function nextFollowUpDate() {
 function startOfWeek(date: Date) { const next = startOfDay(date); next.setDate(next.getDate() - next.getDay()); return next; }
 function sameDay(a: Date, b: Date) { return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate(); }
 function localDateKey(date: Date) { return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`; }
+
+function SearchScreen({
+  styles,
+  events,
+  chores,
+  messages,
+  profiles,
+  onOpenEvent,
+  onOpenChore,
+  onOpenMessage,
+  onOpenProfile,
+}: {
+  styles: any;
+  events: BotEvent[];
+  chores: Chore[];
+  messages: ChatMessage[];
+  profiles: FamilyProfile[];
+  onOpenEvent: (event: BotEvent) => void;
+  onOpenChore: (chore: Chore) => void;
+  onOpenMessage: (channel: ChatChannel) => void;
+  onOpenProfile: (profile: FamilyProfile) => void;
+}) {
+  const [query, setQuery] = useState('');
+  const normalized = query.trim().toLowerCase();
+  const matches = normalized.length < 2 ? [] : [
+    ...profiles.filter((profile) => `${profile.name} ${profile.role} ${profile.bio}`.toLowerCase().includes(normalized)).map((profile) => ({ key: `profile-${profile.id}`, icon: 'person-outline', color: profile.ink, title: profile.name, detail: `${profile.role}${profile.bio ? ` · ${profile.bio}` : ''}`, action: () => onOpenProfile(profile) })),
+    ...events.filter((event) => `${event.title} ${event.person} ${event.place ?? ''} ${event.day} ${event.time}`.toLowerCase().includes(normalized)).map((event) => ({ key: `event-${event.id}`, icon: 'calendar-outline', color: '#2257F4', title: event.title, detail: `${event.day} · ${event.time} · ${event.person}`, action: () => onOpenEvent(event) })),
+    ...chores.filter((chore) => `${chore.title} ${chore.details} ${chore.owner} ${chore.due}`.toLowerCase().includes(normalized)).map((chore) => ({ key: `chore-${chore.id}`, icon: 'checkbox-outline', color: '#19A47B', title: chore.title, detail: `${chore.owner} · ${chore.due}${chore.done ? ' · Completed' : ''}`, action: () => onOpenChore(chore) })),
+    ...messages.filter((message) => `${message.author} ${message.text}`.toLowerCase().includes(normalized)).slice(-20).reverse().map((message) => ({ key: `message-${message.id}`, icon: messageChannel(message) === 'coh' ? 'sparkles-outline' : 'chatbubble-outline', color: messageChannel(message) === 'coh' ? '#7047EE' : '#0F8FA8', title: message.author, detail: message.text, action: () => onOpenMessage(messageChannel(message)) })),
+  ].slice(0, 40);
+
+  return <ScrollView contentContainerStyle={styles.scrollContent} keyboardShouldPersistTaps="handled">
+    <View style={styles.searchHero}>
+      <Ionicons name="search" size={24} color="#0F8FA8" />
+      <View style={styles.flex}><Text style={styles.integrationCategoryPageTitle}>Search your household</Text><Text style={styles.muted}>People, calendar events, assignments, and family conversations.</Text></View>
+    </View>
+    <View style={styles.globalSearchBox}><Ionicons name="search-outline" size={19} color={styles.iconColor.color} /><TextInput autoFocus value={query} onChangeText={setQuery} placeholder="Try a name, school, appointment, or chore" placeholderTextColor="#8B93A5" returnKeyType="search" style={styles.globalSearchInput} />{!!query && <Pressable onPress={() => setQuery('')}><Ionicons name="close-circle" size={19} color={styles.iconColor.color} /></Pressable>}</View>
+    {normalized.length < 2 ? <View style={styles.emptyChat}><Ionicons name="search-outline" size={28} color="#0F8FA8" /><Text style={styles.settingTitle}>Type at least two characters</Text><Text style={styles.muted}>Search uses the live household data already available to OutrSPACE.</Text></View> : matches.length === 0 ? <View style={styles.emptyChat}><Ionicons name="file-tray-outline" size={28} color="#0F8FA8" /><Text style={styles.settingTitle}>No matches</Text><Text style={styles.muted}>Try a person’s name or a shorter phrase.</Text></View> : <>
+      <Text style={styles.sectionTitle}>{matches.length} result{matches.length === 1 ? '' : 's'}</Text>
+      {matches.map((match) => <Pressable key={match.key} onPress={match.action} style={styles.searchResultRow}><View style={[styles.integrationIcon, { backgroundColor: `${match.color}18` }]}><Ionicons name={match.icon as any} size={21} color={match.color} /></View><View style={styles.flex}><Text style={styles.settingTitle}>{match.title}</Text><Text numberOfLines={2} style={styles.muted}>{match.detail}</Text></View><Ionicons name="chevron-forward" size={17} color={match.color} /></Pressable>)}
+    </>}
+  </ScrollView>;
+}
+
 function FamilyProfilesScreen({ styles, profiles, onEdit, onAdd, onInvite }: { styles: any; profiles: FamilyProfile[]; onEdit: (profile: FamilyProfile) => void; onAdd: () => void; onInvite: () => void }) {
-  return <ScrollView contentContainerStyle={styles.scrollContent}><View style={styles.familyHero}><View style={styles.flex}><Text style={styles.progressLabel}>YOUR HOUSEHOLD</Text><Text style={styles.familyHeroTitle}>{profiles.length} family members</Text><Text style={styles.muted}>Profiles help Coh personalize schedules, rewards, reminders, and recaps.</Text></View><Pressable onPress={onAdd} style={styles.addProfileButton}><Ionicons name="person-add" size={20} color="#fff" /></Pressable></View><Pressable onPress={onInvite} style={styles.inviteFamilyCard}><View style={styles.inviteFamilyIcon}><Ionicons name="mail-unread" size={21} color="#fff" /></View><View style={styles.flex}><Text style={styles.settingTitle}>Invite another family member</Text><Text style={styles.muted}>Create a secure household invitation and share it from your iPhone.</Text></View><Ionicons name="chevron-forward" size={19} color={styles.iconColor.color} /></Pressable><Text style={styles.sectionTitle}>People</Text>{profiles.map((profile) => <Pressable key={profile.id} onPress={() => onEdit(profile)} style={styles.profileRow}><ProfileAvatar profile={profile} styles={styles} size="large" /><View style={styles.flex}><Text style={styles.profileName}>{profile.name || 'New family member'}</Text><Text style={styles.muted}>{profile.membershipRole === 'owner' ? 'Household owner' : profile.role}{profile.dob ? ` · Born ${profile.dob}` : ''}</Text><Text numberOfLines={1} style={styles.profileBio}>{profile.bio || 'Add a bio, interests, allergies, school, or anything Coh should know.'}</Text></View><Ionicons name="create-outline" size={20} color={styles.iconColor.color} /></Pressable>)}<Pressable onPress={onAdd} style={styles.outlineAction}><Ionicons name="person-add-outline" size={19} color="#2257F4" /><Text style={styles.outlineActionText}>Add family profile</Text></Pressable></ScrollView>;
+  return <ScrollView contentContainerStyle={styles.scrollContent}><View style={styles.familyHero}><View style={styles.flex}><Text style={styles.progressLabel}>YOUR HOUSEHOLD</Text><Text style={styles.familyHeroTitle}>{profiles.length} family members</Text><Text style={styles.muted}>Profiles help Ace personalize schedules, rewards, reminders, and recaps.</Text></View><Pressable onPress={onAdd} style={styles.addProfileButton}><Ionicons name="person-add" size={20} color="#fff" /></Pressable></View><Pressable onPress={onInvite} style={styles.inviteFamilyCard}><View style={styles.inviteFamilyIcon}><Ionicons name="mail-unread" size={21} color="#fff" /></View><View style={styles.flex}><Text style={styles.settingTitle}>Invite another family member</Text><Text style={styles.muted}>Create a secure household invitation and share it from your iPhone.</Text></View><Ionicons name="chevron-forward" size={19} color={styles.iconColor.color} /></Pressable><Text style={styles.sectionTitle}>People</Text>{profiles.map((profile) => <Pressable key={profile.id} onPress={() => onEdit(profile)} style={styles.profileRow}><ProfileAvatar profile={profile} styles={styles} size="large" /><View style={styles.flex}><Text style={styles.profileName}>{profile.name || 'New family member'}</Text><Text style={styles.muted}>{profile.membershipRole === 'owner' ? 'Household owner' : profile.role}{profile.dob ? ` · Born ${profile.dob}` : ''}</Text><Text numberOfLines={1} style={styles.profileBio}>{profile.bio || 'Add a bio, interests, allergies, school, or anything Ace should know.'}</Text></View><Ionicons name="create-outline" size={20} color={styles.iconColor.color} /></Pressable>)}<Pressable onPress={onAdd} style={styles.outlineAction}><Ionicons name="person-add-outline" size={19} color="#2257F4" /><Text style={styles.outlineActionText}>Add family profile</Text></Pressable></ScrollView>;
 }
 
 function ProfileAvatar({ profile, styles, size }: { profile: FamilyProfile; styles: any; size?: string }) {
@@ -3807,7 +3901,7 @@ function ProfileEditorModal({ visible, profile, styles, dark, onClose, onSave, o
     }
   }
   const update = (patch: Partial<FamilyProfile>) => setDraft((current) => current ? { ...current, ...patch } : current);
-  return <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}><KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.modalBackdrop}><Pressable style={styles.modalDismiss} onPress={onClose} /><ScrollView style={styles.profileSheet} contentContainerStyle={styles.profileSheetContent} keyboardShouldPersistTaps="handled"><View style={styles.modalHandle} /><View style={styles.modalHead}><View><Text style={styles.eyebrow}>FAMILY PROFILE</Text><Text style={styles.modalTitle}>{draft.name ? `Edit ${draft.name}` : 'Add someone'}</Text></View><Pressable onPress={onClose} style={styles.iconButton}><Ionicons name="close" size={21} color={styles.iconColor.color} /></Pressable></View><Pressable onPress={choosePhoto} style={styles.photoEditor}><ProfileAvatar profile={draft} styles={styles} size="large" /><View><Text style={styles.settingTitle}>Profile picture</Text><Text style={styles.link}>Choose from Photos</Text></View></Pressable><Text style={styles.fieldLabel}>NAME</Text><TextInput value={draft.name} onChangeText={(name) => update({ name })} placeholder="Full name" placeholderTextColor="#8B93A5" style={styles.modalInput} /><Text style={styles.fieldLabel}>DATE OF BIRTH</Text><TextInput value={draft.dob} onChangeText={(dob) => update({ dob })} placeholder="YYYY-MM-DD" placeholderTextColor="#8B93A5" keyboardType="numbers-and-punctuation" style={styles.modalInput} /><Text style={styles.fieldLabel}>ROLE</Text><View style={styles.chipRow}>{(['Adult admin', 'Family member', 'Child'] as FamilyProfile['role'][]).map((role) => <Pressable key={role} onPress={() => update({ role })} style={[styles.choiceChip, draft.role === role && styles.choiceChipActive]}><Text style={[styles.choiceChipText, draft.role === role && styles.choiceChipTextActive]}>{role}</Text></Pressable>)}</View><Text style={styles.fieldLabel}>ABOUT</Text><TextInput value={draft.bio} onChangeText={(bio) => update({ bio })} multiline placeholder="Interests, allergies, school, preferences, or anything useful for the family" placeholderTextColor="#8B93A5" style={[styles.modalInput, styles.modalTextArea]} /><Text style={styles.profilePrivacy}>This information stays inside your Coho household and is used to personalize family assistance.</Text><Pressable disabled={!draft.name.trim()} onPress={() => onSave(draft)} style={[styles.saveButton, !draft.name.trim() && { opacity: .45 }]}><Text style={styles.saveButtonText}>Save profile</Text></Pressable>{canDelete && <Pressable onPress={() => onDelete(draft)} style={styles.deleteProfileButton}><Ionicons name="trash-outline" size={18} color="#D64545" /><Text style={styles.deleteProfileText}>{draft.linkedUserId ? 'Remove from household' : 'Delete family profile'}</Text></Pressable>}</ScrollView><StatusBar style={dark ? 'light' : 'dark'} /></KeyboardAvoidingView></Modal>;
+  return <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}><KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.modalBackdrop}><Pressable style={styles.modalDismiss} onPress={onClose} /><ScrollView style={styles.profileSheet} contentContainerStyle={styles.profileSheetContent} keyboardShouldPersistTaps="handled"><View style={styles.modalHandle} /><View style={styles.modalHead}><View><Text style={styles.eyebrow}>FAMILY PROFILE</Text><Text style={styles.modalTitle}>{draft.name ? `Edit ${draft.name}` : 'Add someone'}</Text></View><Pressable onPress={onClose} style={styles.iconButton}><Ionicons name="close" size={21} color={styles.iconColor.color} /></Pressable></View><Pressable onPress={choosePhoto} style={styles.photoEditor}><ProfileAvatar profile={draft} styles={styles} size="large" /><View><Text style={styles.settingTitle}>Profile picture</Text><Text style={styles.link}>Choose from Photos</Text></View></Pressable><Text style={styles.fieldLabel}>NAME</Text><TextInput value={draft.name} onChangeText={(name) => update({ name })} placeholder="Full name" placeholderTextColor="#8B93A5" style={styles.modalInput} /><Text style={styles.fieldLabel}>DATE OF BIRTH</Text><TextInput value={draft.dob} onChangeText={(dob) => update({ dob })} placeholder="YYYY-MM-DD" placeholderTextColor="#8B93A5" keyboardType="numbers-and-punctuation" style={styles.modalInput} /><Text style={styles.fieldLabel}>ROLE</Text><View style={styles.chipRow}>{(['Adult admin', 'Family member', 'Child'] as FamilyProfile['role'][]).map((role) => <Pressable key={role} onPress={() => update({ role })} style={[styles.choiceChip, draft.role === role && styles.choiceChipActive]}><Text style={[styles.choiceChipText, draft.role === role && styles.choiceChipTextActive]}>{role}</Text></Pressable>)}</View><Text style={styles.fieldLabel}>ABOUT</Text><TextInput value={draft.bio} onChangeText={(bio) => update({ bio })} multiline placeholder="Interests, allergies, school, preferences, or anything useful for the family" placeholderTextColor="#8B93A5" style={[styles.modalInput, styles.modalTextArea]} /><Text style={styles.profilePrivacy}>This information stays inside your OutrSPACE household and is used to personalize family assistance.</Text><Pressable disabled={!draft.name.trim()} onPress={() => onSave(draft)} style={[styles.saveButton, !draft.name.trim() && { opacity: .45 }]}><Text style={styles.saveButtonText}>Save profile</Text></Pressable>{canDelete && <Pressable onPress={() => onDelete(draft)} style={styles.deleteProfileButton}><Ionicons name="trash-outline" size={18} color="#D64545" /><Text style={styles.deleteProfileText}>{draft.linkedUserId ? 'Remove from household' : 'Delete family profile'}</Text></Pressable>}</ScrollView><StatusBar style={dark ? 'light' : 'dark'} /></KeyboardAvoidingView></Modal>;
 }
 
 function MoreMenu({ styles, setView, userId, onNotice }: { styles: any; setView: (view: MoreView) => void; userId: string | null; onNotice: (message: string) => void }) {
@@ -3879,6 +3973,7 @@ function MoreMenu({ styles, setView, userId, onNotice }: { styles: any; setView:
   const hiddenItems = orderedItems.filter((item) => preferences.hidden.includes(item.title));
 
   return <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
+    <Pressable accessibilityRole="search" onPress={() => setView('Search')} style={styles.globalSearchBox}><Ionicons name="search-outline" size={19} color={styles.iconColor.color} /><Text style={styles.moreSearchPlaceholder}>Search people, plans, assignments, and messages</Text><Ionicons name="chevron-forward" size={17} color={styles.iconColor.color} /></Pressable>
     <View style={styles.moreToolbar}>
       <Text style={styles.moreIntro}>Everything else your household needs, without cluttering the everyday view.</Text>
       <Pressable onPress={() => setEditing((current) => !current)} style={[styles.moreCustomizeButton, editing && styles.moreCustomizeButtonActive]}>
@@ -3918,12 +4013,12 @@ function ChiefOfHomeScreen({ styles, prefs, memberNames, setPrefs, onActivate }:
     { key: 'followUp', icon: 'refresh-outline', color: '#19A47B', title: 'Weekly follow-up', detail: `${prefs.followUpDay} at ${prefs.followUpTime}`, times: ['4:00 PM', '5:00 PM', '6:00 PM'] },
   ];
   return <ScrollView contentContainerStyle={styles.scrollContent}>
-    <LinearGradient colors={['#24116D', '#7047EE']} style={styles.chiefHero}><View style={styles.chiefBadge}><Ionicons name="home" size={22} color="#7047EE" /></View><Text style={styles.recapHeroLabel}>COHO</Text><Text style={styles.chiefHeroTitle}>Your Chief of Home</Text><Text style={styles.recapHeroText}>The right family information, resurfaced before anyone has to remember it.</Text></LinearGradient>
+    <LinearGradient colors={['#24116D', '#7047EE']} style={styles.chiefHero}><View style={styles.chiefBadge}><Ionicons name="home" size={22} color="#7047EE" /></View><Text style={styles.recapHeroLabel}>OUTRSPACE</Text><Text style={styles.chiefHeroTitle}>Your Chief of Home</Text><Text style={styles.recapHeroText}>The right family information, resurfaced before anyone has to remember it.</Text></LinearGradient>
     <Text style={styles.sectionTitle}>Your briefings</Text>
     {briefingRows.map((row) => <View key={row.key} style={styles.chiefSettingCard}><View style={styles.settingRowTop}><View style={[styles.integrationIcon, { backgroundColor: `${row.color}18` }]}><Ionicons name={row.icon as any} size={22} color={row.color} /></View><View style={styles.flex}><Text style={styles.settingTitle}>{row.title}</Text><Text style={styles.muted}>{row.detail}</Text></View><Switch value={(prefs as any)[row.key]} onValueChange={(value) => update({ [row.key]: value })} trackColor={{ true: '#6687FF' }} /></View><View style={styles.chipRow}>{row.times.map((time) => { const field = row.key === 'daily' ? 'dailyTime' : row.key === 'weekAhead' ? 'weekAheadTime' : 'followUpTime'; return <Pressable key={time} onPress={() => update({ [field]: time })} style={[styles.choiceChip, (prefs as any)[field] === time && styles.choiceChipActive]}><Text style={[styles.choiceChipText, (prefs as any)[field] === time && styles.choiceChipTextActive]}>{time}</Text></Pressable>; })}</View></View>)}
     <Text style={styles.sectionTitle}>Include</Text><View style={styles.preferenceGrid}>{([['events', 'Appointments & events'], ['chores', 'Chores'], ['followUps', 'Follow-ups'], ['messages', 'Important messages']] as const).map(([key, label]) => <Pressable key={key} onPress={() => update({ [key]: !prefs[key] })} style={[styles.preferenceTile, prefs[key] && styles.preferenceTileActive]}><Ionicons name={prefs[key] ? 'checkmark-circle' : 'ellipse-outline'} size={19} color={prefs[key] ? '#19A47B' : styles.iconColor.color} /><Text style={styles.preferenceText}>{label}</Text></Pressable>)}</View>
     <Text style={styles.sectionTitle}>Family members</Text><View style={styles.chipRow}>{memberNames.map((name) => <Pressable key={name} onPress={() => toggleMember(name)} style={[styles.memberChip, prefs.members.includes(name) && styles.memberChipActive]}><Text style={[styles.choiceChipText, prefs.members.includes(name) && styles.choiceChipTextActive]}>{name}</Text></Pressable>)}</View>
-    <Text style={styles.sectionTitle}>Delivery</Text><View style={styles.settingRow}><Ionicons name="notifications-outline" size={21} color="#7047EE" /><View style={styles.flex}><Text style={styles.settingTitle}>Push notifications</Text><Text style={styles.muted}>Delivered to this iPhone</Text></View><Switch value={prefs.push} onValueChange={(push) => update({ push })} trackColor={{ true: '#6687FF' }} /></View><View style={styles.settingRow}><Ionicons name="mail-outline" size={21} color="#2257F4" /><View style={styles.flex}><Text style={styles.settingTitle}>Email copy</Text><Text style={styles.muted}>Delivered to your verified Coho sign-in email</Text></View><Switch value={prefs.email} onValueChange={(email) => update({ email })} trackColor={{ true: '#6687FF' }} /></View><View style={styles.settingRow}><Ionicons name="moon-outline" size={21} color="#7C4DFF" /><View style={styles.flex}><Text style={styles.settingTitle}>Quiet hours</Text><Text style={styles.muted}>9:00 PM–7:00 AM · urgent alerts only</Text></View><Switch value={prefs.quietHours} onValueChange={(quietHours) => update({ quietHours })} trackColor={{ true: '#6687FF' }} /></View>
+    <Text style={styles.sectionTitle}>Delivery</Text><View style={styles.settingRow}><Ionicons name="notifications-outline" size={21} color="#7047EE" /><View style={styles.flex}><Text style={styles.settingTitle}>Push notifications</Text><Text style={styles.muted}>Delivered to this iPhone</Text></View><Switch value={prefs.push} onValueChange={(push) => update({ push })} trackColor={{ true: '#6687FF' }} /></View><View style={styles.settingRow}><Ionicons name="mail-outline" size={21} color="#2257F4" /><View style={styles.flex}><Text style={styles.settingTitle}>Email copy</Text><Text style={styles.muted}>Delivered to your verified OutrSPACE sign-in email</Text></View><Switch value={prefs.email} onValueChange={(email) => update({ email })} trackColor={{ true: '#6687FF' }} /></View><View style={styles.settingRow}><Ionicons name="moon-outline" size={21} color="#7C4DFF" /><View style={styles.flex}><Text style={styles.settingTitle}>Quiet hours</Text><Text style={styles.muted}>9:00 PM–7:00 AM · urgent alerts only</Text></View><Switch value={prefs.quietHours} onValueChange={(quietHours) => update({ quietHours })} trackColor={{ true: '#6687FF' }} /></View>
     <Pressable onPress={onActivate} style={styles.saveButton}><Text style={styles.saveButtonText}>Save and schedule my briefings</Text></Pressable>
   </ScrollView>;
 }
@@ -4033,7 +4128,7 @@ function RecapsScreen({ styles, onRefresh, onListen, onOpenEvent, onCompleteFoll
     </View>}
 
     <Text style={styles.sectionTitle}>Week ahead</Text>
-    {weekEvents.length === 0 ? <View style={styles.emptyChat}><Ionicons name="calendar-clear-outline" size={28} color="#2257F4" /><Text style={styles.settingTitle}>No upcoming events</Text><Text style={styles.muted}>When Coh or a family member adds one, it will appear here.</Text></View> : weekEvents.map((event: BotEvent) => <Pressable key={event.id} onPress={() => onOpenEvent(event)} style={styles.highlightRow}><Text style={styles.highlightTime}>{event.dateISO ? new Date(`${event.dateISO}T12:00:00`).toLocaleDateString(undefined, { weekday: 'short' }).toUpperCase() : 'NEXT'}</Text><View style={styles.flex}><Text style={styles.highlightText}>{event.title}</Text><Text style={styles.muted}>{event.time} · {event.person}{event.place ? ` · ${event.place}` : ''}</Text></View><Ionicons name="chevron-forward" size={17} color="#7047EE" /></Pressable>)}
+    {weekEvents.length === 0 ? <View style={styles.emptyChat}><Ionicons name="calendar-clear-outline" size={28} color="#2257F4" /><Text style={styles.settingTitle}>No upcoming events</Text><Text style={styles.muted}>When Ace or a family member adds one, it will appear here.</Text></View> : weekEvents.map((event: BotEvent) => <Pressable key={event.id} onPress={() => onOpenEvent(event)} style={styles.highlightRow}><Text style={styles.highlightTime}>{event.dateISO ? new Date(`${event.dateISO}T12:00:00`).toLocaleDateString(undefined, { weekday: 'short' }).toUpperCase() : 'NEXT'}</Text><View style={styles.flex}><Text style={styles.highlightText}>{event.title}</Text><Text style={styles.muted}>{event.time} · {event.person}{event.place ? ` · ${event.place}` : ''}</Text></View><Ionicons name="chevron-forward" size={17} color="#7047EE" /></Pressable>)}
 
     <Text style={styles.sectionTitle}>Needs follow-up</Text>
     {followUps.length === 0 ? <View style={styles.emptyChat}><Ionicons name="refresh-circle-outline" size={28} color="#19A47B" /><Text style={styles.settingTitle}>Nothing needs follow-up</Text><Text style={styles.muted}>Open a shared appointment and choose “Add to follow-up” when it needs another step.</Text></View> : followUps.map((item: SharedFollowUp) => {
@@ -4055,9 +4150,9 @@ function IntegrationsScreen({
   return <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
     <LinearGradient colors={['#24116D', '#6648EF']} style={styles.integrationHero}>
       <View style={styles.commandCenterMark}><Ionicons name="extension-puzzle" size={22} color="#7047EE" /></View>
-      <Text style={styles.recapHeroLabel}>COHO CONNECTIONS</Text>
+      <Text style={styles.recapHeroLabel}>OUTRSPACE CONNECTIONS</Text>
       <Text style={styles.integrationHeroTitle}>Everything connected, nothing cluttered.</Text>
-      <Text style={styles.recapHeroText}>Choose a category, then connect only the services your household trusts. Coh keeps the important output in one command center.</Text>
+      <Text style={styles.recapHeroText}>Choose a category, then connect only the services your household trusts. Ace keeps the important output in one command center.</Text>
     </LinearGradient>
     <View style={styles.integrationCategoryGrid}>{integrationCategories.map((category) => {
       const connectedCount = category.providers.filter((provider) => connected[provider.name]).length;
@@ -4132,7 +4227,7 @@ function NotificationCenterScreen({
   return <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
     <View style={[styles.notificationStatusCard, permissionEnabled && styles.notificationStatusReady]}>
       <View style={[styles.integrationIcon, { backgroundColor: permissionEnabled ? '#19A47B18' : '#FF7A2E18' }]}><Ionicons name={permissionEnabled ? 'checkmark-circle' : 'notifications-off-outline'} size={23} color={permissionEnabled ? '#19A47B' : '#FF7A2E'} /></View>
-      <View style={styles.flex}><Text style={styles.settingTitle}>{permissionEnabled ? 'This iPhone is registered' : 'iOS permission is required'}</Text><Text style={styles.muted}>{permissionEnabled ? 'Your settings below are saved to your Coho profile and follow you across sessions.' : 'Enable once in iOS, then personalize what Coho sends below.'}</Text></View>
+      <View style={styles.flex}><Text style={styles.settingTitle}>{permissionEnabled ? 'This iPhone is registered' : 'iOS permission is required'}</Text><Text style={styles.muted}>{permissionEnabled ? 'Your settings below are saved to your OutrSPACE profile and follow you across sessions.' : 'Enable once in iOS, then personalize what OutrSPACE sends below.'}</Text></View>
       {!permissionEnabled && <Pressable onPress={onEnable} style={styles.connectButton}><Text style={styles.connectText}>Enable</Text></Pressable>}
     </View>
 
@@ -4165,7 +4260,7 @@ function NotificationCenterScreen({
 }
 
 function SettingsScreen({ styles, dark, onTheme, onNotifications, onFamily, onPrivacy, profiles }: any) {
-  return <ScrollView contentContainerStyle={styles.scrollContent}><Text style={styles.sectionTitle}>Household</Text><Pressable onPress={onFamily} style={styles.settingRow}><Ionicons name="people-outline" size={21} color="#2257F4" /><View style={styles.flex}><Text style={styles.settingTitle}>Family profiles</Text><Text style={styles.muted}>{profiles.length} people · names, photos, DOB, roles, and bios</Text></View><Ionicons name="chevron-forward" size={18} color={styles.iconColor.color} /></Pressable><Text style={styles.sectionTitle}>Preferences</Text><View style={styles.settingRow}><Ionicons name="moon-outline" size={21} color="#7C4DFF" /><View style={styles.flex}><Text style={styles.settingTitle}>Dark mode</Text><Text style={styles.muted}>Use the darker Coho theme</Text></View><Switch value={dark} onValueChange={onTheme} trackColor={{ true: '#6687FF' }} /></View><Pressable onPress={onNotifications} style={styles.settingRow}><Ionicons name="notifications-outline" size={21} color="#FF7A2E" /><View style={styles.flex}><Text style={styles.settingTitle}>Smart notifications</Text><Text style={styles.muted}>Enable reminders and daily recaps</Text></View><Ionicons name="chevron-forward" size={18} color={styles.iconColor.color} /></Pressable><Pressable onPress={onPrivacy} style={styles.settingRow}><Ionicons name="shield-checkmark-outline" size={21} color="#19A47B" /><View style={styles.flex}><Text style={styles.settingTitle}>Privacy and family data</Text><Text style={styles.muted}>Secure exports and in-app account deletion</Text></View><Ionicons name="chevron-forward" size={18} color={styles.iconColor.color} /></Pressable></ScrollView>;
+  return <ScrollView contentContainerStyle={styles.scrollContent}><Text style={styles.sectionTitle}>Household</Text><Pressable onPress={onFamily} style={styles.settingRow}><Ionicons name="people-outline" size={21} color="#2257F4" /><View style={styles.flex}><Text style={styles.settingTitle}>Family profiles</Text><Text style={styles.muted}>{profiles.length} people · names, photos, DOB, roles, and bios</Text></View><Ionicons name="chevron-forward" size={18} color={styles.iconColor.color} /></Pressable><Text style={styles.sectionTitle}>Preferences</Text><View style={styles.settingRow}><Ionicons name="moon-outline" size={21} color="#7C4DFF" /><View style={styles.flex}><Text style={styles.settingTitle}>Dark mode</Text><Text style={styles.muted}>Use the darker OutrSPACE theme</Text></View><Switch value={dark} onValueChange={onTheme} trackColor={{ true: '#6687FF' }} /></View><Pressable onPress={onNotifications} style={styles.settingRow}><Ionicons name="notifications-outline" size={21} color="#FF7A2E" /><View style={styles.flex}><Text style={styles.settingTitle}>Smart notifications</Text><Text style={styles.muted}>Enable reminders and daily recaps</Text></View><Ionicons name="chevron-forward" size={18} color={styles.iconColor.color} /></Pressable><Pressable onPress={onPrivacy} style={styles.settingRow}><Ionicons name="shield-checkmark-outline" size={21} color="#19A47B" /><View style={styles.flex}><Text style={styles.settingTitle}>Privacy and family data</Text><Text style={styles.muted}>Secure exports and in-app account deletion</Text></View><Ionicons name="chevron-forward" size={18} color={styles.iconColor.color} /></Pressable></ScrollView>;
 }
 
 function BottomTabs({ tab, setTab, styles }: any) {
@@ -4211,9 +4306,9 @@ function SecondUserWelcomeModal({
             <Text style={styles.welcomeText}>Everything here is live. Updates from another family member appear automatically—no refreshing, forwarding, or setup help required.</Text>
           </LinearGradient>
           {[
-            ['chatbubbles-outline', '#2257F4', 'Family chat stays human', 'Messages with the family live in Family chat. Coh has a separate private workspace, so assistant replies never flood the conversation.'],
+            ['chatbubbles-outline', '#2257F4', 'Family chat stays human', 'Messages with the family live in Family chat. Ace has a separate private workspace, so assistant replies never flood the conversation.'],
             ['checkmark-circle-outline', '#19A47B', 'Assignments come to you', 'Open an alert to the exact event, chore, follow-up, message, or Family Inbox item. Accept and complete work from the same screen.'],
-            ['sparkles-outline', '#7047EE', 'Coh works for you too', 'Ask questions, share screenshots or PDFs, speak a request, correct details, and approve actions without depending on the household owner.'],
+            ['sparkles-outline', '#7047EE', 'Ace works for you too', 'Ask questions, share screenshots or PDFs, speak a request, correct details, and approve actions without depending on the household owner.'],
           ].map(([icon, color, title, detail]) => (
             <View key={title} style={styles.welcomeRow}>
               <View style={[styles.integrationIcon, { backgroundColor: `${color}18` }]}><Ionicons name={icon as any} size={22} color={color} /></View>
@@ -4227,7 +4322,7 @@ function SecondUserWelcomeModal({
           </View>
           <Pressable onPress={() => void onContinue('family')} style={styles.saveButton}><Ionicons name="chatbubbles" size={18} color="#fff" /><Text style={styles.saveButtonText}>Open family chat</Text></Pressable>
           <View style={styles.welcomeActions}>
-            <Pressable onPress={() => void onContinue('coh')} style={styles.secondaryWelcomeButton}><Ionicons name="sparkles" size={17} color="#7047EE" /><Text style={styles.secondaryWelcomeText}>Try Coh privately</Text></Pressable>
+            <Pressable onPress={() => void onContinue('coh')} style={styles.secondaryWelcomeButton}><Ionicons name="sparkles" size={17} color="#7047EE" /><Text style={styles.secondaryWelcomeText}>Try Ace privately</Text></Pressable>
             <Pressable onPress={() => void onContinue('today')} style={styles.secondaryWelcomeButton}><Text style={styles.secondaryWelcomeText}>Go to Today</Text></Pressable>
           </View>
         </ScrollView>
@@ -4349,7 +4444,7 @@ function ManualEventModal({
           <View style={styles.flex}>
             <Text style={styles.eyebrow}>MANUAL EVENT</Text>
             <Text style={styles.modalTitle}>Add to the family calendar</Text>
-            <Text style={styles.muted}>This works independently of Coh and saves directly to your shared calendar.</Text>
+            <Text style={styles.muted}>This works independently of Ace and saves directly to your shared calendar.</Text>
           </View>
           <Pressable onPress={onClose} style={styles.iconButton}><Ionicons name="close" size={21} color={styles.iconColor.color} /></Pressable>
         </View>
@@ -4468,14 +4563,14 @@ function QuickAddModal({
           <Text style={styles.eventEntryGroupLabel}>CREATE</Text>
           <View style={styles.eventEntryGrid}>
             <EventEntryChoice styles={styles} icon="create-outline" color="#2257F4" title="Enter manually" detail="Date, time, people, repeat, place, and reminder" onPress={() => onEventSource('manual')} />
-            <EventEntryChoice styles={styles} icon="sparkles" color="#7047EE" title="Ask Coh" detail="Describe it naturally; Coh asks for missing details" onPress={() => onEventSource('coh')} />
+            <EventEntryChoice styles={styles} icon="sparkles" color="#7047EE" title="Ask Ace" detail="Describe it naturally; Ace asks for missing details" onPress={() => onEventSource('coh')} />
           </View>
-          <Text style={styles.eventEntryGroupLabel}>BRING INTO COHO</Text>
+          <Text style={styles.eventEntryGroupLabel}>BRING INTO OUTRSPACE</Text>
           <View style={styles.eventEntryGrid}>
             <EventEntryChoice styles={styles} icon="mail-unread-outline" color="#FF7A2E" title="Find in email" detail="Review and approve events found in Family Inbox" onPress={() => onEventSource('email')} />
             <EventEntryChoice styles={styles} icon="calendar-outline" color="#19A47B" title="Import from calendar" detail="Connect a provider and choose calendars to sync" onPress={() => onEventSource('calendar')} />
           </View>
-          <View style={styles.eventEntrySafety}><Ionicons name="shield-checkmark-outline" size={19} color="#19A47B" /><Text style={styles.eventEntrySafetyText}>Manual entry always works without Coh. Email suggestions never reach the family calendar until someone approves them.</Text></View>
+          <View style={styles.eventEntrySafety}><Ionicons name="shield-checkmark-outline" size={19} color="#19A47B" /><Text style={styles.eventEntrySafetyText}>Manual entry always works without Ace. Email suggestions never reach the family calendar until someone approves them.</Text></View>
         </ScrollView> : type === 'Chore' ? <ScrollView keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false} contentContainerStyle={styles.choreFormContent}>
           <ChoreFormFields value={choreDraft} onChange={updateChore} profiles={profiles} styles={styles} dark={dark} autoFocus />
           <Pressable disabled={invalidChore || saving} onPress={() => void onSave(choreDraft)} style={[styles.saveButton, (invalidChore || saving) && styles.disabled]}>
@@ -4612,15 +4707,15 @@ function ShareToCohModal({ visible, styles, dark, value, onChange, hasImage, err
       <View style={styles.modalSheet}>
         <View style={styles.modalHandle} />
         <View style={styles.modalHead}>
-          <View style={styles.flex}><Text style={styles.eyebrow}>ONLY THIS ITEM</Text><Text style={styles.modalTitle}>Share to Coh</Text></View>
+          <View style={styles.flex}><Text style={styles.eyebrow}>ONLY THIS ITEM</Text><Text style={styles.modalTitle}>Share to Ace</Text></View>
           <Pressable accessibilityLabel="Cancel sharing" onPress={onCancel} style={styles.iconButton}><Ionicons name="close" size={21} color={styles.iconColor.color} /></Pressable>
         </View>
-        <View style={styles.privacyCard}><Ionicons name="shield-checkmark" size={20} color="#19A47B" /><Text style={styles.privacyText}>Coh receives only what you selected—not the conversation. The shared content is discarded if you cancel.</Text></View>
-        {hasImage && <View style={styles.sharedAttachment}><Ionicons name="image-outline" size={20} color="#7047EE" /><View style={styles.flex}><Text style={styles.settingTitle}>Attachment ready for Coh</Text><Text style={styles.muted}>Coh can read screenshots, PDFs, text, calendar files, and supported audio after you approve this share.</Text></View></View>}
+        <View style={styles.privacyCard}><Ionicons name="shield-checkmark" size={20} color="#19A47B" /><Text style={styles.privacyText}>Ace receives only what you selected—not the conversation. The shared content is discarded if you cancel.</Text></View>
+        {hasImage && <View style={styles.sharedAttachment}><Ionicons name="image-outline" size={20} color="#7047EE" /><View style={styles.flex}><Text style={styles.settingTitle}>Attachment ready for Ace</Text><Text style={styles.muted}>Ace can read screenshots, PDFs, text, calendar files, and supported audio after you approve this share.</Text></View></View>}
         <Text style={styles.fieldLabel}>REVIEW OR EDIT BEFORE SENDING</Text>
         <TextInput value={value} onChangeText={onChange} multiline placeholder={hasImage ? 'Example: Haircut for Chad Wednesday at 9:30 AM' : 'Selected text or link'} placeholderTextColor="#8B93A5" style={[styles.modalInput, styles.sharePreviewInput]} />
         {error && <Text style={styles.shareError}>The shared item could not be read. Nothing has been saved.</Text>}
-        <View style={styles.shareActions}><Pressable onPress={onCancel} style={styles.cancelButton}><Text style={styles.cancelButtonText}>Cancel</Text></Pressable><Pressable onPress={onApprove} style={styles.approveButton}><Ionicons name="sparkles" size={16} color="#fff" /><Text style={styles.saveButtonText}>Ask Coh</Text></Pressable></View>
+        <View style={styles.shareActions}><Pressable onPress={onCancel} style={styles.cancelButton}><Text style={styles.cancelButtonText}>Cancel</Text></Pressable><Pressable onPress={onApprove} style={styles.approveButton}><Ionicons name="sparkles" size={16} color="#fff" /><Text style={styles.saveButtonText}>Ask Ace</Text></Pressable></View>
       </View>
       <StatusBar style={dark ? 'light' : 'dark'} />
     </KeyboardAvoidingView>
@@ -4656,6 +4751,11 @@ function createStyles(t: Theme) {
     familyPulseCard: { flex: 1, minHeight: 112, borderRadius: 19, padding: 14, justifyContent: 'space-between', backgroundColor: t.surface, borderWidth: 1, borderColor: t.line },
     familyPulseValue: { color: t.text, fontSize: 25, lineHeight: 27, fontWeight: '900', marginTop: 10 },
     familyPulseLabel: { color: t.muted, fontSize: 9, fontWeight: '800', marginTop: 2 },
+    todayPeopleRow: { gap: 10, paddingRight: 16 },
+    todayPersonCard: { width: 132, minHeight: 166, borderRadius: 20, padding: 13, alignItems: 'flex-start', backgroundColor: t.surface, borderWidth: 1, borderColor: t.line },
+    todayPersonName: { color: t.text, fontSize: 12, fontWeight: '900', marginTop: 10, width: '100%' },
+    todayPersonRole: { color: t.muted, fontSize: 8, fontWeight: '700', marginTop: 3, width: '100%' },
+    todayProfileLink: { marginTop: 'auto', flexDirection: 'row', alignItems: 'center', gap: 2 },
     bentoGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 }, bentoCard: { width: '48.5%', minHeight: 190, borderRadius: 22, padding: 15, backgroundColor: t.surfaceStrong, borderWidth: 1, borderColor: t.line, shadowColor: '#392B14', shadowOpacity: t.dark ? .24 : .07, shadowRadius: 12, shadowOffset: { width: 0, height: 7 } },
     cardIcon: { width: 43, height: 43, borderRadius: 14, alignItems: 'center', justifyContent: 'center', marginBottom: 14 }, cardTitle: { color: t.text, fontSize: 14, fontWeight: '800' }, cardValue: { color: t.text, fontSize: 21, fontWeight: '800', letterSpacing: -.7, marginTop: 3 }, cardDetail: { color: t.muted, fontSize: 9, marginTop: 4, minHeight: 26 }, cardPill: { alignSelf: 'flex-start', flexDirection: 'row', gap: 4, alignItems: 'center', borderRadius: 99, paddingHorizontal: 8, paddingVertical: 6, marginTop: 'auto' }, cardPillText: { fontSize: 8, fontWeight: '700' },
     recapCard: { minHeight: 88, borderRadius: 21, padding: 15, flexDirection: 'row', alignItems: 'center', gap: 11, marginTop: 2 }, recapIcon: { width: 43, height: 43, borderRadius: 14, backgroundColor: '#FFFFFF24', alignItems: 'center', justifyContent: 'center' }, recapCopy: { flex: 1 }, recapLabel: { color: '#FFFFFFB5', fontSize: 7, fontWeight: '800', letterSpacing: 1 }, recapTitle: { color: '#fff', fontSize: 13, fontWeight: '800', marginTop: 2 }, recapText: { color: '#FFFFFFB8', fontSize: 9, lineHeight: 13, marginTop: 2 },
@@ -4670,10 +4770,16 @@ function createStyles(t: Theme) {
     calendarAddActionTitle: { color: '#fff', fontSize: 12, fontWeight: '900' },
     calendarAddActionDetail: { color: '#FFFFFFC4', fontSize: 8, lineHeight: 12, fontWeight: '700', marginTop: 3 },
     calendarViewTabs: { minHeight: 48, padding: 4, borderRadius: 17, flexDirection: 'row', gap: 5, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line },
-    calendarViewTab: { flex: 1, minHeight: 38, borderRadius: 13, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6 },
+    calendarViewTab: { flex: 1, minHeight: 38, borderRadius: 13, alignItems: 'center', justifyContent: 'center', gap: 2 },
     calendarViewTabActive: { backgroundColor: t.primary, shadowColor: t.primary, shadowOpacity: .22, shadowRadius: 8, shadowOffset: { width: 0, height: 4 } },
-    calendarViewTabText: { color: t.muted, fontSize: 10, fontWeight: '900' },
+    calendarViewTabText: { color: t.muted, fontSize: 8, fontWeight: '900' },
     calendarViewTabTextActive: { color: '#fff' },
+    calendarRangePicker: { minHeight: 44, borderRadius: 15, paddingHorizontal: 10, flexDirection: 'row', alignItems: 'center', gap: 7, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line },
+    calendarRangeLabel: { color: t.muted, fontSize: 7, fontWeight: '900', letterSpacing: .7, marginRight: 2 },
+    calendarRangeChip: { minHeight: 29, borderRadius: 99, paddingHorizontal: 10, alignItems: 'center', justifyContent: 'center', backgroundColor: t.surfaceStrong, borderWidth: 1, borderColor: t.line },
+    calendarRangeChipActive: { backgroundColor: t.primary, borderColor: t.primary },
+    calendarRangeChipText: { color: t.text, fontSize: 8, fontWeight: '900' },
+    calendarRangeChipTextActive: { color: '#fff' },
     calendarNav: { minHeight: 52, flexDirection: 'row', alignItems: 'center', gap: 10 },
     calendarPeopleFilters: { gap: 8, paddingRight: 16 },
     calendarPersonFilter: { minHeight: 37, borderRadius: 19, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', gap: 7, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line },
@@ -4681,11 +4787,18 @@ function createStyles(t: Theme) {
     calendarPersonFilterText: { color: t.text, fontSize: 9, fontWeight: '900' },
     calendarPersonFilterTextActive: { color: '#fff' },
     calendarPersonDot: { width: 9, height: 9, borderRadius: 5 },
+    calendarPersonImage: { width: 20, height: 20, borderRadius: 10 },
     calendarSummary: { minHeight: 66, borderRadius: 18, paddingHorizontal: 14, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', backgroundColor: t.surface, borderWidth: 1, borderColor: t.line },
     calendarSummaryValue: { color: t.text, fontSize: 18, lineHeight: 20, fontWeight: '900', textAlign: 'center' },
     calendarSummaryLabel: { color: t.muted, fontSize: 7, fontWeight: '800', textAlign: 'center', marginTop: 3 },
     calendarSummaryDivider: { width: 1, height: 28, backgroundColor: t.line },
     calendarMonthCard: { borderRadius: 20, overflow: 'hidden', backgroundColor: t.surface, borderWidth: 1, borderColor: t.line },
+    calendarYearGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
+    calendarYearCard: { width: '48.5%', minHeight: 118, borderRadius: 18, padding: 13, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line },
+    calendarYearMonth: { color: t.text, fontSize: 12, fontWeight: '900' },
+    calendarYearCount: { color: t.primary, fontSize: 27, lineHeight: 29, fontWeight: '900', marginTop: 8 },
+    calendarYearPreview: { minHeight: 10, flexDirection: 'row', flexWrap: 'wrap', gap: 4, marginTop: 8 },
+    calendarYearDot: { width: 7, height: 7, borderRadius: 4 },
     calendarWeekdayRow: { minHeight: 32, flexDirection: 'row', alignItems: 'center', borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: t.line, backgroundColor: t.surfaceStrong },
     calendarWeekdayLabel: { width: '14.2857%', textAlign: 'center', color: t.muted, fontSize: 8, fontWeight: '900' },
     calendarMonthGrid: { flexDirection: 'row', flexWrap: 'wrap' },
@@ -4725,7 +4838,13 @@ function createStyles(t: Theme) {
     messageList: { padding: 18, paddingBottom: 24, gap: 16 }, chatHeader: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 12, paddingBottom: 14, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: t.line }, homeThreadIcon: { width: 42, height: 42, borderRadius: 14, backgroundColor: `${t.primary}14`, alignItems: 'center', justifyContent: 'center' }, chatTitle: { color: t.text, fontSize: 14, fontWeight: '800' }, botHint: { minHeight: 48, borderRadius: 15, paddingHorizontal: 12, marginBottom: 5, flexDirection: 'row', gap: 8, alignItems: 'center', backgroundColor: '#7047EE12', borderWidth: 1, borderColor: '#7047EE30' }, botHintText: { color: t.text, fontSize: 10, lineHeight: 14, flex: 1, fontWeight: '700' }, messageWrap: { maxWidth: '88%', flexDirection: 'row', gap: 8, alignSelf: 'flex-start' }, messageBody: { flexShrink: 1 }, messageMine: { alignSelf: 'flex-end' }, chatAvatar: { width: 32, height: 32, backgroundColor: '#FFE1CF' }, botAvatar: { width: 32, height: 32, backgroundColor: '#7047EE' }, messageAuthor: { color: t.muted, fontSize: 8, marginBottom: 4 }, botAuthor: { color: '#7047EE', fontWeight: '800' }, messageAuthorMine: { textAlign: 'right' }, messageBubble: { backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, borderRadius: 5, borderTopRightRadius: 16, borderBottomLeftRadius: 16, borderBottomRightRadius: 16, padding: 12 }, botBubble: { borderColor: '#7047EE55', backgroundColor: t.dark ? '#251F46' : '#F5F0FF' }, messageBubbleMine: { backgroundColor: t.primary, borderColor: t.primary, borderTopLeftRadius: 16, borderTopRightRadius: 5 }, messageText: { color: t.text, fontSize: 12, lineHeight: 17 }, messageTextMine: { color: '#fff' }, cohMention: { color: '#FFD84D', fontWeight: '900', textShadowColor: '#FFD84D99', textShadowRadius: 8 }, composeRow: { minHeight: 61, paddingHorizontal: 12, paddingVertical: 8, gap: 8, flexDirection: 'row', alignItems: 'center', borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: t.line, backgroundColor: t.surfaceStrong }, composeRowCoh: { borderTopColor: '#A777FF', backgroundColor: t.dark ? '#211A42' : '#F7F0FF', shadowColor: '#7047EE', shadowOpacity: .42, shadowRadius: 16, shadowOffset: { width: 0, height: -3 } }, composePlus: { width: 36, height: 36, borderRadius: 12, backgroundColor: `${t.primary}13`, alignItems: 'center', justifyContent: 'center' }, composeCohBadge: { backgroundColor: '#7047EE', shadowColor: '#A777FF', shadowOpacity: .9, shadowRadius: 10 }, composeInput: { flex: 1, minHeight: 40, maxHeight: 90, borderRadius: 13, borderWidth: 1, borderColor: t.line, backgroundColor: t.surface, color: t.text, paddingHorizontal: 12, fontSize: 12 }, composeInputCoh: { borderColor: '#A777FF', borderWidth: 2, color: t.dark ? '#E8DDFF' : '#4B168D', fontWeight: '800', shadowColor: '#7047EE', shadowOpacity: .5, shadowRadius: 9 }, sendButton: { width: 37, height: 37, borderRadius: 12, backgroundColor: t.primary, alignItems: 'center', justifyContent: 'center' }, sendButtonCoh: { backgroundColor: '#7047EE', shadowColor: '#A777FF', shadowOpacity: .9, shadowRadius: 10 },
     moreToolbar: { flexDirection: 'row', alignItems: 'flex-start', gap: 10 }, moreIntro: { flex: 1, color: t.muted, fontSize: 12, lineHeight: 18, marginBottom: 4 }, moreCustomizeButton: { minHeight: 36, borderRadius: 12, borderWidth: 1, borderColor: `${t.primary}55`, paddingHorizontal: 10, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 5, backgroundColor: `${t.primary}0D` }, moreCustomizeButtonActive: { backgroundColor: '#7047EE', borderColor: '#7047EE' }, moreCustomizeText: { color: t.primary, fontSize: 9, fontWeight: '900' }, moreCustomizeTextActive: { color: '#fff' }, moreEditingHint: { minHeight: 64, borderRadius: 16, padding: 12, flexDirection: 'row', alignItems: 'center', gap: 9, backgroundColor: '#7047EE12', borderWidth: 1, borderColor: '#7047EE35' }, moreEditingHintText: { flex: 1, color: t.text, fontSize: 9, lineHeight: 14, fontWeight: '700' }, moreGrid: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between' }, moreCard: { width: '48%', minHeight: 180, marginBottom: 10, borderRadius: 22, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, padding: 16 }, moreIcon: { width: 45, height: 45, borderRadius: 15, alignItems: 'center', justifyContent: 'center' }, moreTitle: { color: t.text, fontSize: 15, fontWeight: '800', marginTop: 17 }, moreDetail: { color: t.muted, fontSize: 9, lineHeight: 14, marginTop: 5, paddingRight: 10 }, moreChevron: { position: 'absolute', right: 14, bottom: 14 }, moreEditControls: { position: 'absolute', left: 12, right: 12, bottom: 11, flexDirection: 'row', gap: 6 }, moreEditButton: { flex: 1, minHeight: 30, borderRadius: 9, backgroundColor: t.surfaceStrong, borderWidth: 1, borderColor: t.line, alignItems: 'center', justifyContent: 'center' }, moreEditButtonDisabled: { opacity: .3 }, moreHideButton: { backgroundColor: '#D645450D', borderColor: '#D6454535' }, moreHiddenList: { borderRadius: 18, overflow: 'hidden', borderWidth: 1, borderColor: t.line, backgroundColor: t.surface }, moreHiddenRow: { minHeight: 58, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', gap: 10, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: t.line }, moreHiddenIcon: { width: 34, height: 34, borderRadius: 11, alignItems: 'center', justifyContent: 'center' }, moreHiddenTitle: { flex: 1, color: t.text, fontSize: 11, fontWeight: '800' }, moreRestoreButton: { minHeight: 32, borderRadius: 10, paddingHorizontal: 10, backgroundColor: `${t.primary}12`, alignItems: 'center', justifyContent: 'center' }, moreRestoreText: { color: t.primary, fontSize: 9, fontWeight: '900' }, moreResetButton: { alignSelf: 'center', minHeight: 38, borderRadius: 12, borderWidth: 1, borderColor: t.line, paddingHorizontal: 13, alignItems: 'center', justifyContent: 'center', backgroundColor: t.surface }, moreResetText: { color: t.muted, fontSize: 9, fontWeight: '800' },
     familyHero: { minHeight: 116, borderRadius: 22, padding: 18, flexDirection: 'row', alignItems: 'center', backgroundColor: t.surface, borderWidth: 1, borderColor: t.line }, familyHeroTitle: { color: t.text, fontSize: 22, fontWeight: '900', marginTop: 5, marginBottom: 4 }, addProfileButton: { width: 46, height: 46, borderRadius: 15, backgroundColor: t.primary, alignItems: 'center', justifyContent: 'center', marginLeft: 'auto' }, profileRow: { minHeight: 88, borderRadius: 19, padding: 12, flexDirection: 'row', alignItems: 'center', gap: 11, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line }, profileAvatar: { width: 42, height: 42, borderRadius: 15, overflow: 'hidden', alignItems: 'center', justifyContent: 'center' }, profileAvatarLarge: { width: 58, height: 58, borderRadius: 19 }, profileAvatarImage: { width: '100%', height: '100%' }, profileName: { color: t.text, fontSize: 14, fontWeight: '900' }, profileBio: { color: t.muted, fontSize: 9, lineHeight: 13, marginTop: 4 }, profileSheet: { maxHeight: '88%', backgroundColor: t.surfaceStrong, borderTopLeftRadius: 28, borderTopRightRadius: 28 }, profileSheetContent: { paddingHorizontal: 19, paddingTop: 9, paddingBottom: 34 }, photoEditor: { minHeight: 76, borderRadius: 18, padding: 10, flexDirection: 'row', alignItems: 'center', gap: 12, marginTop: 16, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line }, profilePrivacy: { color: t.muted, fontSize: 9, lineHeight: 14, marginTop: 14 }, deleteProfileButton: { minHeight: 44, marginTop: 10, borderRadius: 14, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7, backgroundColor: '#D645450D', borderWidth: 1, borderColor: '#D6454535' }, deleteProfileText: { color: '#D64545', fontSize: 10, fontWeight: '800' },
-    searchInput: { height: 45, borderRadius: 15, borderWidth: 1, borderColor: t.line, backgroundColor: t.surface, color: t.text, paddingHorizontal: 14 }, notesGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 }, noteCard: { width: '48.5%', minHeight: 140, borderRadius: 19, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, padding: 15 }, noteEmoji: { fontSize: 24 }, noteTitle: { color: t.text, fontSize: 12, fontWeight: '800', marginTop: 18, marginBottom: 4 }, noteChevron: { position: 'absolute', right: 12, bottom: 12 },
+    searchInput: { height: 45, borderRadius: 15, borderWidth: 1, borderColor: t.line, backgroundColor: t.surface, color: t.text, paddingHorizontal: 14 },
+    searchHero: { minHeight: 92, borderRadius: 20, padding: 15, flexDirection: 'row', alignItems: 'center', gap: 12, backgroundColor: '#0F8FA812', borderWidth: 1, borderColor: '#0F8FA835' },
+    globalSearchBox: { minHeight: 50, borderRadius: 17, paddingHorizontal: 14, flexDirection: 'row', alignItems: 'center', gap: 9, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line },
+    globalSearchInput: { flex: 1, color: t.text, fontSize: 12, minHeight: 48 },
+    moreSearchPlaceholder: { flex: 1, color: t.muted, fontSize: 10, fontWeight: '700' },
+    searchResultRow: { minHeight: 74, borderRadius: 18, padding: 12, flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line },
+    notesGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 }, noteCard: { width: '48.5%', minHeight: 140, borderRadius: 19, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, padding: 15 }, noteEmoji: { fontSize: 24 }, noteTitle: { color: t.text, fontSize: 12, fontWeight: '800', marginTop: 18, marginBottom: 4 }, noteChevron: { position: 'absolute', right: 12, bottom: 12 },
     recapHero: { minHeight: 260, borderRadius: 24, padding: 23, justifyContent: 'center' }, recapHeroLabel: { color: '#FFFFFFB5', fontSize: 8, fontWeight: '800', letterSpacing: 1, marginTop: 13 }, recapHeroTitle: { color: '#fff', fontSize: 28, lineHeight: 31, fontWeight: '800', letterSpacing: -1, marginTop: 8 }, recapHeroText: { color: '#FFFFFFC0', fontSize: 11, lineHeight: 16, marginTop: 8 }, recapActionRow: { flexDirection: 'row', gap: 8, marginTop: 18 }, recapHeroButton: { alignSelf: 'flex-start', minHeight: 38, borderRadius: 12, backgroundColor: '#fff', flexDirection: 'row', gap: 7, alignItems: 'center', paddingHorizontal: 13 }, recapSnapshot: { minHeight: 66, borderRadius: 17, padding: 11, flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line }, recapSnapshotActive: { borderColor: '#7047EE88', backgroundColor: t.dark ? '#251F46' : '#F5F0FF' }, recapSnapshotIcon: { width: 38, height: 38, borderRadius: 13, alignItems: 'center', justifyContent: 'center', backgroundColor: '#7047EE14' }, recapSnapshotDetail: { borderRadius: 19, padding: 13, gap: 8, backgroundColor: t.surface, borderWidth: 1, borderColor: '#7047EE55' }, listenSnapshot: { alignSelf: 'flex-start', minHeight: 36, borderRadius: 11, paddingHorizontal: 10, flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: '#7047EE12' }, highlightRow: { minHeight: 61, flexDirection: 'row', gap: 11, alignItems: 'center', borderRadius: 16, backgroundColor: t.surface, borderWidth: 1, borderColor: t.line, padding: 12 }, highlightTime: { color: t.primary, fontSize: 11, fontWeight: '800', width: 38 }, highlightText: { color: t.text, fontSize: 11, fontWeight: '700', flex: 1 },
     automationCard: { minHeight: 90, borderRadius: 20, padding: 16, flexDirection: 'row', gap: 12, alignItems: 'center' }, automationLabel: { color: '#FFFFFFA8', fontSize: 7, fontWeight: '800', letterSpacing: 1 }, automationTitle: { color: '#fff', fontSize: 12, fontWeight: '800', lineHeight: 17, marginTop: 3 },
     integrationHero: { minHeight: 230, borderRadius: 25, padding: 20, justifyContent: 'center', shadowColor: '#24116D', shadowOpacity: t.dark ? .34 : .2, shadowRadius: 17, shadowOffset: { width: 0, height: 8 } },

@@ -103,8 +103,8 @@ export default function FamilyHub() {
       const invitation = await sendHouseholdInvitation({ householdId, email, role });
       if (!invitation.emailSent) {
         await Share.share({
-          title: `Join ${householdName} on Coho`,
-          message: `Join our family command center on Coho: ${invitation.inviteUrl}`,
+          title: `Join ${householdName} on OutrSPACE`,
+          message: `Join our family command center on OutrSPACE: ${invitation.inviteUrl}`,
         });
       }
       setEmail('');
@@ -160,8 +160,8 @@ export default function FamilyHub() {
       });
       if (alwaysShare || !invitation.emailSent) {
         await Share.share({
-          title: `Join ${householdName} on Coho`,
-          message: `Join our family command center on Coho: ${invitation.inviteUrl}`,
+          title: `Join ${householdName} on OutrSPACE`,
+          message: `Join our family command center on OutrSPACE: ${invitation.inviteUrl}`,
         });
       }
       setMessage(invitation.emailSent
@@ -209,7 +209,7 @@ export default function FamilyHub() {
       <View style={styles.hero}>
         <Text style={styles.eyebrow}>HOUSEHOLD</Text>
         <Text style={styles.heroTitle}>{householdName}</Text>
-        <Text style={styles.heroText}>{members.length} member{members.length === 1 ? '' : 's'} sharing one Coho household.</Text>
+        <Text style={styles.heroText}>{members.length} member{members.length === 1 ? '' : 's'} sharing one OutrSPACE household.</Text>
       </View>
 
       <Text style={styles.sectionTitle}>Family members</Text>
@@ -247,7 +247,7 @@ export default function FamilyHub() {
       <Text style={styles.sectionTitle}>Invite someone</Text>
       <View style={styles.card}>
         <Text style={styles.cardTitle}>Bring your family together</Text>
-        <Text style={styles.cardText}>Coho emails a secure link. After they accept, their calendar, chat, assignments, notifications, and Coh workspace update in real time.</Text>
+        <Text style={styles.cardText}>OutrSPACE emails a secure link. After they accept, their calendar, chat, assignments, notifications, and Ace workspace update in real time.</Text>
         <TextInput
           value={email}
           onChangeText={setEmail}
@@ -348,7 +348,7 @@ function memberReadiness(member: Member) {
     return { label: 'Ready', detail: 'waiting for first action', color: '#2257F4', background: '#E4EBFF' };
   }
   return activeRecently
-    ? { label: 'Active', detail: 'recently used Coho', color: '#168866', background: '#E1F8F0' }
+    ? { label: 'Active', detail: 'recently used OutrSPACE', color: '#168866', background: '#E1F8F0' }
     : { label: 'Ready', detail: 'fully set up', color: '#2257F4', background: '#E4EBFF' };
 }
 

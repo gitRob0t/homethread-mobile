@@ -41,7 +41,8 @@ export async function signInWithGoogle() {
 
   const result = await WebBrowser.openAuthSessionAsync(data.url, authCallbackUrl);
   if (result.type === 'success' && result.url) await completeAuthRedirect(result.url);
-  if (result.type === 'dismiss' || result.type === 'cancel') throw new Error('Google sign-in was canceled.');
+  else if (result.type === 'dismiss' || result.type === 'cancel') throw new Error('Google sign-in was canceled.');
+  else throw new Error('Google sign-in returned without an authorization response.');
 }
 
 export async function signOut() {

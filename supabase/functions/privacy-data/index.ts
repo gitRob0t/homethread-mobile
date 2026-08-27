@@ -50,7 +50,7 @@ Deno.serve(async (request) => {
     if (action === 'delete_account') {
       const confirmation = safe(body?.confirmation, 100);
       const confirmationEmail = safe(body?.email, 320).toLowerCase();
-      if (confirmation !== 'DELETE MY COHO ACCOUNT'
+      if (!['DELETE MY OUTRSPACE ACCOUNT', 'DELETE MY COHO ACCOUNT'].includes(confirmation)
         || confirmationEmail !== String(authData.user.email || '').toLowerCase()) {
         return json({ error: 'The confirmation phrase and signed-in email must match exactly.' }, 400);
       }

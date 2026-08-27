@@ -65,13 +65,13 @@ export default function PrivacyDataScreen({
   }
 
   function confirmDeletion() {
-    if (phrase !== 'DELETE MY COHO ACCOUNT' || confirmEmail.trim().toLowerCase() !== email.toLowerCase()) {
+    if (phrase !== 'DELETE MY OUTRSPACE ACCOUNT' || confirmEmail.trim().toLowerCase() !== email.toLowerCase()) {
       onNotice('Enter the exact phrase and your signed-in email.');
       return;
     }
     Alert.alert(
-      'Permanently delete your Coho account?',
-      'This removes your sign-in, private Coh history, devices, locations, and memberships. Shared household records remain anonymous so your family does not lose its calendar.',
+      'Permanently delete your OutrSPACE account?',
+      'This removes your sign-in, private Ace history, devices, locations, and memberships. Shared household records remain anonymous so your family does not lose its calendar.',
       [
         { text: 'Keep account', style: 'cancel' },
         { text: 'Delete permanently', style: 'destructive', onPress: () => void deleteAccount() },
@@ -104,7 +104,7 @@ export default function PrivacyDataScreen({
           <Ionicons name="download-outline" size={22} color="#2257F4" />
           <View style={styles.flex}>
             <Text style={styles.cardTitle}>Portable household export</Text>
-            <Text style={styles.detail}>JSON containing accessible family records, your Coh history, integrations metadata, notification history, and consent settings. Provider tokens and secrets are never included.</Text>
+            <Text style={styles.detail}>JSON containing accessible family records, your Ace history, integrations metadata, notification history, and consent settings. Provider tokens and secrets are never included.</Text>
           </View>
         </View>
         <Pressable disabled={busy !== null} onPress={() => void exportData()} style={[styles.primaryButton, busy !== null && styles.disabled]}>
@@ -125,9 +125,9 @@ export default function PrivacyDataScreen({
       <Text style={styles.sectionTitle}>Delete account</Text>
       <View style={[styles.card, styles.dangerCard]}>
         <Text style={styles.dangerTitle}>Permanent and immediate</Text>
-        <Text style={styles.detail}>Coho transfers household ownership to another adult when possible. If you are the only adult, that household is removed. Shared records kept for other members lose your attribution.</Text>
+        <Text style={styles.detail}>OutrSPACE transfers household ownership to another adult when possible. If you are the only adult, that household is removed. Shared records kept for other members lose your attribution.</Text>
         <Text style={styles.label}>TYPE THIS EXACTLY</Text>
-        <Text style={styles.phrase}>DELETE MY COHO ACCOUNT</Text>
+        <Text style={styles.phrase}>DELETE MY OUTRSPACE ACCOUNT</Text>
         <TextInput value={phrase} onChangeText={setPhrase} autoCapitalize="characters" placeholder="Confirmation phrase" placeholderTextColor={colors.muted} style={styles.input} />
         <Text style={styles.label}>SIGNED-IN EMAIL</Text>
         <TextInput value={confirmEmail} onChangeText={setConfirmEmail} autoCapitalize="none" keyboardType="email-address" placeholder={email || 'Email'} placeholderTextColor={colors.muted} style={styles.input} />

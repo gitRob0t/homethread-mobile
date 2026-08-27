@@ -7,7 +7,8 @@
     "icon": "./assets/icon.png",
     "scheme": [
       "coho",
-      "homethread"
+      "homethread",
+      "outrspace"
     ],
     "userInterfaceStyle": "automatic",
     "ios": {
@@ -18,8 +19,8 @@
         "ITSAppUsesNonExemptEncryption": false,
         "NSMicrophoneUsageDescription": "OutrSPACE uses the microphone only when you choose to send Ace a voice request.",
         "NSUserNotificationsUsageDescription": "OutrSPACE uses notifications for family reminders, upcoming events, daily recaps, and Family Places alerts.",
-        "NSCalendarsFullAccessUsageDescription": "Coho reads only the iPhone calendars you select so your household can coordinate approved events.",
-        "NSCalendarsWriteOnlyAccessUsageDescription": "Coho can add events you approve to the iPhone calendar you choose."
+        "NSCalendarsFullAccessUsageDescription": "OutrSPACE reads only the iPhone calendars you select so your household can coordinate approved events.",
+        "NSCalendarsWriteOnlyAccessUsageDescription": "OutrSPACE can add events you approve to the iPhone calendar you choose."
       }
     },
     "android": {
@@ -45,15 +46,15 @@
       [
         "expo-image-picker",
         {
-          "photosPermission": "Coho uses your selected photo as a family member's profile picture."
+          "photosPermission": "OutrSPACE uses your selected photo as a family member's profile picture."
         }
       ],
       [
         "expo-location",
         {
-          "locationWhenInUsePermission": "Coho uses your location only when you choose to share it with your household or create a Family Place.",
-          "locationAlwaysAndWhenInUsePermission": "Coho uses background location only after you enable live sharing and arrival or departure alerts.",
-          "locationAlwaysPermission": "Coho uses background location only after you enable live sharing and arrival or departure alerts.",
+          "locationWhenInUsePermission": "OutrSPACE uses your location only when you choose to share it with your household or create a Family Place.",
+          "locationAlwaysAndWhenInUsePermission": "OutrSPACE uses background location only after you enable live sharing and arrival or departure alerts.",
+          "locationAlwaysPermission": "OutrSPACE uses background location only after you enable live sharing and arrival or departure alerts.",
           "motionUsagePermission": false,
           "isIosBackgroundLocationEnabled": true,
           "isAndroidBackgroundLocationEnabled": true
@@ -62,7 +63,7 @@
       [
         "expo-share-intent",
         {
-          "iosShareExtensionName": "Share to Coh",
+          "iosShareExtensionName": "Share to Ace",
           "iosActivationRules": {
             "NSExtensionActivationSupportsText": true,
             "NSExtensionActivationSupportsWebURLWithMaxCount": 1,

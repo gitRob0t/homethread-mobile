@@ -206,9 +206,7 @@ export default function EmailConnectionsScreen({
       for (const providerId of ['google', 'outlook'] as const) {
         onConnectionStateChange?.(
           providerId,
-          capabilities?.enabled === true
-          && capabilities.providers[providerId] === true
-          && connectionsResult.value.some((connection) =>
+          connectionsResult.value.some((connection) =>
             connection.provider === providerId
             && ['active', 'syncing', 'paused'].includes(connection.status)),
         );
@@ -251,11 +249,11 @@ export default function EmailConnectionsScreen({
       return;
     }
     if (!householdId) {
-      setError('Join a Coho household before connecting a mailbox.');
+      setError('Join an OutrSPACE household before connecting a mailbox.');
       return;
     }
     if (!inbox) {
-      setError('Create the Family Inbox first so Coh has a private review queue.');
+      setError('Create the Family Inbox first so Ace has a private review queue.');
       return;
     }
     if (
@@ -341,7 +339,7 @@ export default function EmailConnectionsScreen({
   function disconnectMailbox(connection: MailboxConnection) {
     Alert.alert(
       `Disconnect ${providerName(connection.provider)}?`,
-      'Coho will stop reading new email from this account. Existing Family Inbox items and approved events remain.',
+      'OutrSPACE will stop reading new email from this account. Existing Family Inbox items and approved events remain.',
       [
         { text: 'Cancel', style: 'cancel' },
         {
@@ -381,11 +379,11 @@ export default function EmailConnectionsScreen({
       return;
     }
     if (!householdId || !userId) {
-      setError('Join a Coho household before adding an email source.');
+      setError('Join an OutrSPACE household before adding an email source.');
       return;
     }
     if (!inbox) {
-      setError('Create the Family Inbox first so Coho has a private address for forwarded mail.');
+      setError('Create the Family Inbox first so OutrSPACE has a private address for forwarded mail.');
       onSetupInbox();
       return;
     }
@@ -420,7 +418,7 @@ export default function EmailConnectionsScreen({
       await Share.share({
         message:
           `Set ${source.email_address} to forward important school, appointment, travel, ticket, and activity email to ${destination}.\n\n`
-          + 'Coho keeps each message private, suggests calendar or task details, and waits for family approval before creating anything.',
+          + 'OutrSPACE keeps each message private, suggests calendar or task details, and waits for family approval before creating anything.',
       });
     } catch {
       setError(`The forwarding source is saved, but sharing did not open. Forward selected email to ${destination}.`);
@@ -462,9 +460,9 @@ export default function EmailConnectionsScreen({
       <View style={styles.hero}>
         <View style={styles.heroIcon}><Ionicons name="mail-unread" size={24} color="#fff" /></View>
         <Text style={styles.eyebrow}>EMAIL INTELLIGENCE</Text>
-        <Text style={styles.heroTitle}>Connect email. Let Coh find what matters.</Text>
+        <Text style={styles.heroTitle}>Connect email. Let Ace find what matters.</Text>
         <Text style={styles.heroText}>
-          Coh securely reads the Gmail or Outlook scope you choose, extracts dates, people, places, tasks, updates,
+          Ace securely reads the Gmail or Outlook scope you choose, extracts dates, people, places, tasks, updates,
           and cancellations, then prepares actions for family review.
         </Text>
       </View>
@@ -506,8 +504,8 @@ export default function EmailConnectionsScreen({
 
       <Text style={styles.sectionTitle}>Connect a mailbox</Text>
       <Text style={styles.sectionCopy}>
-        Sign in with Google or Microsoft, choose the smallest email scope your family needs, and let Coh
-        continuously extract event suggestions. Coho never receives your mailbox password.
+        Sign in with Google or Microsoft, choose the smallest email scope your family needs, and let Ace
+        continuously extract event suggestions. OutrSPACE never receives your mailbox password.
       </Text>
       {!canManage && <View style={styles.recommendedCard}>
         <Ionicons name="people-outline" size={19} color="#7047EE" />
@@ -539,7 +537,7 @@ export default function EmailConnectionsScreen({
             />
             <Text style={styles.setupPendingText}>
               {providerAvailable === null
-                ? `${meta.shortTitle} connection availability could not be verified. Retry when Coho is online.`
+                ? `${meta.shortTitle} connection availability could not be verified. Retry when OutrSPACE is online.`
                 : `${meta.shortTitle} direct connection setup is pending. Use forwarding below until the provider is enabled.`}
             </Text>
           </View>}
@@ -647,13 +645,13 @@ export default function EmailConnectionsScreen({
                   </Pressable>)}
                 </View>
 
-                <Text style={styles.label}>WHAT COH DOES WITH A COMPLETE EVENT</Text>
+                <Text style={styles.label}>WHAT ACE DOES WITH A COMPLETE EVENT</Text>
                 <View style={[styles.behaviorChoice, styles.behaviorChoiceActive]}>
                   <Ionicons name="checkmark-circle" size={18} color="#7047EE" />
                   <View style={styles.flex}>
                     <Text style={styles.providerTitle}>Prepare it for approval</Text>
                     <Text style={styles.muted}>
-                      Coh extracts the event, cancellation, change, or task and puts a one-tap action in Family Inbox.
+                      Ace extracts the event, cancellation, change, or task and puts a one-tap action in Family Inbox.
                       Calendar writing stays human-approved so your family controls every change.
                     </Text>
                   </View>
@@ -737,7 +735,7 @@ export default function EmailConnectionsScreen({
 
       <Text style={styles.sectionTitle}>Forwarding fallback</Text>
       <Text style={styles.sectionCopy}>
-        For iCloud, Yahoo, and other providers without direct Coho authorization, forward only selected family email
+        For iCloud, Yahoo, and other providers without direct OutrSPACE authorization, forward only selected family email
         to the private Family Inbox. Forwarding is not a connected mailbox and does not scan your account.
       </Text>
       <View style={styles.formCard}>
@@ -828,7 +826,7 @@ export default function EmailConnectionsScreen({
         <Ionicons name="lock-closed" size={19} color="#19A47B" />
         <Text style={styles.privacyText}>
           Raw email and attachments are limited to household owners and adult admins in the review queue.
-          Approved events and tasks become visible to the family. Coho never treats instructions inside an email as authorization.
+          Approved events and tasks become visible to the family. OutrSPACE never treats instructions inside an email as authorization.
         </Text>
       </View>
     </ScrollView>

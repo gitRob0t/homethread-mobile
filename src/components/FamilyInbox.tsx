@@ -123,7 +123,7 @@ export default function FamilyInboxScreen({
       return;
     }
     void loadReview(selected.id).catch((nextError) => {
-      setError(nextError instanceof Error ? nextError.message : 'Coh review details could not be loaded.');
+      setError(nextError instanceof Error ? nextError.message : 'Ace review details could not be loaded.');
     });
   }, [selected?.id, householdId]);
 
@@ -156,7 +156,7 @@ export default function FamilyInboxScreen({
     if (!inbox) return;
     const address = inboxAddress(inbox);
     await Share.share({
-      message: `Send school, appointment, travel, and activity emails to ${address}. Coho will place them in our private review queue.`,
+      message: `Send school, appointment, travel, and activity emails to ${address}. OutrSPACE will place them in our private review queue.`,
     });
   }
 
@@ -185,10 +185,10 @@ export default function FamilyInboxScreen({
       setActions(result.actions);
       await load();
       onNotice(result.actions.length
-        ? `Coh found ${result.actions.length} proposed action${result.actions.length === 1 ? '' : 's'}`
-        : 'Coh finished the review. Nothing was created.');
+        ? `Ace found ${result.actions.length} proposed action${result.actions.length === 1 ? '' : 's'}`
+        : 'Ace finished the review. Nothing was created.');
     } catch (nextError) {
-      setError(nextError instanceof Error ? nextError.message : 'Coh could not extract this email.');
+      setError(nextError instanceof Error ? nextError.message : 'Ace could not extract this email.');
     } finally {
       setBusy(false);
     }
@@ -261,7 +261,7 @@ export default function FamilyInboxScreen({
         extracted_data: { ...(row.extracted_data ?? {}), sender_trusted: trusted },
       } : row));
       onNotice(trusted
-        ? 'Sender marked trusted. This improves Coh’s context; every proposed action still requires review.'
+        ? 'Sender marked trusted. This improves Ace’s context; every proposed action still requires review.'
         : 'Sender removed from the trusted list.');
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : 'The sender rule could not be changed.');
@@ -291,7 +291,7 @@ export default function FamilyInboxScreen({
         </View>
 
         {!householdId || !userId ? (
-          <Empty title="Join a household first" text="A family inbox belongs to one private Coho household." styles={styles} />
+          <Empty title="Join a household first" text="A family inbox belongs to one private OutrSPACE household." styles={styles} />
         ) : !inbox ? (
           <View style={styles.card}>
             <Text style={styles.cardTitle}>Choose your family address</Text>
@@ -318,7 +318,7 @@ export default function FamilyInboxScreen({
               <View style={styles.flex}>
                 <Text style={styles.eyebrow}>{inbox.status === 'active' ? 'RECEIVING' : 'RESERVED'}</Text>
                 <Text selectable style={styles.address}>{inboxAddress(inbox)}</Text>
-                <Text style={styles.meta}>Forward only what the family wants Coho to organize.</Text>
+                <Text style={styles.meta}>Forward only what the family wants Ace to organize.</Text>
               </View>
               <View style={[styles.statusDot, inbox.status === 'active' && styles.statusDotActive]} />
             </View>
@@ -360,12 +360,12 @@ export default function FamilyInboxScreen({
             </View>
             <Text style={styles.sender}>{selected.sender || 'Unknown sender'}</Text>
             <Text style={styles.meta}>{formatDate(selected.received_at)} · {selected.status.replace('_', ' ')}</Text>
-            {(selected.extraction_status === 'processing' || selected.status === 'processing') && <View style={styles.processingCard}><ActivityIndicator size="small" color="#7047EE" /><View style={styles.flex}><Text style={styles.cardTitle}>Coh is reading this safely</Text><Text style={styles.meta}>Images, PDFs, calendar files, and voice notes are processed inside the private review flow.</Text></View></View>}
+            {(selected.extraction_status === 'processing' || selected.status === 'processing') && <View style={styles.processingCard}><ActivityIndicator size="small" color="#7047EE" /><View style={styles.flex}><Text style={styles.cardTitle}>Ace is reading this safely</Text><Text style={styles.meta}>Images, PDFs, calendar files, and voice notes are processed inside the private review flow.</Text></View></View>}
             {!!selected.processing_error && <View style={styles.errorCard}><Ionicons name="warning" size={18} color="#D64545" /><Text style={styles.errorText}>{selected.processing_error}</Text></View>}
-            {!!extraction?.summary && <View style={styles.summaryCard}><Text style={styles.eyebrow}>COH SUMMARY · {Math.round((extraction.confidence ?? 0) * 100)}% CONFIDENCE</Text><Text style={styles.summaryText}>{extraction.summary}</Text></View>}
-            {!!extraction?.missing_questions?.length && <View style={styles.questionCard}><Ionicons name="help-circle" size={19} color="#FF9F1C" /><View style={styles.flex}><Text style={styles.cardTitle}>Coh needs a detail</Text>{extraction.missing_questions.map((question) => <Text key={question} style={styles.questionText}>• {question}</Text>)}</View></View>}
+            {!!extraction?.summary && <View style={styles.summaryCard}><Text style={styles.eyebrow}>ACE SUMMARY · {Math.round((extraction.confidence ?? 0) * 100)}% CONFIDENCE</Text><Text style={styles.summaryText}>{extraction.summary}</Text></View>}
+            {!!extraction?.missing_questions?.length && <View style={styles.questionCard}><Ionicons name="help-circle" size={19} color="#FF9F1C" /><View style={styles.flex}><Text style={styles.cardTitle}>Ace needs a detail</Text>{extraction.missing_questions.map((question) => <Text key={question} style={styles.questionText}>• {question}</Text>)}</View></View>}
             {!!selected.sender && <View style={styles.trustRow}>
-              <View style={styles.flex}><Text style={styles.cardTitle}>Trusted sender</Text><Text style={styles.meta}>This improves Coh’s context only. It never authorizes an automatic calendar or task write.</Text></View>
+              <View style={styles.flex}><Text style={styles.cardTitle}>Trusted sender</Text><Text style={styles.meta}>This improves Ace’s context only. It never authorizes an automatic calendar or task write.</Text></View>
               <Switch
                 disabled={busy}
                 value={selected.extracted_data?.sender_trusted === true}
@@ -394,9 +394,9 @@ export default function FamilyInboxScreen({
             </>}
             {activeStatuses.has(selected.status) && actions.length === 0 ? <View style={styles.reviewActions}>
               <Pressable disabled={busy} onPress={() => reject(selected)} style={styles.rejectButton}><Text style={styles.rejectText}>Reject</Text></Pressable>
-              <Pressable disabled={busy || selected.extraction_status === 'processing'} onPress={() => reviewWithCoh(selected)} style={styles.cohButton}>{busy || selected.extraction_status === 'processing' ? <ActivityIndicator color="#fff" /> : <><Ionicons name="sparkles" size={17} color="#fff" /><Text style={styles.primaryText}>{selected.extraction_status === 'failed' ? 'Retry with Coh' : 'Extract with Coh'}</Text></>}</Pressable>
+              <Pressable disabled={busy || selected.extraction_status === 'processing'} onPress={() => reviewWithCoh(selected)} style={styles.cohButton}>{busy || selected.extraction_status === 'processing' ? <ActivityIndicator color="#fff" /> : <><Ionicons name="sparkles" size={17} color="#fff" /><Text style={styles.primaryText}>{selected.extraction_status === 'failed' ? 'Retry with Ace' : 'Extract with Ace'}</Text></>}</Pressable>
             </View> : !activeStatuses.has(selected.status) && <View style={styles.historyStatus}><Ionicons name={selected.status === 'rejected' ? 'close-circle' : 'checkmark-circle'} size={19} color={selected.status === 'rejected' ? '#D64545' : '#19A47B'} /><Text style={styles.cardTitle}>This email was {selected.status}.</Text></View>}
-            <Pressable onPress={() => onAskCoh(buildReviewPrompt(selected))} style={styles.askCohButton}><Ionicons name="chatbubble-ellipses" size={16} color="#7047EE" /><Text style={styles.askCohText}>Discuss this email privately with Coh</Text></Pressable>
+            <Pressable onPress={() => onAskCoh(buildReviewPrompt(selected))} style={styles.askCohButton}><Ionicons name="chatbubble-ellipses" size={16} color="#7047EE" /><Text style={styles.askCohText}>Discuss this email privately with Ace</Text></Pressable>
           </ScrollView>}
         </KeyboardAvoidingView>
       </Modal>

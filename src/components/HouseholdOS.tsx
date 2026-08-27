@@ -81,10 +81,12 @@ export function CalendarConnectionScreen({
   userId,
   onNotice,
   onConnected,
+  onConnectionStateChange,
   onSynced,
   initialProvider = 'device',
 }: CommonProps & {
   onConnected: (source: CalendarProvider | 'device') => void;
+  onConnectionStateChange?: (source: CalendarProvider, connected: boolean) => void;
   onSynced?: () => void | Promise<void>;
   initialProvider?: CalendarProvider | 'device';
 }) {
@@ -110,9 +112,13 @@ export function CalendarConnectionScreen({
     ]);
     setCloudConnections(connections);
     setConflicts(conflicts);
-    connections
-      .filter((connection) => connection.status === 'active')
-      .forEach((connection) => onConnected(connection.provider));
+    for (const provider of ['google', 'outlook'] as const) {
+      const connected = connections.some((connection) =>
+        connection.provider === provider
+        && ['active', 'syncing', 'paused'].includes(connection.status));
+      onConnectionStateChange?.(provider, connected);
+      if (connected) onConnected(provider);
+    }
   }
 
   useEffect(() => {
@@ -125,7 +131,7 @@ export function CalendarConnectionScreen({
       .catch(() => undefined);
     void loadCloudConnections().catch(() => undefined);
     const subscription = Linking.addEventListener('url', ({ url }) => {
-      if (/^(?:coho|homethread):\/\/calendar-connected\//i.test(url)) {
+      if (/^(?:coho|homethread|outrspace):\/\/calendar-connected\//i.test(url)) {
         setTimeout(() => void loadCloudConnections().catch(() => undefined), 700);
       }
     });
@@ -134,7 +140,7 @@ export function CalendarConnectionScreen({
 
   async function connectProvider(provider: CalendarProvider) {
     if (!householdId) {
-      setError('Join a Coho household before connecting a calendar.');
+      setError('Join an OutrSPACE household before connecting a calendar.');
       return;
     }
     setBusy(true);
@@ -171,7 +177,7 @@ export function CalendarConnectionScreen({
         defaultWriteCalendarId: connection.default_write_calendar_id,
         syncEnabled: connection.sync_enabled,
       });
-      onNotice('Calendar choices saved. Coho is syncing changes both ways.');
+      onNotice('Calendar choices saved. OutrSPACE is syncing changes both ways.');
       await loadCloudConnections();
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : 'Calendar choices could not be saved.');
@@ -221,8 +227,8 @@ export function CalendarConnectionScreen({
       await resolveCalendarConflict(conflict.id, resolution);
       await loadCloudConnections();
       onNotice(resolution === 'keep_local'
-        ? 'The Coho version now matches the connected calendar.'
-        : 'The connected calendar version is now in Coho.');
+        ? 'The OutrSPACE version now matches the connected calendar.'
+        : 'The connected calendar version is now in OutrSPACE.');
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : 'The calendar conflict could not be resolved.');
     } finally {
@@ -261,7 +267,7 @@ export function CalendarConnectionScreen({
 
   async function sync() {
     if (!householdId || !userId) {
-      setError('Join a Coho household before importing a calendar.');
+      setError('Join an OutrSPACE household before importing a calendar.');
       return;
     }
     if (!settings.selectedCalendarIds.length) {
@@ -287,7 +293,7 @@ export function CalendarConnectionScreen({
       onNotice(
         `${result.synced} event${result.synced === 1 ? '' : 's'} synced`
         + (result.removed
-          ? ` · ${result.removed} deleted event${result.removed === 1 ? '' : 's'} removed from Coho`
+          ? ` · ${result.removed} deleted event${result.removed === 1 ? '' : 's'} removed from OutrSPACE`
           : ''),
       );
     } catch (nextError) {
@@ -303,7 +309,7 @@ export function CalendarConnectionScreen({
     await saveDeviceCalendarSettings(next);
     if (calendarId) onConnected('device');
     onNotice(calendarId
-      ? 'Approved Coho events will also be saved to that iPhone calendar'
+      ? 'Approved OutrSPACE events will also be saved to that iPhone calendar'
       : 'iPhone calendar write-back is off');
   }
 
@@ -344,7 +350,7 @@ export function CalendarConnectionScreen({
 
       {initialProvider !== 'device' && <>
       <Text style={styles.sectionTitle}>Secure two-way connection</Text>
-      <Text style={styles.meta}>Provider tokens stay encrypted on the server. Imported events keep their source and Coho detects simultaneous edits instead of silently overwriting them.</Text>
+      <Text style={styles.meta}>Provider tokens stay encrypted on the server. Imported events keep their source and OutrSPACE detects simultaneous edits instead of silently overwriting them.</Text>
       {([initialProvider] as CalendarProvider[]).map((provider) => {
         const providerConnections = cloudConnections.filter((connection) =>
           connection.provider === provider && connection.status !== 'disconnected');
@@ -373,9 +379,9 @@ export function CalendarConnectionScreen({
             <View style={styles.flex}><Text style={styles.rowTitle}>{calendar.name}</Text><Text style={styles.meta}>{calendar.primary ? 'Primary · ' : ''}{calendar.canWrite === false ? 'Read only' : 'Read and write'}</Text></View>
             <Ionicons name={calendar.selected ? 'checkmark-circle' : 'ellipse-outline'} size={22} color={calendar.selected ? '#19A47B' : styles.icon.color} />
           </Pressable>)}
-          <Text style={styles.label}>WRITE NEW COHO EVENTS TO</Text>
+          <Text style={styles.label}>WRITE NEW OUTRSPACE EVENTS TO</Text>
           <View style={styles.chips}>
-            <Pressable onPress={() => setCloudConnections((current) => current.map((item) => item.id === connection.id ? { ...item, default_write_calendar_id: null } : item))} style={[styles.chip, !connection.default_write_calendar_id && styles.chipActive]}><Text style={[styles.chipText, !connection.default_write_calendar_id && styles.chipTextActive]}>Coho only</Text></Pressable>
+            <Pressable onPress={() => setCloudConnections((current) => current.map((item) => item.id === connection.id ? { ...item, default_write_calendar_id: null } : item))} style={[styles.chip, !connection.default_write_calendar_id && styles.chipActive]}><Text style={[styles.chipText, !connection.default_write_calendar_id && styles.chipTextActive]}>OutrSPACE only</Text></Pressable>
             {connection.selected_calendars.filter((calendar) => calendar.canWrite !== false).map((calendar) => <Pressable key={`write-${calendar.id}`} onPress={() => setCloudConnections((current) => current.map((item) => item.id === connection.id ? { ...item, default_write_calendar_id: calendar.id } : item))} style={[styles.chip, connection.default_write_calendar_id === calendar.id && styles.chipActive]}><Text style={[styles.chipText, connection.default_write_calendar_id === calendar.id && styles.chipTextActive]}>{calendar.name}</Text></Pressable>)}
           </View>
           {!!connection.last_error && <Text style={styles.error}>{connection.last_error}</Text>}
@@ -408,11 +414,11 @@ export function CalendarConnectionScreen({
               </View>
               <View style={styles.flex}>
                 <Text style={styles.rowTitle}>{localVersion.title || providerVersion.title || 'Calendar event'}</Text>
-                <Text style={styles.meta}>Edited in both Coho and {providerName}</Text>
+                <Text style={styles.meta}>Edited in both OutrSPACE and {providerName}</Text>
               </View>
             </View>
             <View style={styles.versionCard}>
-              <Text style={styles.versionLabel}>COHO VERSION</Text>
+              <Text style={styles.versionLabel}>OUTRSPACE VERSION</Text>
               <Text style={styles.versionTitle}>{localVersion.title}</Text>
               <Text style={styles.meta}>{localVersion.when}</Text>
               {!!localVersion.location && <Text style={styles.meta}>{localVersion.location}</Text>}
@@ -426,7 +432,7 @@ export function CalendarConnectionScreen({
             <View style={styles.actionGrid}>
               <Pressable disabled={busy} onPress={() => resolveConflict(conflict, 'keep_local')} style={[styles.primaryButton, styles.flex]}>
                 <Ionicons name="sparkles" size={16} color="#fff" />
-                <Text style={styles.primaryButtonText}>Keep Coho</Text>
+                <Text style={styles.primaryButtonText}>Keep OutrSPACE</Text>
               </Pressable>
               <Pressable disabled={busy} onPress={() => resolveConflict(conflict, 'keep_provider')} style={[styles.secondaryButton, styles.flex]}>
                 <Ionicons name="cloud-done-outline" size={17} color="#2257F4" />
@@ -483,10 +489,10 @@ export function CalendarConnectionScreen({
         </Pressable>
         {!!settings.lastSyncedAt && <Text style={styles.caption}>Last synced {relativeTime(settings.lastSyncedAt)}</Text>}
 
-        <Text style={styles.sectionTitle}>Write approved Coho events</Text>
+        <Text style={styles.sectionTitle}>Write approved OutrSPACE events</Text>
         <Pressable onPress={() => chooseWriteBack(null)} style={[styles.row, !settings.writeBackCalendarId && styles.rowSelected]}>
           <Ionicons name="ban-outline" size={21} color={dark ? '#A8B1C4' : '#727D94'} />
-          <View style={styles.flex}><Text style={styles.rowTitle}>Do not write back</Text><Text style={styles.meta}>Keep Coho events inside the family calendar only</Text></View>
+          <View style={styles.flex}><Text style={styles.rowTitle}>Do not write back</Text><Text style={styles.meta}>Keep OutrSPACE events inside the family calendar only</Text></View>
           {!settings.writeBackCalendarId && <Ionicons name="checkmark-circle" size={22} color="#19A47B" />}
         </Pressable>
         {writable.map((calendar) => (
@@ -501,7 +507,7 @@ export function CalendarConnectionScreen({
       {!!error && <Text style={styles.error}>{error}</Text>}
       <View style={styles.privacyCard}>
         <Ionicons name="lock-closed" size={19} color="#19A47B" />
-        <Text style={styles.privacyText}>Your iPhone calendar selections stay on this phone; the events you import are shared with your Coho household. Direct provider grants are encrypted and revocable, and imported events retain their source label. Review the calendars and provider permissions you select before syncing.</Text>
+        <Text style={styles.privacyText}>Your iPhone calendar selections stay on this phone; the events you import are shared with your OutrSPACE household. Direct provider grants are encrypted and revocable, and imported events retain their source label. Review the calendars and provider permissions you select before syncing.</Text>
       </View>
     </ScrollView>
   );
@@ -664,7 +670,7 @@ export function FamilyPlacesScreen({ dark, householdId, userId, onNotice }: Comm
         <Pressable disabled={!placeName.trim() || busy} onPress={addPlace} style={[styles.primaryButton, (!placeName.trim() || busy) && styles.disabled]}><Text style={styles.primaryButtonText}>Add current location</Text></Pressable>
       </View>
       {!!error && <Text style={styles.error}>{error}</Text>}
-      <View style={styles.privacyCard}><Ionicons name="shield-checkmark" size={19} color="#19A47B" /><Text style={styles.privacyText}>Coho uses the consenting person’s phone location. It does not access Apple Find My, AirTags, or another person’s device without their permission.</Text></View>
+      <View style={styles.privacyCard}><Ionicons name="shield-checkmark" size={19} color="#19A47B" /><Text style={styles.privacyText}>OutrSPACE uses the consenting person’s phone location. It does not access Apple Find My, AirTags, or another person’s device without their permission.</Text></View>
     </ScrollView>
   );
 }
@@ -762,14 +768,14 @@ export function FoodHubScreen({ dark, householdId, userId, onNotice, onAskCoh }:
     <ScrollView contentContainerStyle={styles.page} keyboardShouldPersistTaps="handled">
       <View style={[styles.hero, { backgroundColor: '#D7550D' }]}>
         <Ionicons name="restaurant" size={27} color="#fff" />
-        <Text style={styles.heroEyebrow}>COH HOME CHEF</Text>
+        <Text style={styles.heroEyebrow}>ACE HOME CHEF</Text>
         <Text style={styles.heroTitle}>Plan once. Shop once. Eat better.</Text>
-        <Text style={styles.heroText}>This week and the grocery list stay synced across the household. Coh can turn your preferences into a plan after you approve it.</Text>
+        <Text style={styles.heroText}>This week and the grocery list stay synced across the household. Ace can turn your preferences into a plan after you approve it.</Text>
       </View>
 
       <View style={styles.actionGrid}>
         <Pressable onPress={() => onAskCoh('Plan seven family dinners for the next week. Ask me about allergies, budget, schedule, leftovers, and foods the family dislikes before proposing the plan.')} style={[styles.actionTile, { backgroundColor: '#7047EE18' }]}>
-          <Ionicons name="sparkles" size={23} color="#7047EE" /><Text style={styles.actionTitle}>Plan with Coh</Text><Text style={styles.meta}>Interactive 7-day meal plan</Text>
+          <Ionicons name="sparkles" size={23} color="#7047EE" /><Text style={styles.actionTitle}>Plan with Ace</Text><Text style={styles.meta}>Interactive 7-day meal plan</Text>
         </Pressable>
         <View style={[styles.actionTile, { backgroundColor: '#19A47B18' }]}>
           <Ionicons name="cart" size={23} color="#168866" /><Text style={styles.actionTitle}>{groceries.filter((item) => !item.checked).length} to buy</Text><Text style={styles.meta}>Live household list</Text>
@@ -795,7 +801,7 @@ export function FoodHubScreen({ dark, householdId, userId, onNotice, onAskCoh }:
       </View>
 
       <Text style={styles.sectionTitle}>Shared grocery list</Text>
-      {groceries.length === 0 ? <Empty icon="basket-outline" title="The list is empty" text="Add the first item or ask Coh to build it from the meal plan." styles={styles} /> : groceries.map((item) => (
+      {groceries.length === 0 ? <Empty icon="basket-outline" title="The list is empty" text="Add the first item or ask Ace to build it from the meal plan." styles={styles} /> : groceries.map((item) => (
         <Pressable key={item.id} onPress={() => toggleItem(item)} style={[styles.row, item.checked && styles.checkedRow]}>
           <Ionicons name={item.checked ? 'checkmark-circle' : 'ellipse-outline'} size={23} color={item.checked ? '#19A47B' : '#2257F4'} />
           <View style={styles.flex}><Text style={[styles.rowTitle, item.checked && styles.struck]}>{item.name}</Text><Text style={styles.meta}>{[item.quantity, item.category].filter(Boolean).join(' · ')}</Text></View>
@@ -901,8 +907,8 @@ export function TravelHubScreen({ dark, userId, onNotice, onAskCoh }: CommonProp
       const result = await createTravelInvitation(selectedId, inviteEmail);
       if (result?.invitation_token) {
         await Share.share({
-          title: 'Join our Coho trip',
-          message: `Join our private trip space on Coho: homethread://trip-invite/${result.invitation_token}`,
+          title: 'Join our OutrSPACE trip',
+          message: `Join our private trip space on OutrSPACE: homethread://trip-invite/${result.invitation_token}`,
         });
       }
       setInviteEmail('');
@@ -932,7 +938,7 @@ export function TravelHubScreen({ dark, userId, onNotice, onAskCoh }: CommonProp
           <Ionicons name="people-circle" size={37} color="#7047EE" />
         </View>
         <View style={styles.actionGrid}>
-          <Pressable onPress={() => onAskCoh(`Help plan our trip to ${selected.destination || selected.title}. Ask who is going, ages, budget, dates, food preferences, and pace before proposing activities and restaurants.`)} style={[styles.actionTile, { backgroundColor: '#7047EE18' }]}><Ionicons name="sparkles" size={22} color="#7047EE" /><Text style={styles.actionTitle}>Plan with Coh</Text><Text style={styles.meta}>Build an itinerary together</Text></Pressable>
+          <Pressable onPress={() => onAskCoh(`Help plan our trip to ${selected.destination || selected.title}. Ask who is going, ages, budget, dates, food preferences, and pace before proposing activities and restaurants.`)} style={[styles.actionTile, { backgroundColor: '#7047EE18' }]}><Ionicons name="sparkles" size={22} color="#7047EE" /><Text style={styles.actionTitle}>Plan with Ace</Text><Text style={styles.meta}>Build an itinerary together</Text></Pressable>
           <Pressable onPress={() => openRestaurantSearch(selected.destination || selected.title)} style={[styles.actionTile, { backgroundColor: '#FF7A2E18' }]}><Ionicons name="restaurant" size={22} color="#D7550D" /><Text style={styles.actionTitle}>Find a table</Text><Text style={styles.meta}>Search real OpenTable listings</Text></Pressable>
         </View>
 
