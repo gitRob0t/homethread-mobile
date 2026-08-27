@@ -80,7 +80,7 @@ function AuthScreen() {
     try {
       if (mode === 'signup') {
         const result = await signUp(email, password, name);
-        if (!result.session) setMessage('Check your email to confirm your HomeThread account.');
+        if (!result.session) setMessage('Check your email to confirm your OutrSPACE account.');
       } else {
         await signIn(email, password);
       }
@@ -115,7 +115,7 @@ function AuthScreen() {
           <Text style={styles.title}>{mode === 'signin' ? 'Welcome home' : 'Start your family thread'}</Text>
           <Text style={styles.subtitle}>
             {mode === 'signin'
-              ? 'Sign in to see everything your family shares.'
+              ? 'Sign in to see everything your family shares in OutrSPACE.'
               : 'One calm place for schedules, chores, notes, and messages.'}
           </Text>
 
@@ -156,7 +156,7 @@ function AuthScreen() {
 
           {mode === 'signin' && <Pressable onPress={forgotPassword}><Text style={styles.textButton}>Forgot password?</Text></Pressable>}
           <Pressable onPress={() => { setMode(mode === 'signin' ? 'signup' : 'signin'); setMessage(''); }}>
-            <Text style={styles.switchText}>{mode === 'signin' ? 'New to HomeThread? Create an account' : 'Already have an account? Sign in'}</Text>
+            <Text style={styles.switchText}>{mode === 'signin' ? 'New to OutrSPACE? Create an account' : 'Already have an account? Sign in'}</Text>
           </Pressable>
         </View>
       </KeyboardAvoidingView>
@@ -213,7 +213,7 @@ function BrandMark() {
   return (
     <View style={styles.brandRow}>
       <View style={styles.logo}><Text style={styles.logoText}>⌂</Text></View>
-      <Text style={styles.brand}>HomeThread</Text>
+      <Text style={styles.brand}>OutrSPACE</Text>
     </View>
   );
 }

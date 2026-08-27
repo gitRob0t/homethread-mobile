@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "HomeThread",
+    "name": "OutrSPACE",
     "slug": "homethread",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -12,7 +12,7 @@
       "bundleIdentifier": "com.homethread.family",
       "buildNumber": "1",
       "infoPlist": {
-        "NSUserNotificationsUsageDescription": "HomeThread uses notifications for family reminders, upcoming events, and daily recaps."
+        "NSUserNotificationsUsageDescription": "OutrSPACE uses notifications for family reminders, upcoming events, and daily recaps."
       }
     },
     "android": {
