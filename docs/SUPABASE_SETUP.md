@@ -1,13 +1,14 @@
-# Supabase setup
+# Coho Supabase setup
 
-HomeThread uses Supabase for authentication, household-scoped data, realtime synchronization, and server-side automation foundations.
+Coho uses Supabase for authentication, household-scoped data, realtime synchronization, Edge Functions, and scheduled household briefings.
 
 ## Create the project
 
-1. Create a Supabase project for HomeThread.
-2. In SQL Editor, run the migrations in `supabase/migrations` in filename order.
-3. Enable email/password authentication. Enable Sign in with Apple before production.
-4. Add the app's redirect scheme: `homethread://auth/callback`.
+1. Create or select the Coho Supabase project.
+2. Link the CLI and run `npm run deploy:supabase` so every migration is applied
+   once and every Edge Function is deployed with its intended gateway mode.
+3. Enable email/password authentication. Enable Sign in with Apple before public production.
+4. Add the app's redirect scheme: `homethread://auth/callback` (the legacy scheme remains for installed-build continuity).
 5. Copy the project URL and publishable key into local environment variables.
 
 ```env
@@ -15,23 +16,23 @@ EXPO_PUBLIC_SUPABASE_URL=https://YOUR_PROJECT.supabase.co
 EXPO_PUBLIC_SUPABASE_ANON_KEY=YOUR_PUBLISHABLE_KEY
 ```
 
-Never put the service-role key, OAuth client secrets, email-provider secrets, or Skylight credentials in the mobile app.
+Never put the service-role key, OpenAI key, provider client secrets, email-provider secrets, webhook signing secrets, or payment credentials in the mobile app.
 
 ## Security model
 
 Every shared record includes a `household_id`. Row Level Security checks authenticated membership for every read or write. Only household owners and admins can manage invitations and membership.
 
-Invitation acceptance and household creation should be implemented as server-side database functions or Edge Functions so membership changes remain atomic and cannot be forged by the client.
+Invitation acceptance, household creation, inbox reservation, and membership changes use server-side database functions so they remain atomic and cannot be forged by the client.
 
-## Next application milestone
+## Production activation
 
-The next client milestone connects:
+After configuring server-only secrets, follow
+[DEPLOYMENT.md](DEPLOYMENT.md). Then configure:
 
-- email/password and Sign in with Apple
-- household onboarding
-- invitation acceptance
-- realtime events, chores, notes, and messages
-- offline cache and conflict handling
-- push-token registration
+- the Resend receiving domain and `email.received` webhook;
+- the verified transactional From address;
+- the Supabase Cron invocation for household briefings;
+- OpenAI and Instacart provider keys;
+- EAS/APNs credentials for production push delivery.
 
-Production email, provider OAuth, daily recaps, and integrations should run through Edge Functions or a dedicated backend worker.
+The app reports integrations as connected only after their real provider configuration succeeds.

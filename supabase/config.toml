@@ -1,0 +1,20 @@
+[functions.send-household-invite]
+# Invitation landing pages are opened from email and text before the recipient
+# has a Coho session. POST requests still validate the caller's bearer token
+# inside the function before an invitation can be created.
+verify_jwt = false
+
+[functions.mailbox-oauth]
+# Google and Microsoft redirect a browser to this public callback. Authenticated
+# start/settings/disconnect requests validate the user's bearer token in code.
+verify_jwt = false
+
+[functions.mailbox-sync]
+# The worker accepts either a verified user/service bearer token or the
+# independently generated x-coho-scheduler-secret.
+verify_jwt = false
+
+[functions.mailbox-webhook]
+# Provider callbacks cannot carry a Supabase user JWT. The function validates
+# Gmail's URL secret or Microsoft Graph clientState before scheduling a sync.
+verify_jwt = false
