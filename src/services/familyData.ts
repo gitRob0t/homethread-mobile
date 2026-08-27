@@ -85,12 +85,13 @@ export async function listChores(householdId: string) {
   return (data ?? []) as FamilyChore[];
 }
 
-export async function createChore(householdId: string, userId: string, title: string, details = '') {
+export async function createChore(householdId: string, userId: string, title: string, details = '', assignedTo: string | null = null) {
   const { error } = await supabase.from('chores').insert({
     household_id: householdId,
     created_by: userId,
     title: title.trim(),
     details: details.trim() || null,
+    assigned_to: assignedTo,
   });
   if (error) throw error;
 }
