@@ -15,7 +15,7 @@ import {
 } from 'react-native';
 
 import { supabase } from '../lib/supabase';
-import { completeAuthRedirect, resetPassword, signIn, signOut, signUp } from '../services/auth';
+import { completeAuthRedirect, resetPassword, signIn, signInWithGoogle, signOut, signUp } from '../services/auth';
 import { acceptHouseholdInvitation, createHousehold, listHouseholds } from '../services/households';
 import { acceptTravelInvitation } from '../services/householdOperations';
 
@@ -176,6 +176,18 @@ function AuthScreen() {
     }
   }
 
+  async function googleSignIn() {
+    setBusy(true);
+    setMessage('');
+    try {
+      await signInWithGoogle();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Google sign-in could not be completed.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <SafeAreaView style={styles.safe}>
       <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.page}>
@@ -222,6 +234,10 @@ function AuthScreen() {
           <Pressable disabled={busy} onPress={submit} style={[styles.primaryButton, busy && styles.disabled]}>
             {busy ? <ActivityIndicator color="#fff" /> : <Text style={styles.primaryText}>{mode === 'signin' ? 'Sign in' : 'Create account'}</Text>}
           </Pressable>
+
+          {mode === 'signin' && <Pressable disabled={busy} onPress={googleSignIn} style={[styles.googleButton, busy && styles.disabled]}>
+            <Text style={styles.googleText}>Continue with Google</Text>
+          </Pressable>}
 
           {mode === 'signin' && <Pressable onPress={forgotPassword}><Text style={styles.textButton}>Forgot password?</Text></Pressable>}
           <Pressable onPress={() => { setMode(mode === 'signin' ? 'signup' : 'signin'); setMessage(''); }}>
@@ -303,6 +319,8 @@ const styles = StyleSheet.create({
   primaryButton: { minHeight: 52, borderRadius: 15, backgroundColor: '#2257F4', alignItems: 'center', justifyContent: 'center', marginTop: 3 },
   disabled: { opacity: 0.6 },
   primaryText: { color: '#FFFFFF', fontSize: 14, fontWeight: '800' },
+  googleButton: { minHeight: 52, borderRadius: 15, borderWidth: 1, borderColor: '#DDE1EA', backgroundColor: '#FFFFFF', alignItems: 'center', justifyContent: 'center', marginTop: 10 },
+  googleText: { color: '#182033', fontSize: 14, fontWeight: '800' },
   textButton: { color: '#2257F4', textAlign: 'center', fontWeight: '700', fontSize: 12, marginTop: 16 },
   switchText: { color: '#687188', textAlign: 'center', fontWeight: '700', fontSize: 12, marginTop: 22 },
 });

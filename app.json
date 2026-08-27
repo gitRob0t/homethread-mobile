@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "Coho",
+    "name": "OutrSPACE",
     "slug": "homethread",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -16,8 +16,8 @@
       "buildNumber": "1",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false,
-        "NSMicrophoneUsageDescription": "Coho uses the microphone only when you choose to send Coh a voice request.",
-        "NSUserNotificationsUsageDescription": "Coho uses notifications for family reminders, upcoming events, daily recaps, and Family Places alerts.",
+        "NSMicrophoneUsageDescription": "OutrSPACE uses the microphone only when you choose to send Ace a voice request.",
+        "NSUserNotificationsUsageDescription": "OutrSPACE uses notifications for family reminders, upcoming events, daily recaps, and Family Places alerts.",
         "NSCalendarsFullAccessUsageDescription": "Coho reads only the iPhone calendars you select so your household can coordinate approved events.",
         "NSCalendarsWriteOnlyAccessUsageDescription": "Coho can add events you approve to the iPhone calendar you choose."
       }
@@ -71,7 +71,8 @@
           }
         }
       ],
-      "@react-native-community/datetimepicker"
+      "@react-native-community/datetimepicker",
+      "expo-web-browser"
     ]
   }
 }

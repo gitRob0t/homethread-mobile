@@ -1,7 +1,10 @@
 import { supabase } from '../lib/supabase';
 import { clearLocationTrackingForSignOut } from './familyLocation';
+import * as WebBrowser from 'expo-web-browser';
 
 export const authCallbackUrl = 'homethread://auth/callback';
+
+WebBrowser.maybeCompleteAuthSession();
 
 export async function signUp(email: string, password: string, displayName: string) {
   const { data, error } = await supabase.auth.signUp({
@@ -23,6 +26,22 @@ export async function signIn(email: string, password: string) {
   });
   if (error) throw error;
   return data;
+}
+
+export async function signInWithGoogle() {
+  const { data, error } = await supabase.auth.signInWithOAuth({
+    provider: 'google',
+    options: {
+      redirectTo: authCallbackUrl,
+      skipBrowserRedirect: true,
+    },
+  });
+  if (error) throw error;
+  if (!data.url) throw new Error('Google sign-in could not be started.');
+
+  const result = await WebBrowser.openAuthSessionAsync(data.url, authCallbackUrl);
+  if (result.type === 'success' && result.url) await completeAuthRedirect(result.url);
+  if (result.type === 'dismiss' || result.type === 'cancel') throw new Error('Google sign-in was canceled.');
 }
 
 export async function signOut() {
